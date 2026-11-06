@@ -10,7 +10,9 @@ For each performance, cut into non-overlapping eval windows with all quality fil
      notes (onset < 0) are only ever extra copies;
   3. each window's prompt equals what inference would feed: ``prompt_from_output`` of all earlier
      windows' targets;
-  4. some windows and whole stitched pieces render to MusicXML.
+  4. some windows and whole stitched pieces render to MusicXML;
+  5. each window's input notes match its target's pitches (median F1 >= 0.85, at most 5% of
+     windows below 0.6), i.e. the time map puts performed notes with the right score notes.
 """
 from __future__ import annotations
 
@@ -151,6 +153,10 @@ def main():
     p = counts["performances"]
     assert p and counts["stitch_ok"] == p and counts["notes_once"] == p
     assert counts["prompts_ok"] == counts["prompts_checked"]
+    # inputs must belong with their targets (catches time-map / alignment errors that the
+    # structural checks above cannot see)
+    assert np.median(f1s) >= 0.85, "window inputs don't match their targets"
+    assert np.mean(np.array(f1s) < 0.6) <= 0.05, "too many windows whose inputs don't match the target"
 
 
 if __name__ == "__main__":

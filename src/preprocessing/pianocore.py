@@ -160,35 +160,57 @@ def alignment_pairs(perf_bytes: bytes, score_bytes: bytes, align_bytes: bytes, s
     return d["onset"][keep], d["beat"][keep] - shift_q
 
 
-def pianocore_performance(row: dict, measures, shift_q: float, min_offset_match: float = 0.5,
-                          margin_s: float = 1.0):
+def match_raw_to_refined(raw: np.ndarray, d: dict, keep: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Pair refined (aligned) notes with the raw transcription's notes they were copied from.
+
+    PianoCoRe's refined performance is an EDITED copy of the raw transcription: lead-in trimmed,
+    pauses shortened, sections the score doesn't have cut out (e.g. a played exposition repeat), so
+    its clock is not a constant shift of the raw one. Notes copied unchanged keep their exact pitch,
+    velocity and duration; a refined note whose (pitch, velocity, duration) occurs exactly once in
+    the raw file is an anchor (~65% of notes in practice). Returns (refined index, raw index) pairs."""
+    sig = defaultdict(list)
+    for j, (p, on, off, v) in enumerate(raw):
+        sig[(int(p), int(v), round(float(off - on), 3))].append(j)
+    ref_idx, raw_idx = [], []
+    for k in np.nonzero(keep)[0]:
+        c = sig.get((int(d["perf_pitch"][k]), int(d["velocity"][k]), round(float(d["offset"][k] - d["onset"][k]), 3)), [])
+        if len(c) == 1:
+            ref_idx.append(k)
+            raw_idx.append(c[0])
+    return np.asarray(ref_idx, dtype=np.int64), np.asarray(raw_idx, dtype=np.int64)
+
+
+def pianocore_performance(row: dict, measures, shift_q: float, min_anchor_frac: float = 0.3,
+                          max_anchor_gap_s: float = 3.0):
     """One PianoCoRe row -> (notes, pedal, timeline, info) for ``segment.segment_windows``, or an
     error string.
 
-    Input notes are the RAW transcription (real transcriber errors kept). The refined performance
-    is a trimmed copy, so the raw one is first shifted onto its clock (``estimate_offset``); raw
-    notes more than ``margin_s`` outside the aligned span (lead-in/out the alignment trimmed away)
-    are dropped. The time map comes from the refined alignment, interpolated notes excluded."""
-    from .performance import estimate_offset, load_performance
+    Input notes are the RAW transcription (real transcriber errors kept). The time map is built
+    from raw notes matched exactly to aligned refined notes (``match_raw_to_refined``), each
+    giving (raw onset, score quarter); interpolated notes are excluded. Raw notes more than
+    ``max_anchor_gap_s`` from any anchor are dropped: they are passages the alignment cut out
+    (unscored repeats, lead-in/out), so no target exists for them."""
+    from .performance import load_performance
     from .segment import timeline_from_alignment
 
     d = load_aligned(row["refined_performance_midi_bytes"], row["refined_score_midi_bytes"],
                      row["refined_alignment_bytes"])
     keep = ~d["interpolated"]
-    on, q = d["onset"][keep], d["beat"][keep] - shift_q
-    ref = np.stack([d["perf_pitch"][keep], on], axis=1)
-    ref = ref[np.argsort(ref[:, 1], kind="stable")]
     notes, pedal = load_performance(row["performance_midi_bytes"])
-    off, frac = estimate_offset(ref, notes[:, :2])
-    if frac < min_offset_match:
-        return f"raw_vs_refined_offset_match_{frac:.2f}"
-    notes[:, 1:3] -= off
-    lo, hi = float(on.min()) - margin_s, float(on.max()) + margin_s
-    notes = notes[(notes[:, 1] >= lo) & (notes[:, 1] <= hi)]
-    if len(pedal):
-        pedal = pedal - off
-        pedal = pedal[(pedal[:, 1] > lo) & (pedal[:, 0] < hi)]
-    tl = timeline_from_alignment(on, q, measures)
+    ref_i, raw_i = match_raw_to_refined(notes, d, keep)
+    frac = len(ref_i) / max(int(keep.sum()), 1)
+    if frac < min_anchor_frac:
+        return f"raw_vs_refined_anchors_{frac:.2f}"
+    anchor_t = np.sort(notes[raw_i, 1])
+    j = np.searchsorted(anchor_t, notes[:, 1])
+    near = np.minimum(np.abs(notes[:, 1] - anchor_t[np.clip(j - 1, 0, len(anchor_t) - 1)]),
+                      np.abs(notes[:, 1] - anchor_t[np.clip(j, 0, len(anchor_t) - 1)]))
+    kept = near <= max_anchor_gap_s
+    tl = timeline_from_alignment(notes[raw_i, 1], d["beat"][ref_i] - shift_q, measures)
     if isinstance(tl, str):
         return tl
-    return notes, pedal, tl, {"offset_s": round(float(off), 3), "offset_match": round(float(frac), 3)}
+    dropped = int((~kept).sum())
+    notes = notes[kept]
+    if len(pedal):  # keep pedal presses overlapping the kept notes' span
+        pedal = pedal[(pedal[:, 1] > notes[:, 1].min() - 1) & (pedal[:, 0] < notes[:, 2].max() + 1)]
+    return notes, pedal, tl, {"anchor_frac": round(frac, 3), "dropped_unaligned_notes": dropped}

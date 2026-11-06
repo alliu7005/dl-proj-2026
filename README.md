@@ -260,46 +260,38 @@ To go back from tokens to MusicXML (for MUSTER/MV2H evaluation):
 
 10% of segments are left clean.
 
-Parameters are **fitted on real Kong transcriptions** of 40 MAESTRO-*test* recordings (172k notes).
-Kong's model was trained on MAESTRO train, so only test-split audio gives realistic errors.
+Parameters are **fitted on real Transkun V2 transcriptions** of 40 MAESTRO-*test* recordings
+(170k notes). Transkun was trained on MAESTRO train, so only test-split audio gives realistic errors.
+The noise is applied only to clean (ASAP) training items; PERiScoPe items are real Transkun output.
 
-| error | measured |
-|---|---|
-| missing notes | 4.5% for single notes → 20% in 8-note chords |
-| hallucinated notes | 2.3% of notes; mostly ±3–4 and ±1–2 semitones (partly wrong-pitch substitutions), then octaves; as loud as real notes |
-| onset jitter | 6.5 ms std |
-| notes lengthened to pedal release | 65% of notes released under sustain |
-| missed pedal presses | 9%, with ~80 ms timing error |
+| error | Transkun V2 (measured) | Kong 2021, for reference |
+|---|---|---|
+| missing notes | 3.7% for single notes → 15% in 8-note chords | 4.5% → 20% |
+| extra (hallucinated) notes | 0.23% of notes, mostly ±1–4 semitones | 2.3% |
+| onset jitter | 5.9 ms std | 6.5 ms |
+| notes lengthened to pedal release | 12% of notes released under sustain | 65% |
+| missed pedal presses | 12%, with ~80 ms timing error | 9% |
 
-On 8-second windows of those recordings, synthetic noise gives pitch F1 0.961 vs. 0.970 for the real
-transcriptions, with 96.2% vs. 95.8% of notes kept. The synthetic noise is therefore slightly harsher
-than real.
-
-To reproduce the fit:
+To reproduce the fit (≈30 min on an RTX 4050; each recording runs in its own process and falls
+back to the CPU if the GPU runs out of memory):
 
 ```bash
-uv venv --python 3.12 .venv-transcribe       # Kong's package needs Python <= 3.12 + CUDA torch
-uv pip install --python .venv-transcribe/Scripts/python.exe torch --index-url https://download.pytorch.org/whl/cu128
-uv pip install --python .venv-transcribe/Scripts/python.exe piano_transcription_inference audioread librosa pretty_midi
-# checkpoint (the package's own download uses wget, which Windows lacks):
-curl -L -o ~/piano_transcription_inference_data/"note_F1=0.9677_pedal_F1=0.9186.pth" \
-  "https://zenodo.org/record/4034264/files/CRNN_note_F1%3D0.9677_pedal_F1%3D0.9186.pth?download=1"
-
 python scripts/fetch_maestro_audio.py --split test --limit 40    # range-downloads from the 108 GB zip (~3 GB)
 python scripts/fetch_maestro_audio.py --asap-split test          # audio for the real-transcription eval
-.venv-transcribe/Scripts/python scripts/transcribe.py            # ~1.5 recordings/min on an RTX 5070 Ti
+python scripts/transcribe.py                                     # Transkun V2, ~5x faster than real time
 python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out data/noise_stats.json
 ```
 
 ## Real-transcription eval split: caveat
 
-Only 25 of the 59 test performances have MAESTRO audio:
+Only 25 of the 59 ASAP test performances have MAESTRO audio (segment counts: rebuild with
+`build_transcribed_eval.py`):
 
 | MAESTRO split of the audio | performances | segments | meaning |
 |---|---|---|---|
-| train | 21 | 901 | Kong's model was trained on this audio, so transcriptions are optimistic |
-| validation | 2 | 126 | unseen by Kong's model |
-| test | 1 | 51 | unseen by Kong's model |
+| train | 21 | – | Transkun was trained on this audio, so transcriptions are optimistic |
+| validation | 2 | – | unseen by Transkun |
+| test | 1 | – | unseen by Transkun |
 
 A 25th performance with audio (MAESTRO train) is left out because it's excluded from the clean test
 split, so there's nothing to pair it with.
