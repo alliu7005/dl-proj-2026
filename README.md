@@ -35,7 +35,7 @@ python scripts/fetch_pianocore.py
 
 | step | command | time |
 |---|---|---|
-| 1. build train/val/test(/test_periscope) segments | `python scripts/build_dataset.py` | ~3 min ASAP (+ PianoCoRe if downloaded) |
+| 1. build train/val/test/test_periscope segments | `python scripts/build_dataset.py` | ~3 min ASAP; PianoCoRe (if downloaded) ~1–2 h with 6 workers (raise `workers` on a bigger machine) |
 | 2. check the data: leakage, pairing, arrays, loaders; then tokens → MusicXML → tokens | `python -m tests.test_integrity` and `python -m tests.test_roundtrip --split val` | ~3 min |
 | 2b. check window cutting (stitching, prompts) | `python -m tests.test_windows --n 40` | ~3 min |
 | 3. *(already done for Kong: `configs/noise_stats.json`)* fit the noise model on real transcriptions | see [Noise model](#noise-model) | ~30–60 min with a GPU |
@@ -173,12 +173,13 @@ Window `i`'s notes are `notes[index[i,0]:index[i,1]]`, and likewise for pedal. I
 The arrays are memory-mapped, so nothing loads into RAM until it's used. Read through the Dataset,
 not the raw arrays: it also drops released carried-over candidates (below) and scales the features.
 
+Current build (ASAP only, PianoCoRe not downloaded; `report.json` has the exact counts):
+
 | split | windows | performances | compositions |
 |---|---|---|---|
-| train | 36,172 (48–192 notes, 50% overlap) | 743 ASAP (+ PERiScoPe if built) | 153 |
+| train | 36,172 (48–192 notes, 50% overlap) | 743 | 153 |
 | val | 2,093 (~128 notes, no overlap) | 102 | 29 |
 | test | 1,725 (~128 notes, no overlap) | 59 | 14 |
-| test_periscope | 0 until PianoCoRe is downloaded | | |
 | train_transcribed | 3,841 | 87 (all audio unseen by the transcriber) | |
 | val_transcribed | 394 | 20 (all audio unseen by the transcriber) | |
 | test_transcribed | 611 | 24 (21 seen by the transcriber, 3 unseen) | 11 |
@@ -186,6 +187,18 @@ not the raw arrays: it also drops released carried-over candidates (below) and s
 Real transcriptions cover 99–99.5% of their performances' clean windows (a few windows end up
 empty or over the length cap). They can contain more notes per window than clean MIDI: p99 251,
 max ~1,530, vs. a clean max of 761. Cap or truncate the input length in the model.
+
+Expected PERiScoPe additions with the full download (estimates from the download selection):
+
+| split | PERiScoPe |
+|---|---|
+| train | ~85% of 1,200 works, ~5.7k performances → roughly 250k windows |
+| val | ~5% of works |
+| test | none (Beyer & Dai test works are excluded from PERiScoPe) |
+| test_periscope | ~10% of works, ~670 performances |
+
+The per-performance alignment checks (`tests/test_windows.py --source pianocore`) passed on all 25
+sampled PERiScoPe performances, with a median window input-vs-target pitch F1 of 0.975.
 
 ### Note details
 
@@ -376,6 +389,28 @@ python scripts/fetch_maestro_audio.py --asap-split test
 python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out configs/noise_stats.json
 ```
 
+### Transkun V2 errors (measured by Alex, not yet committed)
+
+Transkun V2, the transcriber PERiScoPe was made with, makes very different errors from Kong, as
+measured on 40 MAESTRO-test recordings (170k notes):
+
+| error | Transkun V2 | Kong 2021 |
+|---|---|---|
+| missing notes | 3.7% for single notes → 15% in 8-note chords | 4.5% → 20% |
+| extra (hallucinated) notes | 0.23% of notes, mostly ±1–4 semitones | 2.3% (10× more) |
+| onset jitter | 5.9 ms std | 6.5 ms |
+| notes lengthened to pedal release | 12% of notes released under sustain | 65% |
+| missed pedal presses | 12%, ~80 ms timing error | 9% |
+
+So the synthetic noise must match the transcriber used at inference. The committed
+`configs/noise_stats.json` is **Kong**. To train for Transkun, fit and commit a Transkun model:
+
+```bash
+python scripts/transcribe.py --model transkun        # -> data/transcribed_transkun (~5x real time)
+python scripts/fit_noise.py --pairs data/transcribed_transkun/pairs.csv --out configs/noise_stats_transkun.json
+
+```
+
 `transcribe.py` gives the same output as the package's `PianoTranscription.transcribe`: about 0.3%
 of notes shift by at most ~1 ms, from GPU rounding differences between batch sizes. It's about 20×
 faster:
@@ -480,13 +515,14 @@ Two detectors are trained:
 
 ### Caveat: test_transcribed
 
-Only 25 of the 59 test performances have MAESTRO audio:
+Only 25 of the 59 ASAP test performances have MAESTRO audio (segment counts: rebuild with
+`build_transcribed_eval.py`):
 
 | MAESTRO split of the audio | performances | segments | meaning |
 |---|---|---|---|
-| train | 21 | 549 | Kong's model was trained on this audio, so transcriptions are optimistic |
-| validation | 2 | 42 | unseen by Kong's model |
-| test | 1 | 20 | unseen by Kong's model |
+| train | 21 | 549 | the transcriber (Kong) was trained on this audio, so transcriptions are optimistic |
+| validation | 2 | 42 | unseen by the transcriber |
+| test | 1 | 20 | unseen by the transcriber |
 
 A 25th performance with audio (MAESTRO train) is left out because it's excluded from the clean test
 split, so there's nothing to pair it with.
