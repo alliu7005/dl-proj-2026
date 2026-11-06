@@ -29,6 +29,7 @@ from sklearn.metrics import average_precision_score, precision_recall_curve, roc
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.baselines.note_features import FEATURE_NAMES, note_context_features  # noqa: E402
+from src.dataset import drop_released_carried  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 from src.preprocessing.performance import load_performance  # noqa: E402
 from src.preprocessing.segment import pitch_f1  # noqa: E402
@@ -57,6 +58,13 @@ def label_by_matching(pred: np.ndarray, pred_on: np.ndarray, gt: np.ndarray, tol
     return lab
 
 
+def _carried_keep(notes: np.ndarray, min_end) -> np.ndarray:
+    """Boolean mask equivalent of ``drop_released_carried`` (keeps labels aligned)."""
+    if min_end is None or not len(notes):
+        return np.ones(len(notes), dtype=bool)
+    return (notes[:, 1] >= 0) | (notes[:, 1] + notes[:, 2] >= min_end)
+
+
 def synthetic(store: SegmentStore, nm: NoiseModel, n_seg: int, seed: int):
     rng = np.random.default_rng(seed)
     idx = rng.choice(len(store), size=min(n_seg, len(store)), replace=False)
@@ -64,8 +72,9 @@ def synthetic(store: SegmentStore, nm: NoiseModel, n_seg: int, seed: int):
     for i in idx:
         notes, pedal, _ = store.get(i)
         noisy, ped, lab = nm(notes, pedal, rng, return_labels=True)
-        X.append(note_context_features(noisy, ped))
-        y.append(lab)
+        keep = _carried_keep(noisy, store.meta[i].get("carry_min_sec"))  # as the Dataset does
+        X.append(note_context_features(noisy[keep], ped))
+        y.append(lab[keep])
     return np.concatenate(X), np.concatenate(y)
 
 
@@ -75,6 +84,7 @@ def real_asap(store: SegmentStore, asap_root: Path):
     X, y, g, split = [], [], [], []
     for i, m in enumerate(store.meta):
         notes, pedal, _ = store.get(i)
+        notes = drop_released_carried(notes, m.get("carry_min_sec"))
         if m["performance"] not in cache:
             cache[m["performance"]] = load_performance(asap_root / m["performance"])[0]
         X.append(note_context_features(notes, pedal))
@@ -124,10 +134,12 @@ def downstream(store, vocab, groups, scores, thr):
     before, after = [], []
     for i in range(len(store)):
         notes, _, tok = store.get(i)
+        notes = drop_released_carried(notes, store.meta[i].get("carry_min_sec"))  # as in real_asap()
         toks = vocab.decode(tok.tolist())
         sc = scores[groups == i]
-        before.append(pitch_f1(notes[:, 0], toks))
-        after.append(pitch_f1(notes[sc < thr, 0], toks))
+        inside = notes[:, 1] >= 0  # carried-over notes pair with tie tokens, not onsets
+        before.append(pitch_f1(notes[inside, 0], toks))
+        after.append(pitch_f1(notes[inside & (sc < thr), 0], toks))
     return {"pitch_f1_before": float(np.mean(before)), "pitch_f1_after": float(np.mean(after))}
 
 

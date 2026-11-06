@@ -72,10 +72,14 @@ def main():
         if not s.endswith("_transcribed"):
             continue
         base = st[s.split("_")[0]]
-        key = {(m["performance"], m["bar_start"]): i for i, m in enumerate(base.meta)}
-        same = sum(np.array_equal(base.get(key[(m["performance"], m["bar_start"])])[2], st[s].get(j)[2])
-                   for j, m in enumerate(st[s].meta))
-        check(same == len(st[s]), f"{s}: all {len(st[s])} targets identical to clean")
+        wk = "win" if "win" in base.meta[0] else "bar_start"  # windows mode vs bars mode
+        key = {(m["performance"], m[wk]): i for i, m in enumerate(base.meta)}
+        same = 0
+        for j, m in enumerate(st[s].meta):
+            ci = key[(m["performance"], m[wk])]
+            same += (np.array_equal(base.get(ci)[2], st[s].get(j)[2])
+                     and np.array_equal(base.get_prompt(ci), st[s].get_prompt(j)))
+        check(same == len(st[s]), f"{s}: all {len(st[s])} targets and prompts identical to clean")
         ms = Counter(m["maestro_split"] for m in st[s].meta)
         if s != "test_transcribed":
             check("train" not in ms, f"{s}: no audio Kong trained on ({dict(ms)})")
@@ -86,22 +90,33 @@ def main():
         idx = x.index
         ok = (np.all(idx[:, 1] >= idx[:, 0]) and idx[-1, 1] == len(x.notes) and idx[-1, 3] == len(x.pedal)
               and idx[-1, 5] == len(x.tokens) and np.all(idx[1:, 0] == idx[:-1, 1])
-              and np.all(idx[1:, 4] == idx[:-1, 5]) and len(x.meta) == len(idx))
+              and np.all(idx[1:, 4] == idx[:-1, 5]) and len(x.meta) == len(idx)
+              and np.all((idx[:, 4] <= idx[:, 6]) & (idx[:, 6] < idx[:, 5])))  # prompt, then non-empty target
         check(bool(ok), f"{s}: index contiguous and consistent with arrays")
         n = np.asarray(x.notes)
         check(bool(np.isfinite(n).all() and (n[:, 2] > 0).all() and ((n[:, 0] >= 21) & (n[:, 0] <= 108)).all()
                    and ((n[:, 3] >= 1) & (n[:, 3] <= 127)).all()),
               f"{s}: notes finite, positive durations, pitches 21-108, velocities 1-127")
+        # every segment has in-window notes; carried-over notes (onset < 0) come first
+        first_in = np.array([n[a:b, 1].max() >= 0 for a, b in idx[:, :2]])
+        check(bool(first_in.all()), f"{s}: every segment has in-window notes")
         p = np.asarray(x.pedal)
         check(bool(len(p) == 0 or (p[:, 1] > p[:, 0]).all()), f"{s}: pedal intervals well-formed")
         t = np.asarray(x.tokens)
         check(bool((t >= 0).all() and (t < len(vocab)).all()), f"{s}: token ids in vocab range")
         check(float((t == vocab.stoi[UNK]).mean()) == 0.0, f"{s}: no <unk>")
         bar = vocab.stoi["bar"]
-        starts = t[idx[:, 4]]
-        check(bool((starts == bar).all()), f"{s}: every target starts with 'bar'")
-        nb = np.add.reduceat((t == bar).astype(int), idx[:, 4])
-        check(bool((nb == np.array([m["n_bars"] for m in x.meta])).all()), f"{s}: #bar tokens == n_bars")
+        ts_ids = np.array([i for i, tk in enumerate(vocab.itos) if tk.startswith("ts_")])
+        first = t[idx[:, 6]]
+        mid_bar = first != bar  # windows mode: a target starting mid-bar opens with its time signature
+        check(bool((~mid_bar | np.isin(first, ts_ids)).all()),
+              f"{s}: every target starts with 'bar' or (mid-bar) a time signature")
+        cs = np.concatenate([[0], np.cumsum(t == bar)])
+        nb = cs[idx[:, 5]] - cs[idx[:, 6]]
+        expect = np.array([m["n_bars"] for m in x.meta]) - mid_bar
+        check(bool((nb == expect).all()), f"{s}: #bar tokens in target == n_bars (minus 1 if mid-bar)")
+        pr = np.concatenate([[0], np.cumsum(np.isin(t, [vocab.stoi[k] for k in ("<bos>", "<eos>", "<sep>", "<pad>")]))])
+        check(bool(((pr[idx[:, 5]] - pr[idx[:, 4]]) == 0).all()), f"{s}: no special tokens stored in prompts/targets")
 
     print("loaders")
     import torch

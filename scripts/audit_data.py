@@ -28,7 +28,13 @@ def main():
     vocab = Vocab.load(D / "vocab.json")
     st = {s: SegmentStore(D / s) for s in ("train", "val", "test")}
     tr = st["train"]
-    toks_tr = np.asarray(tr.tokens)
+    # target tokens only (each segment's prompt, tokens[tok_lo:tgt_lo], is context, not target)
+    tgt_mask = np.zeros(len(tr.tokens), dtype=bool)
+    for a, b in tr.index[:, [6, 5]]:
+        tgt_mask[a:b] = True
+    toks_tr = np.asarray(tr.tokens)[tgt_mask]
+    tr_tgt = np.cumsum(tr.index[:, 5] - tr.index[:, 6])
+    tgt_starts = np.concatenate([[0], tr_tgt[:-1]])  # segment starts within toks_tr
     itos = np.array(vocab.itos)
 
     section("1. Target token composition (train)")
@@ -39,16 +45,16 @@ def main():
     total = sum(kinds.values())
     for k, c in kinds.most_common():
         print(f"  {k:8s} {c / total:6.1%}")
-    seg_len = tr.index[:, 5] - tr.index[:, 4]
+    seg_len = tr.index[:, 5] - tr.index[:, 6]
     n_notes = tr.index[:, 1] - tr.index[:, 0]
     print(f"  tokens/segment: median {np.median(seg_len):.0f}, p99 {np.percentile(seg_len, 99):.0f}; "
           f"tokens per input note: {seg_len.sum() / n_notes.sum():.2f}")
 
     section("2. Pedal targets")
     ped_on, ped_off = vocab.stoi["ped_on"], vocab.stoi["ped_off"]
-    per_seg_ped = np.add.reduceat(np.isin(toks_tr, [ped_on, ped_off]).astype(int), tr.index[:, 4])
-    bars = np.array([m["n_bars"] for m in tr.meta])
-    print(f"  pedal tokens per bar: mean {per_seg_ped.sum() / bars.sum():.2f}; segments with any pedal: "
+    per_seg_ped = np.add.reduceat(np.isin(toks_tr, [ped_on, ped_off]).astype(int), tgt_starts)
+    bars = np.array([m["n_bars"] for m in tr.meta])  # bars touched (first/last may be partial)
+    print(f"  pedal tokens per bar touched: mean {per_seg_ped.sum() / bars.sum():.2f}; segments with any pedal: "
           f"{(per_seg_ped > 0).mean():.1%}")
     # zero-length or very short presses (pedal flutter) after quantization
     short, presses = 0, 0
@@ -80,8 +86,7 @@ def main():
         by_comp[m["composition"]].append(i)
     distinct = set()
     for i in range(len(tr)):
-        a, b = tr.index[i, 4], tr.index[i, 5]
-        distinct.add(hash(toks_tr[a:b].tobytes()))
+        distinct.add(hash(tr.get(i)[2].tobytes()))
     print(f"  train segments {len(tr)}, distinct target sequences {len(distinct)} "
           f"({len(distinct) / len(tr):.1%}); compositions {len(by_comp)}")
     segs = np.array(sorted((len(v) for v in by_comp.values()), reverse=True))
@@ -133,7 +138,7 @@ def main():
 
     section("9. Vocabulary coverage")
     for s in ("val", "test"):
-        t = np.asarray(st[s].tokens)
+        t = np.asarray(st[s].tokens)  # prompts + targets
         print(f"  {s}: <unk> rate {(t == vocab.stoi[UNK]).mean():.4%}")
     d_ids = sorted((t for t in vocab.itos if t.startswith("d_")), key=lambda t: Fraction(t[2:]))
     print(f"  {len(d_ids)} duration tokens, from {d_ids[0]} to {d_ids[-1]}")

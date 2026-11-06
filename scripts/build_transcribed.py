@@ -30,9 +30,9 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.preprocessing.performance import load_performance  # noqa: E402
 from src.preprocessing.score import load_score  # noqa: E402
-from src.preprocessing.segment import SegmentConfig, segment_pair  # noqa: E402
+from src.preprocessing.segment import SegmentConfig, segment_pair, segment_windows  # noqa: E402
 from src.preprocessing.split import composition_id  # noqa: E402
-from src.preprocessing.store import SegmentStore, write_split  # noqa: E402
+from src.preprocessing.store import SegmentStore, segment_sizes, write_split  # noqa: E402
 from src.preprocessing.vocab import Vocab  # noqa: E402
 
 
@@ -71,14 +71,20 @@ def main():
 
     cfg = yaml.safe_load(open(args.config))
     root, out = Path(cfg["asap_root"]), Path(cfg["out_dir"])
-    seg_cfg = SegmentConfig(**cfg["segment"])
-    # same windows as the clean split (train overlaps, val/test don't); no pitch-F1 filter since
-    # transcriptions are noisy by design -- only windows whose clean counterpart exists are kept
+    seg = dict(cfg["segment"])
+    seg["window_notes"] = tuple(seg.get("window_notes", SegmentConfig.window_notes))
+    seg_cfg = SegmentConfig(**seg)
+    # same windows as the clean split (bars mode: train overlaps, val/test don't; windows mode: the
+    # clean split's exact cut points are reused below). No pitch-F1 filter since transcriptions are
+    # noisy by design -- only windows whose clean counterpart exists are kept.
     stride = seg_cfg.stride if args.asap_split == "train" else seg_cfg.bars_per_segment
     seg_cfg = replace(seg_cfg, stride=stride, min_pitch_f1=0.0, max_input_notes=seg_cfg.max_input_notes * 2)
+    windows_mode = seg_cfg.mode == "windows"
     vocab = Vocab.load(out / "vocab.json")
     clean = SegmentStore(out / args.asap_split)
-    clean_keys = {(m["performance"], m["bar_start"]): i for i, m in enumerate(clean.meta)}
+    # a window is identified by (performance, win) in windows mode, (performance, bar_start) otherwise
+    wkey = "win" if windows_mode else "bar_start"
+    clean_keys = {(m["performance"], m[wkey]): i for i, m in enumerate(clean.meta)}
     clean_perfs = {k[0] for k in clean_keys}
 
     ann = json.load(open(root / "asap_annotations.json"))
@@ -111,16 +117,24 @@ def main():
         meta = {"dataset": "asap", "piece": row["folder"], "composition": composition_id("asap", row["folder"]),
                 "performance": perf, "split": f"{args.asap_split}_transcribed", "source": "kong2021",
                 "maestro_split": maestro[mm]["split"]}
-        s, _ = segment_pair(notes, pedal, ann[perf], scores[row["folder"]], seg_cfg, meta)
-        s = [x for x in s if (perf, x["bar_start"]) in clean_keys]
-        for x in s:  # ground-truth targets: identical to the clean segment's (incl. pedal from clean CC64)
-            x["tokens"] = vocab.decode(clean.get(clean_keys[(perf, x["bar_start"])])[2].tolist())
+        if windows_mode:  # cut at exactly the clean windows' score-time cut points
+            # sort by window id: s_lo is None for a piece's first window, so tuples can't be compared
+            wins = sorted(((m["s_lo"], m["s_hi"], m["win"]) for m in clean.meta if m["performance"] == perf),
+                          key=lambda w: w[2])
+            s, _ = segment_windows(notes, pedal, ann[perf], scores[row["folder"]], seg_cfg, meta,
+                                   train=False, windows=wins)
+        else:
+            s, _ = segment_pair(notes, pedal, ann[perf], scores[row["folder"]], seg_cfg, meta)
+        s = [x for x in s if (perf, x[wkey]) in clean_keys]
+        for x in s:  # ground truth: same target and prompt as the clean segment (incl. pedal from clean CC64)
+            ci = clean_keys[(perf, x[wkey])]
+            x["tokens"] = vocab.decode(clean.get(ci)[2].tolist())
+            x["prompt"] = vocab.decode(clean.get_prompt(ci).tolist())
         segs += s
         report.append({"performance": perf, "offset_s": round(d, 3), "offset_match": round(frac, 3),
                        "maestro_split": maestro[mm]["split"], "segments": len(s)})
 
-    sizes = (len(segs), sum(len(s["notes"]) for s in segs), sum(len(s["pedal"]) for s in segs),
-             sum(len(s["tokens"]) for s in segs))
+    sizes = tuple(sum(x) for x in zip(*map(segment_sizes, segs))) if segs else (0, 0, 0, 0)
     dst = out / f"{args.asap_split}_transcribed"
     write_split(dst, iter(segs), sizes, vocab)
     json.dump(report, open(dst / "report.json", "w"), indent=1)

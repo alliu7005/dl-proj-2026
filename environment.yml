@@ -1,0 +1,41 @@
+# One env for everything: ASAP/PianoCoRe preprocessing, Kong et al. transcription, training.
+#   conda env create -f environment.yml
+#   conda activate dl-proj
+# Python 3.12: piano_transcription_inference does not support newer versions.
+name: dl-proj
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - numpy>=1.26
+  - libblas=*=*openblas   # the default MKL build crashes inside numpy.linalg on Windows here
+  - pyyaml>=6.0
+  - tqdm>=4.66
+  - pandas
+  - pyarrow           # PianoCoRe parquet shards
+  - ffmpeg            # audio decoding fallback for librosa/audioread
+  - setuptools<82     # torch 2.11 requirement
+  - pip:
+      # CUDA 12.8 wheels (needs NVIDIA driver >= 570). Pinned: the cu128 index stops at 2.11, and
+      # without the pin pip silently takes a newer CPU-only build from PyPI.
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.11.0+cu128
+      # symbolic music / scores
+      - pretty_midi>=0.2.10
+      - music21>=9.1
+      - mido
+      # Kong et al. (2021) transcriber (scripts/transcribe.py)
+      - piano_transcription_inference
+      - torchlibrosa
+      - librosa
+      - audioread
+      - soundfile
+      # PianoCoRe (Hugging Face parquet; alignment .npz files load with numpy.load).
+      # Not symupe: it imports the Unix-only `resource` module and fails on Windows.
+      - datasets
+      - huggingface_hub
+      - symusic
+      # dev
+      - ipykernel
+      - pytest

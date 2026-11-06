@@ -110,16 +110,18 @@ class NoiseModel:
             f.write(text)
 
     def _parametric_hallucinations(self, n, rng):
+        """Returns (hallucinations, carried flags): carried if the source note is carried-over."""
         c = self.cfg
         src = n[rng.random(len(n)) < c.halluc_rate]
         if not len(src):
-            return n[:0]
+            return n[:0], np.zeros(0, dtype=bool)
         h = src.copy()
         h[:, P] = src[:, P] + rng.choice(self._iv, size=len(h), p=self._ivp)
         h[:, ON] += rng.normal(0, c.halluc_onset_std, len(h))
         h[:, DUR] *= rng.uniform(*c.halluc_dur_ratio, len(h))
         h[:, VEL] *= rng.uniform(*c.halluc_vel_ratio, len(h))
-        return h[(h[:, P] >= 21) & (h[:, P] <= 108)]
+        keep = (h[:, P] >= 21) & (h[:, P] <= 108)
+        return h[keep], (src[:, ON] < 0)[keep]
 
     def _bank_hallucinations(self, n, rng):
         """Each real note spawns Poisson(rate[vel bin]) hallucinations; each copies a real one's
@@ -168,21 +170,27 @@ class NoiseModel:
         if not keep.any():
             keep[rng.integers(len(n))] = True
 
-        # 3) hallucinated notes
+        # 3) hallucinated notes. A hallucination is "carried" (struck before the segment, onset < 0)
+        #    if its source is carried (parametric) or its replayed onset lands before t=0 (bank)
         if self.empirical:
             h = self._bank_hallucinations(n, rng)
+            h_carried = h[:, ON] < 0
         else:
-            h = self._parametric_hallucinations(n, rng)
+            h, h_carried = self._parametric_hallucinations(n, rng)
         n = n[keep]
+        n_carried = n[:, ON] < 0
 
         # 4) timing / duration / velocity jitter on real notes
         n[:, ON] += rng.normal(0, c.onset_std, len(n))
         n[:, DUR] *= np.exp(rng.normal(0, c.offset_log_std, len(n)))
         n[:, VEL] += rng.normal(0, c.velocity_std, len(n))
 
+        # negative onset = struck before the segment and still held (see segment.carry_notes):
+        # jitter must not move notes across t=0 in either direction
         out = np.concatenate([n, h])
         labels = np.concatenate([np.zeros(len(n), np.int8), np.ones(len(h), np.int8)])
-        out[:, ON] = np.maximum(out[:, ON], 0)
+        carried = np.concatenate([n_carried, h_carried])
+        out[:, ON] = np.where(carried, np.minimum(out[:, ON], -1e-3), np.maximum(out[:, ON], 0))
         out[:, DUR] = np.maximum(out[:, DUR], 0.01)
         out[:, VEL] = np.clip(np.round(out[:, VEL]), 1, 127)
         order = np.lexsort((out[:, P], out[:, ON]))
@@ -191,8 +199,9 @@ class NoiseModel:
         ped = pedal.copy()
         if len(ped):
             ped = ped[rng.random(len(ped)) >= c.pedal_drop_prob]
+            held = ped[:, 0] < 0  # pressed before the segment: keep that visible
             ped = ped + rng.normal(0, c.pedal_time_std, ped.shape).astype(np.float32)
-            ped[:, 0] = np.maximum(ped[:, 0], 0)
+            ped[:, 0] = np.where(held, np.minimum(ped[:, 0], -1e-3), np.maximum(ped[:, 0], 0))
             ped = ped[ped[:, 1] > ped[:, 0]]
         if return_labels:
             return out.astype(np.float32), ped.astype(np.float32), labels
