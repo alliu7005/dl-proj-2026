@@ -3,10 +3,25 @@ pretty_midi>=0.2.10
 music21>=9.1
 pyyaml>=6.0
 tqdm>=4.66
-# baselines
+# PianoCoRe (PERiScoPe) download / parsing
+pandas
+pyarrow
+symusic
+huggingface_hub
+# baselines (scripts/train_xgb_detector.py, scripts/train_xgb_quantizer.py)
 xgboost>=2.1
 scikit-learn>=1.5
 # training / data loading
 torch>=2.4
-# optional: Kong et al. (2021) transcriber, only needed for scripts/transcribe.py
-# piano_transcription_inference
+# transcription (scripts/transcribe.py), only needed to (re)make transcriptions:
+#   --model kong     : pip install piano_transcription_inference audioread   (Python <= 3.12)
+#   --model transkun : pip install --no-deps transkun==2.0.1   (its ncls/sox deps are training-only;
+#                      see environment.yml) plus the packages below
+torchaudio
+moduleconf
+mir-eval
+pydub
+torch-optimizer
+soxr
+librosa
+soundfile

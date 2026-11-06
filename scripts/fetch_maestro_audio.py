@@ -107,7 +107,7 @@ def main():
         wanted += sel
     if args.asap_split:
         d = json.load(open(args.split_file))
-        pieces = d.get("pieces", d)
+        pieces = d.get("asap", d.get("pieces", d))  # data/processed/splits.json or configs/splits/*.json
         by_midi = {r["midi_filename"]: r for r in rows}
         ok = set(args.maestro_splits.split(","))
         for r in csv.DictReader(open(Path(args.asap) / "metadata.csv")):

@@ -32,6 +32,7 @@ def check(cond: bool, msg: str):
 def main():
     vocab = Vocab.load(D / "vocab.json")
     splits = json.load(open(D / "splits.json"))
+    splits = splits.get("asap", splits)  # ASAP pieces (PianoCoRe works are keyed separately)
     names = [s for s in ("train", "val", "test", "train_transcribed", "val_transcribed", "test_transcribed")
              if (D / s).exists()]
     st = {s: SegmentStore(D / s) for s in names}

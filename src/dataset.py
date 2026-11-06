@@ -18,7 +18,9 @@ Train only on target tokens: ``collate`` returns ``loss_mask`` for that.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -29,6 +31,8 @@ from .preprocessing.store import SegmentStore
 from .preprocessing.vocab import BOS, EOS, ORNAMENT_PREFIXES, SEP, Vocab
 
 N_FEATURES = 8
+SCALED = [1, 2, 3, 4]  # onset, inter-onset gap, log duration, velocity: standardized with train stats
+FEATURE_NAMES = ["pitch", "onset", "ioi", "log_dur", "velocity", "ped_at_onset", "ped_at_offset", "carried"]
 
 
 def note_features(notes: np.ndarray, pedal: np.ndarray) -> np.ndarray:
@@ -48,9 +52,26 @@ def note_features(notes: np.ndarray, pedal: np.ndarray) -> np.ndarray:
                      ped_at(on), ped_at(on + dur), (on < 0).astype(np.float32)], axis=1).astype(np.float32)
 
 
+def compute_feature_stats(split_dir: str, out_path: str, n: int = 5000, seed: int = 0) -> dict:
+    """Mean / std of the continuous note features over (up to ``n``) training segments, after the
+    carried-over filtering the Dataset applies. Saved as JSON and applied by ScoreSegmentDataset."""
+    store = SegmentStore(split_dir)
+    idx = np.random.default_rng(seed).choice(len(store), size=min(n, len(store)), replace=False)
+    feats = []
+    for i in idx:
+        notes, pedal, _ = store.get(int(i))
+        notes = drop_released_carried(notes, store.meta[int(i)].get("carry_min_sec"))
+        feats.append(note_features(notes, pedal)[:, SCALED])
+    f = np.concatenate(feats).astype(np.float64)
+    stats = {"columns": [FEATURE_NAMES[c] for c in SCALED], "index": SCALED,
+             "mean": f.mean(0).tolist(), "std": np.maximum(f.std(0), 1e-6).tolist(), "n_notes": len(f)}
+    Path(out_path).write_text(json.dumps(stats, indent=1))
+    return stats
+
+
 def drop_released_carried(notes: np.ndarray, min_end: float | None) -> np.ndarray:
     """Carried-over candidates (onset < 0) are kept only if the key is still down at ``min_end``
-    (segment seconds). Applied after noise, so Kong-style pedal lengthening can turn a
+    (segment seconds). Applied after noise, so pedal lengthening in the noise model can turn a
     pedal-sustained note into a carried one, as in real transcriptions."""
     if min_end is None or not len(notes):
         return notes
@@ -99,10 +120,11 @@ class _Transposer:
 class ScoreSegmentDataset(Dataset):
     def __init__(self, split_dir: str, vocab_path: str, noise: NoiseModel | None = None,
                  seed: int = 0, ornament_oversample: float = 3.0, augment: AugmentConfig | None = None,
-                 use_prompt: bool = True, prompt_dropout: float = 0.1):
+                 use_prompt: bool = True, prompt_dropout: float = 0.1, feature_stats: str | None = "auto"):
         """``prompt_dropout``: chance (when training, i.e. with noise or augmentation) of hiding the
         prompt, so the model also works without context (first window of a piece, or after a bad
-        window)."""
+        window). ``feature_stats``: JSON from ``compute_feature_stats`` (written by build_dataset.py
+        next to vocab.json; "auto" = use it if present, None = leave features unscaled)."""
         self.store = SegmentStore(split_dir)
         self.vocab = Vocab.load(vocab_path)
         self.noise = noise
@@ -111,6 +133,14 @@ class ScoreSegmentDataset(Dataset):
         self.seed = seed
         self.epoch = 0
         self.use_prompt, self.prompt_dropout = use_prompt, prompt_dropout
+        if feature_stats == "auto":
+            auto = Path(vocab_path).with_name("feature_stats.json")
+            feature_stats = str(auto) if auto.exists() else None
+        self.scale = None
+        if feature_stats:
+            st = json.loads(Path(feature_stats).read_text())
+            self.scale = (np.asarray(st["index"]), np.asarray(st["mean"], dtype=np.float32),
+                          np.asarray(st["std"], dtype=np.float32))
         self.bos, self.eos, self.sep = self.vocab.stoi[BOS], self.vocab.stoi[EOS], self.vocab.stoi[SEP]
         rare = np.array([self.vocab.itos[i].startswith(ORNAMENT_PREFIXES[:3]) for i in range(len(self.vocab))])
         idx = self.store.index
@@ -161,7 +191,8 @@ class ScoreSegmentDataset(Dataset):
         tempo = 1.0
         if self.augment is not None:
             notes, pedal, tokens, prompt, tempo = self._augment(notes, pedal, tokens, prompt, rng)
-        if self.noise is not None:
+        # synthetic noise only on clean performances: real transcriptions are noisy already
+        if self.noise is not None and self.store.meta[i].get("source", "clean") == "clean":
             notes, pedal = self.noise(notes, pedal, rng)
         if (self.noise is not None or self.augment is not None) and rng.random() < self.prompt_dropout:
             prompt = prompt[:0]
@@ -169,7 +200,11 @@ class ScoreSegmentDataset(Dataset):
         notes = drop_released_carried(notes, None if min_end is None else min_end * tempo)
         head = np.concatenate([[self.bos], prompt, [self.sep]]) if len(prompt) else np.array([self.bos])
         target = np.concatenate([head, tokens, [self.eos]])
-        return {"notes": torch.from_numpy(note_features(notes, pedal)),
+        feats = note_features(notes, pedal)
+        if self.scale is not None:
+            cols, mean, std = self.scale
+            feats[:, cols] = (feats[:, cols] - mean) / std
+        return {"notes": torch.from_numpy(feats),
                 "target": torch.from_numpy(target), "prompt_len": len(head)}
 
 

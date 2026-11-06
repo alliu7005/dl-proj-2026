@@ -1,7 +1,9 @@
 """Synthetic transcription-error injection, applied on the fly to clean performance segments.
 
-Defaults are placeholders. Run ``scripts/fit_noise.py`` on Kong-transcribed MAESTRO *test* files
-vs. ground-truth MIDI to fit them, then pass the resulting JSON to ``NoiseModel.from_json``.
+Defaults are placeholders. Run ``scripts/fit_noise.py`` on transcribed MAESTRO test/validation
+files vs. ground-truth MIDI to fit them, then pass the resulting JSON to ``NoiseModel.from_json``.
+The committed ``configs/noise_stats.json`` is fitted on **Kong et al.** transcriptions; to match
+Transkun V2 (PERiScoPe) instead, refit on ``data/transcribed_transkun/pairs.csv``.
 """
 from __future__ import annotations
 

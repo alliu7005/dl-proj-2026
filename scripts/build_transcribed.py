@@ -1,4 +1,4 @@
-"""Build a split whose inputs are REAL Kong transcriptions instead of clean performance MIDI.
+"""Build a split whose inputs are REAL transcriptions (Kong or Transkun V2) instead of clean MIDI.
 
 For every ASAP performance in ``--asap-split`` that has MAESTRO audio (optionally only from
 ``--maestro-splits``) and a transcription in data/transcribed/, the transcription is shifted onto
@@ -7,11 +7,14 @@ exactly the same bars/windows as the clean split, and written to
 data/processed/<asap-split>_transcribed/ with the same vocab. Targets are copied from the matching
 clean segment (same performance + bar_start), so they are always ground truth.
 
-    # evaluation: all test performances with audio (meta "maestro_split" says if Kong saw the audio)
+    # evaluation: all test performances with audio (meta "maestro_split" says whether the
+    # transcriber was trained on that audio: report "train" separately from validation/test)
     python scripts/build_transcribed.py --asap-split test
-    # training / model selection on real errors: only audio Kong was NOT trained on
+    # training / model selection on real errors: only audio the transcriber was NOT trained on
     python scripts/build_transcribed.py --asap-split train --maestro-splits test,validation
     python scripts/build_transcribed.py --asap-split val --maestro-splits test,validation
+    # Transkun V2 transcriptions instead of Kong (see scripts/transcribe.py --model transkun)
+    python scripts/build_transcribed.py --asap-split test --transcribed data/transcribed_transkun
 """
 from __future__ import annotations
 
@@ -24,11 +27,10 @@ from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
-import numpy as np
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.preprocessing.performance import load_performance  # noqa: E402
+from src.preprocessing.performance import estimate_offset, load_performance  # noqa: E402
 from src.preprocessing.score import load_score  # noqa: E402
 from src.preprocessing.segment import SegmentConfig, segment_pair, segment_windows  # noqa: E402
 from src.preprocessing.split import composition_id  # noqa: E402
@@ -36,32 +38,13 @@ from src.preprocessing.store import SegmentStore, segment_sizes, write_split  # 
 from src.preprocessing.vocab import Vocab  # noqa: E402
 
 
-def estimate_offset(ref: np.ndarray, other: np.ndarray, tol: float = 0.05, n_ref: int = 200) -> tuple[float, float]:
-    """Offset d such that other_onset - d ~= ref_onset. Returns (d, fraction of ref notes matched)."""
-    a = ref[:n_ref]
-    by_pitch = {p: np.sort(other[other[:, 0] == p, 1]) for p in np.unique(a[:, 0])}
-    cands = np.concatenate([by_pitch[a[k, 0]] - a[k, 1] for k in range(min(5, len(a)))])
-
-    def score(d):
-        hits = 0
-        for p, t in zip(a[:, 0], a[:, 1]):
-            arr = by_pitch[p]
-            j = np.searchsorted(arr, t + d)
-            hits += any(abs(arr[jj] - (t + d)) <= tol for jj in (j - 1, j) if 0 <= jj < len(arr))
-        return hits / len(a)
-
-    best = max(cands, key=score, default=0.0)
-    m = [o - t for p, t in zip(a[:, 0], a[:, 1]) for o in by_pitch[p] if abs(o - t - best) <= tol]
-    d = float(np.median(m)) if m else float(best)
-    return d, score(d)
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/preprocess.yaml")
     ap.add_argument("--asap-split", default="test")
     ap.add_argument("--maestro", default="data/raw/maestro")
-    ap.add_argument("--transcribed", default="data/transcribed")
+    ap.add_argument("--transcribed", default="data/transcribed",
+                    help="data/transcribed (Kong) or data/transcribed_transkun (Transkun V2)")
     ap.add_argument("--maestro-splits", default="train,validation,test",
                     help="only use audio from these MAESTRO splits (Kong was trained on 'train')")
     ap.add_argument("--min-offset-match", type=float, default=0.8,
@@ -90,7 +73,8 @@ def main():
     ann = json.load(open(root / "asap_annotations.json"))
     maestro = {r["midi_filename"]: r for r in
                csv.DictReader(open(Path(args.maestro) / "maestro-v3.0.0.csv", encoding="utf-8"))}
-    pieces = json.load(open(out / "splits.json"))  # the split build_dataset.py actually used
+    sp_json = json.load(open(out / "splits.json"))  # the split build_dataset.py actually used
+    pieces = sp_json.get("asap", sp_json)
     ok_maestro = set(args.maestro_splits.split(","))
     scores, segs, report = {}, [], []
     for row in csv.DictReader(open(root / "metadata.csv")):
@@ -115,7 +99,8 @@ def main():
         if row["folder"] not in scores:
             scores[row["folder"]] = load_score(root / row["xml_score"])
         meta = {"dataset": "asap", "piece": row["folder"], "composition": composition_id("asap", row["folder"]),
-                "performance": perf, "split": f"{args.asap_split}_transcribed", "source": "kong2021",
+                "performance": perf, "split": f"{args.asap_split}_transcribed",
+                "source": "transkun_real" if "transkun" in args.transcribed else "kong_real",
                 "maestro_split": maestro[mm]["split"]}
         if windows_mode:  # cut at exactly the clean windows' score-time cut points
             # sort by window id: s_lo is None for a piece's first window, so tuples can't be compared

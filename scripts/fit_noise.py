@@ -1,10 +1,13 @@
 """Fit noise-model parameters by comparing transcribed MIDI against ground-truth MIDI.
 
     python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out configs/noise_stats.json
+    # Transkun V2 instead of Kong:
+    python scripts/fit_noise.py --pairs data/transcribed_transkun/pairs.csv --out configs/noise_stats_transkun.json
 
 ``pairs.csv`` (written by scripts/transcribe.py) has columns ``pred,gt[,maestro_split]``. Only rows
-from the MAESTRO *test* split are used (``--maestro-split``): Kong et al.'s transcriber was trained
-on MAESTRO train, so train-split transcriptions are unrealistically clean.
+from unseen MAESTRO splits are used (``--maestro-split``, default test,validation): both Kong and
+Transkun V2 were trained on MAESTRO train, so train-split transcriptions are unrealistically clean.
+Audio of ASAP val/test performances is always excluded (``--exclude-asap-split``).
 """
 from __future__ import annotations
 
@@ -71,6 +74,7 @@ def main():
 
     ok = set(args.maestro_split.split(","))
     pieces = json.load(open(args.splits))
+    pieces = pieces.get("asap", pieces)  # {"asap": {...}, "pianocore": {...}} or flat
     held_out = {r["maestro_midi_performance"].replace("{maestro}/", "")
                 for r in csv.DictReader(open(Path(args.asap) / "metadata.csv"))
                 if pieces.get(r["folder"]) in args.exclude_asap_split.split(",") and r["maestro_midi_performance"]}

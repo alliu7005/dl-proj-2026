@@ -179,7 +179,7 @@ def main():
     real_store = SegmentStore(data / "test_transcribed")
     Xre, yre, gre, sre = real_asap(real_store, Path(args.asap))
     pieces = json.load(open(args.split_file))
-    pieces = pieces.get("pieces", pieces)
+    pieces = pieces.get("asap", pieces.get("pieces", pieces))
     asap_test_audio = {r["maestro_midi_performance"].replace("{maestro}/", "")
                        for r in csv.DictReader(open(Path(args.asap) / "metadata.csv"))
                        if pieces.get(r["folder"]) in ("test", "val") and r["maestro_midi_performance"]}
