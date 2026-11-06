@@ -1,6 +1,6 @@
 """Fit noise-model parameters by comparing transcribed MIDI against ground-truth MIDI.
 
-    python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out data/noise_stats.json
+    python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out configs/noise_stats.json
 
 ``pairs.csv`` (written by scripts/transcribe.py) has columns ``pred,gt[,maestro_split]``. Only rows
 from the MAESTRO *test* split are used (``--maestro-split``): Kong et al.'s transcriber was trained
@@ -19,7 +19,8 @@ import numpy as np
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.preprocessing.noise import NoiseConfig, NoiseModel  # noqa: E402
+from src.preprocessing.noise import (NoiseConfig, NoiseModel, VEL_EDGES, attribute_source,  # noqa: E402
+                                     chord_sizes, vel_bin)
 from src.preprocessing.performance import load_performance  # noqa: E402
 
 ONSET_TOL = 0.05
@@ -48,7 +49,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", required=True, help="csv with columns pred,gt (paths)")
     ap.add_argument("--chord-window", type=float, default=0.03)
-    ap.add_argument("--out", default="data/noise_stats.json")
+    ap.add_argument("--out", default="configs/noise_stats.json")
     ap.add_argument("--maestro-split", default="test", help="only use pairs from this MAESTRO split")
     args = ap.parse_args()
 
@@ -59,6 +60,9 @@ def main():
     halluc_iv = Counter()
     halluc_vel_ratio, halluc_dur_ratio, halluc_on = [], [], []
     ped_err, ped_total, ped_missed = [], 0, 0
+    drop_counts = defaultdict(lambda: [0, 0])          # "size|velbin" -> [missed, total]
+    notes_per_vbin, sources_per_vbin = Counter(), Counter()
+    bank, orphans = [], 0
 
     rows = [r for r in csv.DictReader(open(args.pairs, newline=""))
             if r.get("maestro_split", args.maestro_split) == args.maestro_split]
@@ -108,6 +112,29 @@ def main():
                 else:
                     dur_ratio.append(np.log(max(pd[k], 1e-3) / max(gd[k], 1e-3)))
 
+        # empirical drop table: chord size x velocity bin
+        vb = vel_bin(gt[:, 3])
+        for sz, v, h in zip(chord_sizes(gt[:, 1], args.chord_window), vb, hit):
+            key = f"{min(int(sz), 8)}|{int(v)}"
+            drop_counts[key][0] += int(not h)
+            drop_counts[key][1] += 1
+        notes_per_vbin.update(vb.tolist())
+        # error bank: every unmatched prediction relative to its most likely source note
+        end = gt[:, 2].copy()
+        if len(gped):
+            k = np.searchsorted(gped[:, 0], end, side="right") - 1
+            under = (k >= 0) & (end < gped[np.maximum(k, 0), 1])
+            end[under] = gped[k[under], 1]
+        for j in np.setdiff1d(np.arange(len(pr)), pj):
+            src = attribute_source(pr[j, 1], gt[:, 1], end, gt[:, 3])
+            if src < 0:
+                orphans += 1
+                continue
+            sources_per_vbin[int(vb[src])] += 1
+            bank.append([int(pr[j, 0] - gt[src, 0]), round(float(pr[j, 1] - gt[src, 1]), 4),
+                         round(float(pr[j, 3] / max(gt[src, 3], 1)), 3),
+                         round(float(pr[j, 2] - pr[j, 1]), 4), int(vb[src])])
+
         # hallucinations: unmatched predictions, relative to closest-sounding gt note
         un = np.setdiff1d(np.arange(len(pr)), pj)
         for j in un:
@@ -145,13 +172,20 @@ def main():
         velocity_std=float(np.std(vel_err)) if vel_err else NoiseConfig().velocity_std,
         pedal_time_std=float(np.std(np.clip(ped_err, -0.5, 0.5))) if ped_err else NoiseConfig().pedal_time_std,
         pedal_drop_prob=ped_missed / ped_total if ped_total else NoiseConfig().pedal_drop_prob,
+        drop_table={k: round(m / t, 4) for k, (m, t) in sorted(drop_counts.items()) if t >= 30},
+        halluc_rate_by_vel={str(v): round(sources_per_vbin[v] / max(notes_per_vbin[v], 1), 5)
+                            for v in range(len(VEL_EDGES) + 1)},
+        halluc_bank=bank,
     )
     NoiseModel(cfg).to_json(args.out)
     diag = {"n_gt": n_gt, "n_pred": n_pred, "matched": len(on_err),
             "miss_rate_by_chord_size": dict(zip(map(str, sizes), rates.round(4).tolist())),
             "hallucination_intervals_raw": dict(halluc_iv.most_common(25)),
             "onset_err_mean": float(np.mean(on_err)) if on_err else None,
-            "pedal_presses_gt": ped_total, "pedal_missed": ped_missed}
+            "pedal_presses_gt": ped_total, "pedal_missed": ped_missed,
+            "bank_size": len(bank), "orphan_hallucinations": orphans,
+            "bank_interval_top": Counter(r[0] for r in bank).most_common(10),
+            "bank_delay_median": float(np.median([r[1] for r in bank])) if bank else None}
     Path(args.out).with_suffix(".diagnostics.json").write_text(json.dumps(diag, indent=1))
     print(json.dumps(diag, indent=1))
     print("wrote", args.out)

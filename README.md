@@ -23,10 +23,10 @@ git clone --depth 1 https://github.com/fosfrancesco/asap-dataset.git data/raw/as
 |---|---|---|
 | 1. build train/val/test segments | `python scripts/build_dataset.py` | ~3 min |
 | 2. check targets survive tokens → MusicXML → tokens | `python -m tests.test_roundtrip --split val` | ~2 min |
-| 3. *(already done; output in `data/noise_stats.json`)* fit the noise model on real transcriptions | see [Noise model](#noise-model) | ~1 h with a GPU |
+| 3. *(already done; output in `configs/noise_stats.json`)* fit the noise model on real transcriptions | see [Noise model](#noise-model) | ~1 h with a GPU |
 | 4. *(optional)* build the real-transcription eval split | `python scripts/build_transcribed_eval.py --asap-split test` | ~1 min |
 
-`data/` is git-ignored. Share `data/noise_stats.json` with the team (it's small), or re-run step 3.
+`data/` is git-ignored. The fitted noise model `configs/noise_stats.json` is committed, so step 3 is only needed to refit it.
 
 ## Output format
 
@@ -63,7 +63,7 @@ from src.dataset import ScoreSegmentDataset, collate
 from src.preprocessing.noise import NoiseModel
 
 train = ScoreSegmentDataset("data/processed/train", "data/processed/vocab.json",
-                            noise=NoiseModel.from_json("data/noise_stats.json"))
+                            noise=NoiseModel.from_json("configs/noise_stats.json"))
 dl = DataLoader(train, batch_size=32, sampler=train.sampler(), collate_fn=collate, num_workers=4)
 for epoch in range(E):
     train.set_epoch(epoch)                   # fresh (reproducible) noise every epoch
@@ -148,20 +148,43 @@ To go back from tokens to MusicXML (for MUSTER/MV2H evaluation):
 
 10% of segments are left clean.
 
-Parameters are **fitted on real Kong transcriptions** of 40 MAESTRO-*test* recordings (172k notes).
+Everything is **fitted on real Kong transcriptions** of 40 MAESTRO-*test* recordings (172k notes).
 Kong's model was trained on MAESTRO train, so only test-split audio gives realistic errors.
+
+The model is **empirical**: `configs/noise_stats.json` holds three fitted pieces, plus a few scalar
+parameters for timing, velocity and pedal.
+
+- **Missing notes:** a miss-rate table indexed by chord size × velocity bin.
+- **Hallucination rate:** hallucinations spawned per real note, by the source note's velocity.
+- **Error bank:** 3,923 real hallucinations, each stored relative to its most likely source. The
+  source is a recent, loud note that is still sounding, counting the sustain pedal. Each entry
+  records interval, delay, velocity ratio and duration.
+
+During training, loud notes spawn hallucinations by replaying sampled bank entries.
 
 | error | measured |
 |---|---|
-| missing notes | 4.5% for single notes → 20% in 8-note chords |
-| hallucinated notes | 2.3% of notes; mostly ±3–4 and ±1–2 semitones (partly wrong-pitch substitutions), then octaves; as loud as real notes |
+| missing notes | mostly a function of loudness. Lone notes: 29% if quiet (velocity < 40), 0.8% if loud. 8-note chords: 81% for quiet notes, 6% for loud ones |
+| hallucinated notes | 2.3% of notes. Loud notes spawn them 6× more often than quiet ones. Most common: an octave below or above the source (−12 / +12), then thirds, then two octaves |
 | onset jitter | 6.5 ms std |
 | notes lengthened to pedal release | 65% of notes released under sustain |
 | missed pedal presses | 9%, with ~80 ms timing error |
 
-On 8-second windows of those recordings, synthetic noise gives pitch F1 0.961 vs. 0.970 for the real
-transcriptions, with 96.2% vs. 95.8% of notes kept. The synthetic noise is therefore slightly harsher
-than real.
+`configs/noise_stats_parametric.json` is the first, hand-parametrized version. Keep it for ablations.
+
+**Validation with a detector** (`scripts/train_xgb_detector.py`, see [XGBoost baseline](#xgboost-baseline-note-level-error-detector)).
+An error detector trained only on synthetic noise and tested on **real** transcriptions of unseen
+audio scores:
+
+| noise model | AUC | AP |
+|---|---|---|
+| parametric | 0.660 | 0.010 |
+| empirical | 0.911 | 0.088 |
+| trained on real errors (upper bound) | 0.981 | 0.396 |
+
+Random guessing gives AP 0.005. The empirical noise is much closer to real errors, but a gap
+remains. On 8-second windows, synthetic noise gives pitch F1 0.957 vs. 0.970 for real
+transcriptions, i.e. slightly harsher than real.
 
 To reproduce the fit:
 
@@ -176,8 +199,47 @@ curl -L -o ~/piano_transcription_inference_data/"note_F1=0.9677_pedal_F1=0.9186.
 python scripts/fetch_maestro_audio.py --split test --limit 40    # range-downloads from the 108 GB zip (~3 GB)
 python scripts/fetch_maestro_audio.py --asap-split test          # audio for the real-transcription eval
 .venv-transcribe/Scripts/python scripts/transcribe.py            # ~1.5 recordings/min on an RTX 5070 Ti
-python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out data/noise_stats.json
+python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out configs/noise_stats.json
 ```
+
+## XGBoost baseline: note-level error detector
+
+```bash
+pip install xgboost scikit-learn
+python scripts/train_xgb_detector.py      # ~3 min on GPU; writes outputs/xgb_*.json
+```
+
+The model classifies each transcribed note as real vs. error (hallucinated or wrong pitch). It
+uses 56 local-context features (`src/baselines/note_features.py`), such as:
+
+- what starts at the same time;
+- whether a louder note sits an overtone interval away;
+- what is still sounding;
+- local key fit and loudness;
+- repeated notes.
+
+Two detectors are trained:
+
+- **On synthetic noise** (ASAP train). Labels are the notes the noise injector added.
+- **On real Kong errors** (MAESTRO-test transcriptions, ASAP test recordings excluded). Labels come
+  from matching each note against the ground truth within 50 ms.
+
+| detector | synthetic test AUC / AP | real test AUC / AP | real, unseen audio AUC / AP |
+|---|---|---|---|
+| flag quietest notes | 0.660 / 0.035 | 0.691 / 0.032 | 0.695 / 0.017 |
+| trained on synthetic (empirical noise) | 0.961 / 0.603 | 0.512 / 0.028 | 0.911 / 0.088 |
+| trained on real errors | 0.816 / 0.077 | 0.622 / 0.095 | 0.981 / 0.396 |
+
+**Takeaways:**
+
+- **What real errors look like.** The strongest features are a louder note an octave below that is
+  still sounding, being the lowest note of a chord, and being quiet relative to the chord. So
+  hallucinations are mostly overtones.
+- **The unseen-audio column is small:** only 3 performances, about 40 error notes.
+- **"Real test" is mostly audio Kong was trained on**, where the remaining errors are rare and
+  atypical.
+- **Deleting flagged notes doesn't help yet** (precision about 0.15). Use the detector score as an
+  input feature rather than as a hard filter.
 
 ## Real-transcription eval split: caveat
 
@@ -208,9 +270,10 @@ src/preprocessing/
   noise.py         transcription-error injection
   store.py         memory-mapped on-disk format
   detokenize.py    tokens -> MusicXML
+src/baselines/note_features.py   per-note context features (XGBoost baseline)
 src/dataset.py     PyTorch Dataset / sampler / collate
 scripts/           build_dataset, make_bd_split, fetch_maestro_audio, transcribe, fit_noise,
-                   build_transcribed_eval
+                   build_transcribed_eval, train_xgb_detector
 tests/test_roundtrip.py
 ```
 

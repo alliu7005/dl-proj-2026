@@ -1,7 +1,7 @@
 """PyTorch dataset over preprocessed segments, with on-the-fly transcription-noise injection.
 
     ds = ScoreSegmentDataset("data/processed/train", "data/processed/vocab.json",
-                             noise=NoiseModel.from_json("data/noise_stats.json"))
+                             noise=NoiseModel.from_json("configs/noise_stats.json"))
     loader = DataLoader(ds, batch_size=32, sampler=ds.sampler(), collate_fn=collate, num_workers=4)
     for epoch in ...:
         ds.set_epoch(epoch)   # new noise each epoch (with num_workers>0 use persistent_workers=False)

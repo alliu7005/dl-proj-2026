@@ -37,6 +37,40 @@ class NoiseConfig:
     pedal_drop_prob: float = 0.05
     # probability that a segment is left clean (keeps the model good on clean MIDI too)
     clean_prob: float = 0.1
+    # --- empirical mode (written by scripts/fit_noise.py); overrides the parametric fields above ---
+    # miss rate per "chordsize|velbin" (chord size capped at 8, see vel_bin)
+    drop_table: dict | None = None
+    # hallucinations spawned per real note, per velocity bin of the source note
+    halluc_rate_by_vel: dict | None = None
+    # real hallucinations relative to their source note: [interval, delay_s, vel_ratio, dur_s, src_vel_bin]
+    halluc_bank: list | None = None
+
+
+VEL_EDGES = (40, 55, 70)
+SOURCE_TAU = 0.3      # s; recency weighting when attributing a hallucination to a source note
+SOURCE_LOOKBACK = 2.0
+
+
+def vel_bin(v):
+    return np.searchsorted(VEL_EDGES, v, side="right")
+
+
+def chord_sizes(onsets: np.ndarray, window: float) -> np.ndarray:
+    order = np.argsort(onsets, kind="stable")
+    group = np.concatenate([[0], np.cumsum(np.diff(onsets[order]) > window)])
+    size = np.empty(len(onsets), dtype=np.int64)
+    size[order] = np.bincount(group)[group]
+    return size
+
+
+def attribute_source(t: float, on: np.ndarray, end: np.ndarray, vel: np.ndarray) -> int:
+    """Most likely source of a hallucination at time t: a recent, loud note still sounding
+    (``end`` = pedal-extended offset). Returns -1 if nothing is sounding."""
+    cand = np.nonzero((on <= t + 0.03) & (on >= t - SOURCE_LOOKBACK) & (end >= t - 0.03))[0]
+    if len(cand) == 0:
+        return -1
+    w = vel[cand] * np.exp(-np.maximum(t - on[cand], 0) / SOURCE_TAU)
+    return int(cand[np.argmax(w)])
 
 
 class NoiseModel:
@@ -46,6 +80,17 @@ class NoiseModel:
         self._iv = np.array([int(k) for k in iv], dtype=np.int64)
         p = np.array(list(iv.values()), dtype=np.float64)
         self._ivp = p / p.sum()
+        self._bank = None
+        if self.cfg.halluc_bank:
+            b = np.asarray(self.cfg.halluc_bank, dtype=np.float64)
+            self._bank = {vb: b[b[:, 4] == vb] for vb in range(len(VEL_EDGES) + 1)}
+            for vb, rows in self._bank.items():  # fall back to the whole bank for empty bins
+                if len(rows) == 0:
+                    self._bank[vb] = b
+
+    @property
+    def empirical(self) -> bool:
+        return self._bank is not None
 
     @classmethod
     def from_json(cls, path: str) -> "NoiseModel":
@@ -55,13 +100,53 @@ class NoiseModel:
         return cls(NoiseConfig(**{k: v for k, v in d.items() if k in known}))
 
     def to_json(self, path: str):
+        d = asdict(self.cfg)
+        bank = d.pop("halluc_bank")
+        text = json.dumps(d, indent=2)
+        if bank:  # one bank row per line keeps the file compact and diffable
+            rows = ",\n    ".join(json.dumps(r) for r in bank)
+            text = text[:-2] + ',\n  "halluc_bank": [\n    ' + rows + "\n  ]\n}"
         with open(path, "w") as f:
-            json.dump(asdict(self.cfg), f, indent=2)
+            f.write(text)
 
-    def __call__(self, notes: np.ndarray, pedal: np.ndarray, rng: np.random.Generator):
+    def _parametric_hallucinations(self, n, rng):
+        c = self.cfg
+        src = n[rng.random(len(n)) < c.halluc_rate]
+        if not len(src):
+            return n[:0]
+        h = src.copy()
+        h[:, P] = src[:, P] + rng.choice(self._iv, size=len(h), p=self._ivp)
+        h[:, ON] += rng.normal(0, c.halluc_onset_std, len(h))
+        h[:, DUR] *= rng.uniform(*c.halluc_dur_ratio, len(h))
+        h[:, VEL] *= rng.uniform(*c.halluc_vel_ratio, len(h))
+        return h[(h[:, P] >= 21) & (h[:, P] <= 108)]
+
+    def _bank_hallucinations(self, n, rng):
+        """Each real note spawns Poisson(rate[vel bin]) hallucinations; each copies a real one's
+        (interval, delay, velocity ratio, duration) relative to its source note."""
+        c = self.cfg
+        vb = vel_bin(n[:, VEL])
+        rate = np.array([c.halluc_rate_by_vel.get(str(v), c.halluc_rate) for v in vb])
+        counts = rng.poisson(rate)
+        out = []
+        for i in np.nonzero(counts)[0]:
+            bank = self._bank[int(vb[i])]
+            for row in bank[rng.integers(len(bank), size=counts[i])]:
+                k, delay, vr, dur = row[:4]
+                out.append((n[i, P] + k, n[i, ON] + delay, dur, n[i, VEL] * vr))
+        if not out:
+            return n[:0]
+        h = np.asarray(out, dtype=n.dtype)
+        return h[(h[:, P] >= 21) & (h[:, P] <= 108)]
+
+    def __call__(self, notes: np.ndarray, pedal: np.ndarray, rng: np.random.Generator,
+                 return_labels: bool = False):
+        """Returns (noisy notes, noisy pedal), plus per-note labels (1 = hallucinated) if
+        ``return_labels``."""
         c = self.cfg
         if len(notes) == 0 or rng.random() < c.clean_prob:
-            return notes.copy(), pedal.copy()
+            out = (notes.copy(), pedal.copy())
+            return out + (np.zeros(len(notes), dtype=np.int8),) if return_labels else out
         n = notes.copy()
 
         # 1) sustain pedal lengthens notes released while the pedal is down
@@ -71,28 +156,23 @@ class NoiseModel:
                 hit = (off > on_t) & (off < off_t) & (rng.random(len(n)) < c.pedal_extend_prob)
                 n[hit, DUR] = off_t - n[hit, ON]
 
-        # 2) missing notes, more likely in dense chords
-        order = np.argsort(n[:, ON], kind="stable")
-        on_sorted = n[order, ON]
-        group = np.concatenate([[0], np.cumsum(np.diff(on_sorted) > c.chord_window)])
-        size = np.bincount(group)[group]
-        p_drop = np.empty(len(n))
-        p_drop[order] = c.drop_base + c.drop_per_chord_note * (size - 1)
+        # 2) missing notes, more likely in dense chords (and for quiet notes, in empirical mode)
+        size = chord_sizes(n[:, ON], c.chord_window)
+        if c.drop_table:
+            vb = vel_bin(n[:, VEL])
+            p_drop = np.array([c.drop_table.get(f"{min(sz, 8)}|{v}", c.drop_base)
+                               for sz, v in zip(size, vb)])
+        else:
+            p_drop = c.drop_base + c.drop_per_chord_note * (size - 1)
         keep = rng.random(len(n)) >= p_drop
         if not keep.any():
             keep[rng.integers(len(n))] = True
 
-        # 3) hallucinated notes (mostly overtones of real notes)
-        src = n[rng.random(len(n)) < c.halluc_rate]
-        if len(src):
-            h = src.copy()
-            h[:, P] = src[:, P] + rng.choice(self._iv, size=len(h), p=self._ivp)
-            h[:, ON] += rng.normal(0, c.halluc_onset_std, len(h))
-            h[:, DUR] *= rng.uniform(*c.halluc_dur_ratio, len(h))
-            h[:, VEL] *= rng.uniform(*c.halluc_vel_ratio, len(h))
-            h = h[(h[:, P] >= 21) & (h[:, P] <= 108)]
+        # 3) hallucinated notes
+        if self.empirical:
+            h = self._bank_hallucinations(n, rng)
         else:
-            h = n[:0]
+            h = self._parametric_hallucinations(n, rng)
         n = n[keep]
 
         # 4) timing / duration / velocity jitter on real notes
@@ -101,10 +181,12 @@ class NoiseModel:
         n[:, VEL] += rng.normal(0, c.velocity_std, len(n))
 
         out = np.concatenate([n, h])
+        labels = np.concatenate([np.zeros(len(n), np.int8), np.ones(len(h), np.int8)])
         out[:, ON] = np.maximum(out[:, ON], 0)
         out[:, DUR] = np.maximum(out[:, DUR], 0.01)
         out[:, VEL] = np.clip(np.round(out[:, VEL]), 1, 127)
-        out = out[np.lexsort((out[:, P], out[:, ON]))]
+        order = np.lexsort((out[:, P], out[:, ON]))
+        out, labels = out[order], labels[order]
 
         ped = pedal.copy()
         if len(ped):
@@ -112,4 +194,6 @@ class NoiseModel:
             ped = ped + rng.normal(0, c.pedal_time_std, ped.shape).astype(np.float32)
             ped[:, 0] = np.maximum(ped[:, 0], 0)
             ped = ped[ped[:, 1] > ped[:, 0]]
+        if return_labels:
+            return out.astype(np.float32), ped.astype(np.float32), labels
         return out.astype(np.float32), ped.astype(np.float32)
