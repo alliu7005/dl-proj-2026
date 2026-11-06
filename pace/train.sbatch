@@ -6,7 +6,7 @@
 #   sbatch --export=ALL,NAME=s2s,ARGS="--arch score2seq" pace/train.sbatch  # Michael's model, same loop
 # Resubmitting the same NAME resumes from outputs/runs/NAME/last.pt (e.g. after the time limit).
 # PACE ICE limits: 8 h walltime and 16 GPU hours per job. Any GPU works (bf16 needs A100/H100/L40S
-# or newer for full speed); to ask for one type, see `sinfo -o "%P %G"` and e.g. --gres=gpu:H100:1.
+# or newer for full speed); to ask for one type, see `sinfo -o "%P %G"` and e.g. --gres=gpu:h100:1 (lowercase; also h200, rtx_pro_6000_blackwell, a100). Avoid v100 (no bf16) and mi210/r9700 (AMD).
 #SBATCH -J scoreformer
 #SBATCH --gres=gpu:1
 #SBATCH -c 8

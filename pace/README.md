@@ -43,7 +43,7 @@ If the job log says the compute node has no internet, run
 ## 3. Smoke run (GPU, ~30–45 min)
 
 ```bash
-sbatch pace/smoke.sbatch
+sbatch --gres=gpu:h100:1 pace/smoke.sbatch
 squeue -u $USER                     # job status
 tail -f slurm-pianoscore-smoke-*.out
 ```
@@ -69,8 +69,10 @@ Each job trains, then runs `scripts/evaluate_pieces.py` (all conditions, oracle/
 MusicXML for 5 pieces). A run that hits the 8 h limit is resumed by submitting the same command
 again (it picks up `outputs/runs/<NAME>/last.pt`).
 
-Ask for an A100/H100/L40S if you can (e.g. `--gres=gpu:H100:1`; list types with
-`sinfo -o "%P %G"`). V100s have no bf16, so the scripts fall back to fp32 there (slower).
+Pick the GPU at submit time, e.g. `sbatch --gres=gpu:h100:1 pace/train.sbatch`. Names are
+lowercase (`sinfo -o "%G" | sort -u` lists them): `h100`, `h200`, `rtx_pro_6000_blackwell` (16 cards,
+often the shortest queue), `a100`, `l40s`. Avoid `v100` (no bf16, the scripts fall back to slower
+fp32) and `mi210` / `r9700` (AMD GPUs, the CUDA build of torch can't use them).
 
 ## 5. Bring results back
 
