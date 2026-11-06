@@ -125,6 +125,28 @@ def store_lengths(store, max_notes: int, max_tokens: int):
     return tok, notes
 
 
+def append_log(path: Path, row: dict):
+    """Append one row to log.csv. If the row has columns the file doesn't (e.g. resuming a run made
+    with an older version), the file is rewritten with the union of columns so nothing misaligns."""
+    if path.exists():
+        with open(path, newline="") as f:
+            old = list(csv.DictReader(f))
+            fields = list(old[0].keys()) if old else []
+        if not fields or any(k not in fields for k in row):
+            fields += [k for k in row if k not in fields]
+            with open(path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=fields)
+                w.writeheader()
+                w.writerows(old)
+        with open(path, "a", newline="") as f:
+            csv.DictWriter(f, fieldnames=fields).writerow(row)
+    else:
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(row))
+            w.writeheader()
+            w.writerow(row)
+
+
 def pick_device(name: str) -> torch.device:
     if name != "auto":
         return torch.device(name)
@@ -310,6 +332,7 @@ def main():
     model.train()
     t0 = time.time()
     t_int, tok_int, wait_int, run_loss, n_loss = time.time(), 0, 0.0, 0.0, 0
+    tr_sum, tr_n = 0.0, 0  # training loss since the last eval, WITHOUT label smoothing (comparable to val)
     try:
         while step < total_steps:
             if hasattr(train, "set_epoch"):
@@ -332,6 +355,9 @@ def main():
                 opt.step()
                 step += 1
                 run_loss += loss.item()
+                with torch.no_grad():
+                    tr_sum += token_loss(logits.detach(), b["target"], b["loss_mask"], weights).item()
+                    tr_n += 1
                 n_loss += 1
                 tok_int += int(b["loss_mask"].sum())
                 if step % 100 == 0:
@@ -342,13 +368,10 @@ def main():
                     t_int, tok_int, wait_int, run_loss, n_loss = time.time(), 0, 0.0, 0.0, 0
                 if step % args.eval_every == 0 or step == total_steps:
                     res = evaluator.run(model, device, amp, args.batch_size, weights)
-                    res.update(step=step, epoch=epoch, lr=lr_at(step), minutes=round((time.time() - t0) / 60, 1))
-                    new = not log_path.exists()
-                    with open(log_path, "a", newline="") as f:
-                        w = csv.DictWriter(f, fieldnames=list(res))
-                        if new:
-                            w.writeheader()
-                        w.writerow(res)
+                    res.update(train_loss=tr_sum / max(tr_n, 1), step=step, epoch=epoch, lr=lr_at(step),
+                               minutes=round((time.time() - t0) / 60, 1))
+                    tr_sum, tr_n = 0.0, 0
+                    append_log(log_path, res)
                     print("  eval " + " | ".join(f"{k}={v:.3f}" for k, v in res.items()
                                                 if isinstance(v, float) and ("loss" in k or "f1" in k or "acc" in k)), flush=True)
                     if res["val_real_loss"] < best:
