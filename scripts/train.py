@@ -220,6 +220,10 @@ def main():
     ap.add_argument("--max-steps", type=int, default=0, help="stop after this many steps (debugging)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--normal-priority", action="store_true")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the training step (needs Triton; Windows: pip install triton-windows). "
+                         "Measured SLOWER here (~167k vs ~350k tok/s on an RTX 5070 Ti): variable batch "
+                         "shapes force dynamic compilation, which loses to PyTorch's fused attention")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     if not args.normal_priority:
@@ -267,6 +271,9 @@ def main():
                       dec_layers=args.dec_layers, ff=4 * args.d_model, n_heads=max(4, args.d_model // 32),
                       max_tokens=args.max_tokens, max_notes=args.max_notes)
     model = Score2Seq(cfg).to(device)
+    torch.set_float32_matmul_precision("high")
+    # compiled wrapper only for the training forward; checkpoints / eval / generation use `model`
+    fwd = torch.compile(model, dynamic=True) if args.compile else model
     n_params = sum(p.numel() for p in model.parameters())
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.98), weight_decay=args.weight_decay,
                             fused=device.type == "cuda")
@@ -317,7 +324,7 @@ def main():
                 for g in opt.param_groups:
                     g["lr"] = lr_at(step)
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-                    logits = model(b["notes"], b["note_mask"], b["target"][:, :-1])
+                    logits = fwd(b["notes"], b["note_mask"], b["target"][:, :-1])
                 loss = token_loss(logits, b["target"], b["loss_mask"], weights, args.label_smoothing)
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
