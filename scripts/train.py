@@ -69,6 +69,62 @@ class TruncatingCollate:
         return collate(batch)
 
 
+class TokenBudgetBatches(torch.utils.data.Sampler):
+    """Length-bucketed batches with a token budget instead of a fixed batch size.
+
+    Draws a pool of indices from ``base`` (e.g. the weighted sampler, so oversampling is kept),
+    sorts the pool by length, and cuts it into batches whose padded size stays within budget:
+    batch_size * longest target <= ``max_tokens`` and batch_size * longest input <= ``max_notes``.
+    Batches are then shuffled. Similar lengths per batch -> little padding -> more real tokens
+    per GPU step."""
+
+    def __init__(self, base, tok_len, note_len, max_tokens: int, max_notes: int, pool_batches: int = 50,
+                 max_batch: int = 256, seed: int = 0):
+        self.base, self.tok, self.notes = base, np.asarray(tok_len), np.asarray(note_len)
+        self.max_tokens, self.max_notes, self.max_batch = max_tokens, max_notes, max_batch
+        self.pool = pool_batches * max(1, max_tokens // max(int(np.median(self.tok)), 1))
+        self.seed, self.epoch = seed, 0
+        # estimated number of batches per pass (used for schedules / progress)
+        mean_tok = float(np.mean(np.minimum(self.tok, max_tokens)))
+        self._len = max(1, int(len(base) * mean_tok * 1.08 / max_tokens))
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def __len__(self):
+        return self._len
+
+    def __iter__(self):
+        rng = np.random.default_rng((self.seed, self.epoch))
+        it = iter(self.base)
+        while True:
+            pool = [i for _, i in zip(range(self.pool), it)]
+            if not pool:
+                return
+            pool.sort(key=lambda i: (self.tok[i], self.notes[i]))
+            batches, cur, mt, mn = [], [], 0, 0
+            for i in pool:
+                t, n = int(self.tok[i]), int(self.notes[i])
+                if cur and (len(cur) >= self.max_batch or (len(cur) + 1) * max(mt, t) > self.max_tokens
+                            or (len(cur) + 1) * max(mn, n) > self.max_notes):
+                    batches.append(cur)
+                    cur, mt, mn = [], 0, 0
+                cur.append(i)
+                mt, mn = max(mt, t), max(mn, n)
+            if cur:
+                batches.append(cur)
+            for k in rng.permutation(len(batches)):
+                yield batches[k]
+
+
+def store_lengths(store, max_notes: int, max_tokens: int):
+    """(token length incl. bos/sep/eos, input notes) per window, capped like the collate."""
+    idx = store.index
+    tok = np.minimum(idx[:, 5] - idx[:, 4] + 3, max_tokens)
+    notes = np.minimum(idx[:, 1] - idx[:, 0], max_notes)
+    return tok, notes
+
+
 def pick_device(name: str) -> torch.device:
     if name != "auto":
         return torch.device(name)
@@ -139,7 +195,11 @@ def main():
     ap.add_argument("--name", default="base")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--epochs", type=float, default=10)
-    ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--batch-tokens", type=int, default=16384,
+                    help="token budget per batch (batch size x longest target, incl. padding)")
+    ap.add_argument("--batch-notes", type=int, default=8192,
+                    help="input-note budget per batch (batch size x longest input)")
+    ap.add_argument("--batch-size", type=int, default=32, help="batch size for evaluation")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--warmup", type=int, default=2000)
     ap.add_argument("--weight-decay", type=float, default=0.01)
@@ -152,7 +212,8 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=2048)
     ap.add_argument("--no-noise", action="store_true", help="clean inputs only (no synthetic noise, no real transcriptions)")
     ap.add_argument("--noise", default="configs/noise_stats.json")
-    ap.add_argument("--workers", type=int, default=2, help="DataLoader worker processes")
+    ap.add_argument("--workers", type=int, default=6,
+                    help="CPU processes preparing batches (noise, augmentation, features); lower if the PC lags")
     ap.add_argument("--eval-every", type=int, default=2000)
     ap.add_argument("--eval-loss-windows", type=int, default=400)
     ap.add_argument("--eval-decode-windows", type=int, default=48)
@@ -186,9 +247,16 @@ def main():
         sampler = train.sampler()
     vocab = train.vocab
     coll = TruncatingCollate(args.max_notes, args.max_tokens)
-    dl = torch.utils.data.DataLoader(train, batch_size=args.batch_size, sampler=sampler, collate_fn=coll,
+    if args.no_noise:
+        tok_len, note_len = store_lengths(train.store, args.max_notes, args.max_tokens)
+    else:
+        a, b = store_lengths(train.synthetic.store, args.max_notes, args.max_tokens)
+        c, d = store_lengths(train.real.store, args.max_notes, args.max_tokens)
+        tok_len, note_len = np.concatenate([a, c]), np.concatenate([b, d])
+    batches = TokenBudgetBatches(sampler, tok_len, note_len, args.batch_tokens, args.batch_notes, seed=args.seed)
+    dl = torch.utils.data.DataLoader(train, batch_sampler=batches, collate_fn=coll,
                                      num_workers=args.workers, pin_memory=device.type == "cuda",
-                                     drop_last=True)
+                                     prefetch_factor=4 if args.workers else None)
     steps_per_epoch = len(dl)
     total_steps = int(args.epochs * steps_per_epoch)
     if args.max_steps:
@@ -200,7 +268,8 @@ def main():
                       max_tokens=args.max_tokens, max_notes=args.max_notes)
     model = Score2Seq(cfg).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.98), weight_decay=args.weight_decay)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.98), weight_decay=args.weight_decay,
+                            fused=device.type == "cuda")
 
     def lr_at(step):
         if step < args.warmup:
@@ -232,12 +301,16 @@ def main():
 
     log_path = run / "log.csv"
     model.train()
-    t0, seen_tok, run_loss, n_loss = time.time(), 0, 0.0, 0
+    t0 = time.time()
+    t_int, tok_int, wait_int, run_loss, n_loss = time.time(), 0, 0.0, 0.0, 0
     try:
         while step < total_steps:
             if hasattr(train, "set_epoch"):
                 train.set_epoch(epoch)
+            batches.set_epoch(epoch)
+            t_wait = time.time()
             for b in dl:
+                wait_int += time.time() - t_wait
                 if step >= total_steps:
                     break
                 b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
@@ -253,12 +326,13 @@ def main():
                 step += 1
                 run_loss += loss.item()
                 n_loss += 1
-                seen_tok += int(b["loss_mask"].sum())
+                tok_int += int(b["loss_mask"].sum())
                 if step % 100 == 0:
-                    el = time.time() - t0
+                    el = time.time() - t_int
                     print(f"step {step}/{total_steps} ep {epoch} loss {run_loss / n_loss:.4f} "
-                          f"lr {lr_at(step):.2e} | {seen_tok / el:.0f} tok/s", flush=True)
-                    run_loss, n_loss = 0.0, 0
+                          f"lr {lr_at(step):.2e} | {tok_int / el:.0f} tok/s, waiting for data "
+                          f"{100 * wait_int / el:.0f}%", flush=True)
+                    t_int, tok_int, wait_int, run_loss, n_loss = time.time(), 0, 0.0, 0.0, 0
                 if step % args.eval_every == 0 or step == total_steps:
                     res = evaluator.run(model, device, amp, args.batch_size, weights)
                     res.update(step=step, epoch=epoch, lr=lr_at(step), minutes=round((time.time() - t0) / 60, 1))
@@ -274,6 +348,8 @@ def main():
                         best = res["val_real_loss"]
                         save(run / "best.pt")
                     save(run / "last.pt")
+                    t_int, tok_int, wait_int = time.time(), 0, 0.0  # don't count eval time
+                t_wait = time.time()
             else:
                 epoch += 1
                 continue

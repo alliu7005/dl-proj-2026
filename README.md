@@ -425,9 +425,16 @@ python scripts/evaluate.py --run base           # test sets, same metrics/window
   noise and augmentation) and `train_transcribed`, in their natural proportion.
 - **Optimization:** bf16 mixed precision, AdamW, 2,000 warmup steps then cosine decay, label
   smoothing 0.1, rare ornament/pedal tokens weighted 5× in the loss.
-- **Speed:** about 20 min per epoch on an RTX 5070 Ti (~83k target tokens/s, batch 16). The
-  default 10 epochs takes about 3.5 h plus evaluations.
-- **Runs at below-normal CPU priority** with 2 data-loading workers (`--workers`).
+- **Batching:** windows are grouped by length, and each batch is filled up to a token budget
+  (`--batch-tokens 16384`, `--batch-notes 8192`) instead of a fixed number of windows, so little
+  GPU time goes to padding.
+- **Decoder attention:** uses PyTorch's fused flash-attention kernel (pure causal mask during
+  training). Generation uses a key/value cache, which gives identical output to step-by-step
+  decoding but runs ~5× faster.
+- **Speed:** ~350k target tokens/s on an RTX 5070 Ti, about **5 min per epoch** (3.5× faster
+  than the first version). The default 10 epochs takes under an hour plus evaluations.
+- **CPU workers:** 6 processes prepare batches (`--workers`); the GPU never waits for data.
+  Lower this if the PC lags. Everything runs at below-normal CPU priority.
 - **Every `--eval-every` steps:** teacher-forced loss and token accuracy on fixed val subsets, plus
   greedy decoding of a few windows from `val` (ASAP), `val` (PERiScoPe) and `val_transcribed`,
   scored with the baseline metrics. Logged to `outputs/runs/<name>/log.csv`.
