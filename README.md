@@ -31,7 +31,7 @@ python scripts/fetch_pianocore.py
 
 | step | command | time |
 |---|---|---|
-| 1. build train/val/test/test_periscope segments | `python scripts/build_dataset.py` | ~3 min ASAP + PianoCoRe |
+| 1. build train/val/test/test_periscope segments | `python scripts/build_dataset.py` | ~3 min ASAP; PianoCoRe ~1–2 h with 6 workers (raise `workers` on a bigger machine) |
 | 2. check targets survive tokens → MusicXML → tokens | `python -m tests.test_roundtrip --split val` | ~2 min |
 | 2b. check window cutting (stitching, prompts) | `python -m tests.test_windows --n 40` | ~3 min |
 | 3. fit the noise model on real Transkun transcriptions | see [Noise model](#noise-model) | ~30 min with a GPU |
@@ -146,7 +146,18 @@ Window `i`'s notes are `notes[index[i,0]:index[i,1]]`, and likewise for pedal. I
 The arrays are memory-mapped, so nothing loads into RAM until it's used. Read through the Dataset,
 not the raw arrays: it also drops released carried-over candidates (below) and scales the features.
 
-SPLIT_TABLE_PLACEHOLDER
+Expected sizes (full PERiScoPe download; `report.json` has the exact counts after a build):
+
+| split | ASAP | PERiScoPe |
+|---|---|---|
+| train | 779 performances, 166 compositions → 35,873 windows (48–192 notes, 50% overlap) | ~85% of 1,200 works, ~5.7k performances → roughly 250k windows (estimate) |
+| val | 79 performances, 16 compositions → 2,203 windows (~128 notes) | ~5% of works |
+| test | Beyer & Dai: 59 performances, 14 pieces → 1,725 windows | none (Beyer & Dai test works are excluded from PERiScoPe) |
+| test_periscope | none | ~10% of works, ~670 performances |
+
+The ASAP counts are from a full build. The PERiScoPe rows are estimates from the download
+selection; the per-performance alignment checks (`tests/test_windows.py --source pianocore`) passed
+on all 25 sampled performances, with a median window input-vs-target pitch F1 of 0.975.
 
 ### Note details
 
