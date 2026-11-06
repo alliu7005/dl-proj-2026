@@ -79,9 +79,9 @@ def process_pianocore_score(pc_dir: str, score_path: str, items, cfg: SegmentCon
         measures = load_unfolded_score(sc["score_xml_bytes"], Path(sc["score_xml_path"]).suffix)
         shift, match = score_midi_shift(row(*items[0][:2])["refined_score_midi_bytes"], measures)
     except Exception as e:  # noqa: BLE001
-        return None, [{"piece": key, "error": f"score: {e!r}"[:300]}], (0, 0, 0, 0), Counter()
+        return None, [{"piece": key, "dataset": "pianocore", "error": f"score: {e!r}"[:300]}], (0, 0, 0, 0), Counter()
     if match < min_score_match:
-        return None, [{"piece": key, "skipped": f"score_midi_vs_xml_match_{match:.2f}"}], (0, 0, 0, 0), Counter()
+        return None, [{"piece": key, "dataset": "pianocore", "skipped": f"score_midi_vs_xml_match_{match:.2f}"}], (0, 0, 0, 0), Counter()
     segs, reports = [], []
     for f, i, m in items:
         perf = m["id"]
@@ -147,7 +147,7 @@ def process_piece(root: str, folder: str, items, cfg: SegmentConfig, split: str,
         except Exception as e:  # noqa: BLE001
             err = err or e
     if measures is None:
-        return None, [{"piece": folder, "error": f"score: {err!r}"}], (0, 0, 0, 0), Counter()
+        return None, [{"piece": folder, "dataset": "asap", "error": f"score: {err!r}"}], (0, 0, 0, 0), Counter()
     segs, reports = [], []
     for row, ann in items:
         perf = row["midi_performance"]
