@@ -3,7 +3,7 @@
     python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out data/noise_stats.json
 
 ``pairs.csv`` (written by scripts/transcribe.py) has columns ``pred,gt[,maestro_split]``. Only rows
-from the MAESTRO *test* split are used (``--maestro-split``): Kong et al.'s transcriber was trained
+from the MAESTRO *test* split are used (``--maestro-split``): Transkun V2 was trained
 on MAESTRO train, so train-split transcriptions are unrealistically clean.
 """
 from __future__ import annotations

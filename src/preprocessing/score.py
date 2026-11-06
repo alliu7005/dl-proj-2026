@@ -93,10 +93,11 @@ def _is_arpeggio(el) -> bool:
     return any("Arpeggio" in type(s).__name__ for s in el.getSpannerSites())
 
 
-def load_score(path: str) -> list[Measure]:
-    """Parse a MusicXML file into a list of measures indexed by measure *index* (0-based),
-    which is what ASAP's ``downbeats_score_map`` refers to."""
-    score = m21.converter.parse(str(path))
+def load_score(path) -> list[Measure]:
+    """Parse a MusicXML file (or an already-parsed music21 Score, e.g. with repeats expanded)
+    into a list of measures indexed by measure *index* (0-based), which is what ASAP's
+    ``downbeats_score_map`` refers to."""
+    score = path if isinstance(path, m21.stream.Score) else m21.converter.parse(str(path))
     parts = list(score.parts)
     staves = [list(p.getElementsByClass("Measure")) for p in parts]
     n = max(len(s) for s in staves)

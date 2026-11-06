@@ -3,7 +3,19 @@ pretty_midi>=0.2.10
 music21>=9.1
 pyyaml>=6.0
 tqdm>=4.66
+pandas
+pyarrow
+symusic
+huggingface_hub
 # training / data loading
 torch>=2.4
-# optional: Kong et al. (2021) transcriber, only needed for scripts/transcribe.py
-# piano_transcription_inference
+# Transkun V2 transcriber, only needed for scripts/transcribe.py. Install transkun itself with
+# `pip install --no-deps transkun==2.0.1` (its ncls/sox deps are training-only; see environment.yml)
+torchaudio
+moduleconf
+mir-eval
+pydub
+torch-optimizer
+soxr
+librosa
+soundfile

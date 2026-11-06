@@ -1,98 +1,167 @@
 # dl-proj-2026: Noise-Robust Piano Score Reconstruction
 
-Audio → Kong et al. (2021) transcriber → noisy performance MIDI → seq2seq transformer → score tokens → MusicXML.
+Audio → **Transkun V2** transcriber (Yan & Duan, ISMIR 2024) → noisy performance MIDI →
+seq2seq transformer → score tokens → MusicXML.
 
-This branch (`michael`) contains the complete data preprocessing pipeline.
+Training data:
+- **ASAP**: clean Disklavier MIDI with hand-checked beat annotations, plus synthetic
+  transcription noise fitted on Transkun's real errors.
+- **PianoCoRe's PERiScoPe subset**: real Transkun V2 transcriptions aligned to scores, so the
+  model sees the inference transcriber's own errors.
 
 ## Setup
 
 ```bash
-python -m venv .venv && .venv/Scripts/activate         # macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
+conda env create -f environment.yml && conda activate dl-proj
+pip install --no-deps transkun==2.0.1      # its ncls dep needs a C compiler on Windows; training-only
 
 # Beyer & Dai's ASAP fork (fixes ties/duplicate notes in 49 scores), pinned for reproducibility
 git clone https://github.com/TimFelixBeyer/asap-dataset.git data/raw/asap_bd
 git -C data/raw/asap_bd checkout 8cba199e15931975542010a7ea2ff94a6fc9cbee
 # original ASAP, only used as a fallback for one score the fork can't parse (Ravel/Pavane)
 git clone --depth 1 https://github.com/fosfrancesco/asap-dataset.git data/raw/asap
+
+# PianoCoRe: metadata (~35 MB streamed), then the PERiScoPe subset (~6 GB streamed, ~300 MB kept;
+# add --max-row-groups 20 for a quick test download)
+python scripts/fetch_pianocore_meta.py
+python scripts/fetch_pianocore.py
 ```
 
 ## Quick start
 
 | step | command | time |
 |---|---|---|
-| 1. build train/val/test segments | `python scripts/build_dataset.py` | ~3 min |
+| 1. build train/val/test/test_periscope segments | `python scripts/build_dataset.py` | ~3 min ASAP + PianoCoRe |
 | 2. check targets survive tokens → MusicXML → tokens | `python -m tests.test_roundtrip --split val` | ~2 min |
 | 2b. check window cutting (stitching, prompts) | `python -m tests.test_windows --n 40` | ~3 min |
-| 3. *(already done; output in `data/noise_stats.json`)* fit the noise model on real transcriptions | see [Noise model](#noise-model) | ~1 h with a GPU |
-| 4. *(optional)* build the real-transcription eval split | `python scripts/build_transcribed_eval.py --asap-split test` | ~1 min |
+| 3. fit the noise model on real Transkun transcriptions | see [Noise model](#noise-model) | ~30 min with a GPU |
+| 4. *(optional)* build the real-transcription ASAP eval split | `python scripts/build_transcribed_eval.py --asap-split test` | ~1 min |
 
 `data/` is git-ignored. Share `data/noise_stats.json` with the team (it's small), or re-run step 3.
 
-## Output format
+## Model inputs and outputs
 
-`data/processed/` contains:
+One training example = one **window** of ~48–192 performed notes (see [Windows](#windows-no-bar-lines-needed-at-inference))
+→ the score for exactly those notes, as tokens. `src.dataset.collate` returns a batch dict:
 
-```
-vocab.json                 343 target tokens incl. <sep> (+ training counts)
-splits.json                piece -> train/val/test
-report.json                per-performance stats, skips, and dropped segments
-train/  val/  test/        one directory per split, each holding:
-  notes.npy   float32 [total_notes, 4]   pitch, onset (s, rel. to segment start; < 0 = carried over), duration (s), velocity
-  pedal.npy   float32 [total_pedal, 2]   sustain pedal (on, off) in seconds, rel. to segment start
-  tokens.npy  int16   [total_tokens]     prompt + target token ids (no <bos>/<sep>/<eos>)
-  index.npy   int64   [n_segments, 7]    note_lo, note_hi, pedal_lo, pedal_hi, tok_lo, tok_hi, tgt_lo
-  meta.jsonl  one line per segment       piece, performance, win, s_lo, s_hi, start_pos, bar_start, ...
-test_transcribed/          same layout; inputs are REAL Kong transcriptions, targets = clean test targets
-```
+| key | dtype, shape | content |
+|---|---|---|
+| `notes` | float32 `[B, N, 8]` | one row per performed note, sorted by onset, zero-padded (features below) |
+| `note_mask` | bool `[B, N]` | True = real note, False = padding |
+| `target` | int64 `[B, T]` | `<bos> [prompt <sep>] target tokens <eos>`, padded with 0 (`<pad>`) |
+| `loss_mask` | bool `[B, T]` | True on the tokens to learn: the target tokens and `<eos>`. Not on `<bos>`, the prompt, `<sep>` or padding |
 
-Segment `i`'s notes are `notes[index[i,0]:index[i,1]]`, and likewise for pedal. Its prompt is
-`tokens[tok_lo:tgt_lo]` and its target `tokens[tgt_lo:tok_hi]` (`SegmentStore.get` / `get_prompt`).
-The arrays are memory-mapped, so nothing loads into RAM until it's used.
+Limits: N ≤ 768 notes (val median ~124), T ≤ 1536 tokens (val median ~520, max ~950).
 
-| split | windows | performances | compositions |
+### Encoder input: 8 features per note
+
+| col | feature | values | how to feed it |
 |---|---|---|---|
-| train | 35,873 (48–192 notes, 50% overlap) | 779 | 166 |
-| val | 2,203 (~128 notes, no overlap) | 79 | 16 |
-| test | 1,725 (~128 notes, no overlap) | 59 | 14 |
-| test_transcribed | not rebuilt yet for windows (needs data/transcribed) | | |
+| 0 | pitch | MIDI 21–108 (integer stored as float) | embedding: `pitch.long() - 21` → 88 classes |
+| 1 | onset | seconds from window start; < 0 = carried over | standardized (train mean/std); use for a time (sinusoidal) position encoding |
+| 2 | inter-onset gap | seconds since previous note | standardized |
+| 3 | log duration | log(seconds) | standardized |
+| 4 | velocity | /127 | standardized |
+| 5 | pedal down at onset | 0/1 | as is |
+| 6 | pedal down at release | 0/1 | as is |
+| 7 | carried over | 0/1: struck before the window, still held into it | as is |
 
-### Loading for training
+Columns 1–4 are standardized with `data/processed/feature_stats.json`, written by
+`build_dataset.py` and loaded automatically by the Dataset. Pedal timing is only visible through
+columns 5–6. The raw pedal intervals are in `pedal.npy` if the model wants them as separate events.
+
+### Decoder output: score tokens
+
+- **Vocabulary:** `data/processed/vocab.json`, 343 tokens. Fixed ids: `<pad>`=0, `<bos>`=1,
+  `<eos>`=2, `<unk>`=3, `<sep>`=4. Grammar: [Target tokens](#target-tokens).
+- **Training (teacher forcing):**
+  - decoder input `target[:, :-1]`, labels `target[:, 1:]`;
+  - cross-entropy only where `loss_mask[:, 1:]`;
+  - per-token weights from `vocab.loss_weights(ornament_weight=5.0)` (rare ornament and pedal
+    tokens up-weighted).
+- **Inference, per window:**
+  - start the decoder with `<bos> prompt <sep>`, where prompt =
+    `segment.prompt_from_output(all tokens decoded so far)` (empty for the first window → just `<bos>`);
+  - decode until `<eos>`.
+  - Concatenate the windows' outputs in order and drop a window's opening `ped_on` if the pedal
+    was already down.
+  - `detokenize.tokens_to_musicxml(tokens, "out.musicxml")` writes the score.
+
+### Splits and sources
+
+| split | contents | inputs | use |
+|---|---|---|---|
+| `train` | ASAP + PERiScoPe | ASAP: clean + synthetic noise (Dataset adds it); PERiScoPe: real Transkun output | training |
+| `val` | ASAP + PERiScoPe | clean / real Transkun | model selection |
+| `test` | Beyer & Dai's ASAP test set (14 pieces, 59 performances) | clean Disklavier MIDI | comparison with Beyer & Dai |
+| `test_periscope` | 10% of PERiScoPe works, none seen in training | real Transkun output | **main test: realistic inference input** |
+| `test_transcribed` | ASAP test with Transkun transcriptions of MAESTRO audio (optional build) | real Transkun output | small real-audio check; most of this audio was in Transkun's training data |
+
+Every item's `meta.jsonl` line has `dataset` (`asap`/`pianocore`) and `source` (`clean` /
+`transkun_real`); the Dataset adds synthetic noise only to `source == "clean"` items.
+
+### Loading
 
 ```python
 from torch.utils.data import DataLoader
 from src.dataset import ScoreSegmentDataset, collate
 from src.preprocessing.noise import NoiseModel
 
-train = ScoreSegmentDataset("data/processed/train", "data/processed/vocab.json",
-                            noise=NoiseModel.from_json("data/noise_stats.json"))
+V = "data/processed/vocab.json"
+train = ScoreSegmentDataset("data/processed/train", V, noise=NoiseModel.from_json("data/noise_stats.json"))
 dl = DataLoader(train, batch_size=32, sampler=train.sampler(), collate_fn=collate, num_workers=4)
 for epoch in range(E):
     train.set_epoch(epoch)                   # fresh (reproducible) noise every epoch
-    for b in dl: ...                         # notes [B,N,8], note_mask [B,N], target [B,T] (pad = 0),
-                                             # loss_mask [B,T]: train only on target tokens, not the prompt
+    for b in dl: ...                         # b["notes"], b["note_mask"], b["target"], b["loss_mask"]
 
-loss_w = train.vocab.loss_weights(ornament_weight=5.0)   # -> nn.CrossEntropyLoss(weight=...)
-val = ScoreSegmentDataset("data/processed/val", "data/processed/vocab.json")          # clean inputs
-real = ScoreSegmentDataset("data/processed/test_transcribed", "data/processed/vocab.json")
+loss_w = train.vocab.loss_weights(ornament_weight=5.0)    # -> nn.CrossEntropyLoss(weight=..., reduction="none")
+val = ScoreSegmentDataset("data/processed/val", V)                       # no noise, no prompt dropout
+test = ScoreSegmentDataset("data/processed/test_periscope", V)
 ```
 
-- **Note features (8 per note):** pitch, onset, inter-onset gap, log duration, velocity/127,
-  whether the pedal is down at onset and at offset, and whether the note is carried over.
-- **Carried-over notes:** notes struck before a segment but still held at least 1/4 quarter into it
+- **Noise:** `noise=` turns on training mode: synthetic noise on clean (ASAP) items and 10% prompt
+  dropout. Leave it out for val/test.
+- **Oversampling:** `sampler()` draws windows with grace notes, arpeggios or ornaments 3× as often.
+
+## On-disk format
+
+`data/processed/` contains:
+
+```
+vocab.json                 343 target tokens incl. <sep> (+ training counts)
+feature_stats.json         mean/std of the continuous note features (train)
+splits.json                composition -> split, for ASAP folders and PianoCoRe works
+report.json                per-performance stats, skips, and dropped windows
+train/ val/ test/ test_periscope/   one directory per split, each holding:
+  notes.npy   float32 [total_notes, 4]   pitch, onset (s, rel. to window start; < 0 = carried over), duration (s), velocity
+  pedal.npy   float32 [total_pedal, 2]   sustain pedal (on, off) in seconds, rel. to window start
+  tokens.npy  int16   [total_tokens]     prompt + target token ids (no <bos>/<sep>/<eos>)
+  index.npy   int64   [n_windows, 7]     note_lo, note_hi, pedal_lo, pedal_hi, tok_lo, tok_hi, tgt_lo
+  meta.jsonl  one line per window        dataset, source, piece, performance, win, s_lo, s_hi, start_pos, ...
+test_transcribed/          same layout; inputs are REAL Transkun transcriptions, targets = clean test targets
+```
+
+Window `i`'s notes are `notes[index[i,0]:index[i,1]]`, and likewise for pedal. Its prompt is
+`tokens[tok_lo:tgt_lo]` and its target `tokens[tgt_lo:tok_hi]` (`SegmentStore.get` / `get_prompt`).
+The arrays are memory-mapped, so nothing loads into RAM until it's used. Read through the Dataset,
+not the raw arrays: it also drops released carried-over candidates (below) and scales the features.
+
+SPLIT_TABLE_PLACEHOLDER
+
+### Note details
+
+- **Carried-over notes:** notes struck before a window but still held at least 1/4 quarter into it
   are included with a negative onset, so a target note tied over the window's first bar line
-  (`... tie`) has input evidence. Pedal presses that started before the segment likewise keep a
+  (`... tie`) has input evidence. Pedal presses that started before the window likewise keep a
   negative start. The noise model never moves a note or pedal across t = 0.
   - `notes.npy` also stores *pedal-sustained* candidates (key released, pedal still down). The
-    Dataset drops them after noise unless the key is still down at the segment's `carry_min_sec`,
-    so clean inputs only show key-held notes, while Kong-style pedal lengthening in the noise model
-    produces carried notes the way real Kong transcriptions do. Anything reading `notes.npy`
+    Dataset drops them after noise unless the key is still down at the window's `carry_min_sec`,
+    so clean inputs only show key-held notes, while pedal lengthening in the noise model
+    produces carried notes the way real transcriptions can. Anything reading `notes.npy`
     directly should apply `src.dataset.drop_released_carried` too.
   - About half of the ties into a window's first beat get a carried note. Most of the rest are
     tied notes the pianist released early and held with the pedal (about 25%), or released early
-    with no pedal, so the model still has to infer some ties from the music. Carrying all
-    pedal-sustained notes would cover 72% of ties, but 94% of what it adds are not ties.
-- **Oversampling:** `sampler()` draws segments with grace notes, arpeggios or ornaments 3× as often.
+    with no pedal, so the model still has to infer some ties from the music.
 
 ### Windows: no bar lines needed at inference
 
@@ -257,14 +326,34 @@ scripts/           build_dataset, make_bd_split, fetch_maestro_audio, transcribe
 tests/test_roundtrip.py
 ```
 
-## Not done yet: PianoCoRe
+## PianoCoRe (PERiScoPe subset)
 
-PianoCoRe ([repo](https://github.com/ilya16/PianoCoRe), [paper](https://doi.org/10.5334/tismir.333))
-already contains ASAP. When adding it:
+[PianoCoRe](https://github.com/ilya16/PianoCoRe) ([paper](https://doi.org/10.5334/tismir.333))
+combines several piano datasets. Its PERiScoPe performances were transcribed from audio with
+Transkun V2, the same transcriber used here at inference, and aligned note by note to scores.
 
-- send its scores through the same `load_score` / `tokenize_bars`;
-- map its pieces to the same composition IDs, so no Beyer & Dai test piece enters training;
-- de-duplicate performances that also appear in ASAP;
-- sample per score (it has about 100 performances per score).
-
-The shard → vocab → memory-mapped flow in `build_dataset.py` already scales to it.
+- **Selection** (`scripts/fetch_pianocore.py`):
+  - tier A* (best alignments), PERiScoPe only, no Beyer & Dai test works;
+  - 10 random performances per work: 6,714 performances, 1,200 works (1,003 not in ASAP), 481 h.
+  - Only the needed parquet columns are streamed. ASAP's own performances are not taken from
+    PianoCoRe (ASAP is used directly).
+- **Inputs are the raw transcriptions**, so real Transkun errors stay in (`source: transkun_real`).
+  The Dataset never adds synthetic noise to them.
+- **Bars without beat annotations.**
+  - PianoCoRe's score MIDI plays repeats and puts pickups at the end of a full bar, so the
+    MusicXML is unfolded (music21 `expandRepeats`) and a constant offset is fitted
+    (`score_midi_shift`). On 28 sampled scores the median onset+pitch agreement was 0.989.
+    Scores below 0.9 are skipped.
+  - The refined alignment then gives (performance time, score quarter) pairs per note, which
+    `segment.timeline_from_alignment` turns into the same `Timeline` that ASAP's beat annotations
+    produce.
+- **Clock offset.** PianoCoRe's refined performance is a trimmed copy of the raw transcription
+  (median 0.5 s offset, up to 6 s), so the raw notes are shifted by `estimate_offset`. Notes more
+  than 1 s outside the aligned span (lead-in/out the alignment trimmed) are dropped.
+- **Splits.**
+  - Works also in ASAP inherit ASAP's split.
+  - Other works are hashed 85/5/10 into train / val / `test_periscope`.
+  - `test` stays Beyer & Dai's ASAP test set.
+- **Known label noise:**
+  - pedal targets for these rows come from Transkun's transcribed pedal;
+  - bar positions come from automatic alignment, not hand annotation.

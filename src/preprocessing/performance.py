@@ -9,9 +9,14 @@ PITCH, ONSET, OFFSET, VEL = 0, 1, 2, 3
 SUSTAIN_CC = 64
 
 
-def load_performance(path: str, pedal_threshold: int = 64) -> tuple[np.ndarray, np.ndarray]:
-    """Return (notes [N,4] float32 sorted by onset, pedal [K,2] float32 of (on, off) times)."""
-    pm = pretty_midi.PrettyMIDI(str(path))
+def load_performance(path, pedal_threshold: int = 64) -> tuple[np.ndarray, np.ndarray]:
+    """Return (notes [N,4] float32 sorted by onset, pedal [K,2] float32 of (on, off) times).
+    ``path`` may also be the raw bytes of a MIDI file."""
+    if isinstance(path, (bytes, bytearray)):
+        import io
+        pm = pretty_midi.PrettyMIDI(io.BytesIO(path))
+    else:
+        pm = pretty_midi.PrettyMIDI(str(path))
     notes, ccs = [], []
     for inst in pm.instruments:
         if inst.is_drum:
@@ -22,6 +27,31 @@ def load_performance(path: str, pedal_threshold: int = 64) -> tuple[np.ndarray, 
     arr = arr[np.lexsort((arr[:, PITCH], arr[:, ONSET]))]
     end_time = float(arr[:, OFFSET].max()) if len(arr) else 0.0
     return arr, pedal_intervals(sorted(ccs), pedal_threshold, end_time)
+
+
+def estimate_offset(ref: np.ndarray, other: np.ndarray, tol: float = 0.05, n_ref: int = 200,
+                    n_cand: int = 20) -> tuple[float, float]:
+    """Constant time offset between two versions of one performance (e.g. a transcription vs. a
+    trimmed/aligned copy). ``ref`` / ``other``: arrays whose columns 0, 1 are pitch, onset.
+    Returns (d, fraction of the first ``n_ref`` ref notes matched) with other_onset - d ~= ref_onset."""
+    a = ref[:n_ref]
+    if not len(a) or not len(other):
+        return 0.0, 0.0
+    by_pitch = {p: np.sort(other[other[:, 0] == p, 1]) for p in np.unique(a[:, 0])}
+    cands = np.concatenate([by_pitch[a[k, 0]] - a[k, 1] for k in range(min(n_cand, len(a)))])
+
+    def score(d):
+        hits = 0
+        for p, t in zip(a[:, 0], a[:, 1]):
+            arr = by_pitch[p]
+            j = np.searchsorted(arr, t + d)
+            hits += any(abs(arr[jj] - (t + d)) <= tol for jj in (j - 1, j) if 0 <= jj < len(arr))
+        return hits / len(a)
+
+    best = max(cands, key=score, default=0.0)
+    m = [o - t for p, t in zip(a[:, 0], a[:, 1]) for o in by_pitch[p] if abs(o - t - best) <= tol]
+    d = float(np.median(m)) if m else float(best)
+    return d, score(d)
 
 
 def pedal_intervals(ccs, threshold: int, end_time: float) -> np.ndarray:

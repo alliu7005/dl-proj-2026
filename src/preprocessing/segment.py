@@ -40,7 +40,7 @@ class SegmentConfig:
     carry_pedal_sustained: bool = True  # also store notes whose key was released before that point
                                         # but which the sustain pedal keeps sounding. They are only
                                         # *candidates*: the Dataset drops a carried note unless its
-                                        # key (after noise, e.g. Kong-style pedal lengthening) is still
+                                        # key (after noise, e.g. pedal lengthening) is still
                                         # down at ``carry_min_sec`` (see dataset.drop_released_carried)
 
 
@@ -275,7 +275,78 @@ def _window_pedal_tokens(pedal, tm, starts, ends, lengths, k_lo, k_hi, s_lo, s_h
     return out
 
 
-def segment_windows(notes, pedal, ann: dict, measures: list[Measure], cfg: SegmentConfig, meta: dict,
+@dataclass
+class Timeline:
+    """Where the bars are, and how performance time maps onto them.
+
+    ``tm`` maps performance seconds -> score time. ``bars[j]`` lists the measure indices played as
+    bar j; it spans score time [starts[j], ends[j]) and ``lengths[j]`` quarter notes. Score time is
+    seconds of ASAP's score MIDI (``timeline_from_asap``) or quarter notes
+    (``timeline_from_alignment``); everything downstream only needs it to be consistent."""
+    tm: TimeMap
+    bars: list
+    starts: np.ndarray
+    ends: np.ndarray
+    lengths: list
+
+
+def timeline_from_asap(ann: dict, measures: list[Measure]) -> "Timeline | str":
+    """From ASAP's beat annotations and ``downbeats_score_map``. Returns an error string if unusable."""
+    bars = parse_downbeat_map(ann["downbeats_score_map"])
+    if bars is None or len(bars) != len(ann["midi_score_downbeats"]) or len(bars) < 2:
+        return "bad_downbeat_map"
+    if max(i for b in bars for i in b) >= len(measures):
+        return "map_out_of_range"
+    tm = TimeMap(ann["performance_beats"], ann["midi_score_beats"])
+    bars, starts, ends, lengths = bar_timeline(bars, measures, ann["midi_score_downbeats"])
+    return Timeline(tm, bars, starts, ends, lengths)
+
+
+def _longest_increasing(x: np.ndarray) -> np.ndarray:
+    """Mask of a longest strictly increasing subsequence (O(n log n)), so one outlier can't
+    discard everything after it."""
+    import bisect
+    tails, tails_idx, prev = [], [], np.full(len(x), -1)
+    for i, v in enumerate(x):
+        j = bisect.bisect_left(tails, v)
+        if j == len(tails):
+            tails.append(v)
+            tails_idx.append(i)
+        else:
+            tails[j], tails_idx[j] = v, i
+        prev[i] = tails_idx[j - 1] if j > 0 else -1
+    keep = np.zeros(len(x), dtype=bool)
+    i = tails_idx[-1] if tails_idx else -1
+    while i >= 0:
+        keep[i] = True
+        i = prev[i]
+    return keep
+
+
+def timeline_from_alignment(perf_onsets, score_quarters, measures: list[Measure],
+                            min_pairs: int = 16) -> "Timeline | str":
+    """From note-level (performance onset s, score onset in quarters) pairs, e.g. PianoCoRe's
+    alignment. Bars are the measures in order (repeats must already be unfolded in ``measures``),
+    in quarter notes from the start of measure 0.
+
+    Each score onset gets the median performed onset of its notes; pairs that would make time run
+    backwards (wrong alignments, fermata clusters) are dropped before building the map."""
+    p = np.asarray(perf_onsets, dtype=np.float64)
+    q = np.asarray(score_quarters, dtype=np.float64)
+    if len(p) < min_pairs:
+        return "too_few_aligned_notes"
+    uq, inv_idx = np.unique(q, return_inverse=True)
+    up = np.array([np.median(p[inv_idx == k]) for k in range(len(uq))])
+    keep = _longest_increasing(up)
+    if keep.sum() < min_pairs:
+        return "alignment_not_monotonic"
+    lengths = [m.length for m in measures]
+    cum = np.concatenate([[0.0], np.cumsum([float(x) for x in lengths])])
+    return Timeline(TimeMap(up[keep], uq[keep]), [[k] for k in range(len(measures))],
+                    cum[:-1], cum[1:], lengths)
+
+
+def segment_windows(notes, pedal, timeline, measures: list[Measure], cfg: SegmentConfig, meta: dict,
                     train: bool, seed: int = 0, windows: list | None = None) -> tuple[list[dict], dict]:
     """Cut one performance into note windows at arbitrary points (``mode: windows``).
 
@@ -284,18 +355,16 @@ def segment_windows(notes, pedal, ann: dict, measures: list[Measure], cfg: Segme
     may end mid-bar), prompt = the score just before the window (the rest of the bar the window
     starts in, or the whole previous bar if it starts on a bar line).
 
-    ``windows`` = [(s_lo, s_hi, win_id)] in score seconds (None = piece start/end) reuses given
+    ``timeline``: a ``Timeline``, or an ASAP annotation dict (-> ``timeline_from_asap``).
+    ``windows`` = [(s_lo, s_hi, win_id)] in score time (None = piece start/end) reuses given
     cut points, e.g. to segment a real transcription exactly like the clean performance."""
     stats = {"too_long": 0, "empty": 0, "long_bar": 0, "low_pitch_f1": 0, "carry_candidates": 0,
              "carried_notes": 0, "ties_at_window_start": 0, "ties_with_carried_note": 0}
-    bars = parse_downbeat_map(ann["downbeats_score_map"])
-    if bars is None or len(bars) != len(ann["midi_score_downbeats"]) or len(bars) < 2:
-        return [], {"skipped": "bad_downbeat_map"}
-    if max(i for b in bars for i in b) >= len(measures):
-        return [], {"skipped": "map_out_of_range"}
-    tm = TimeMap(ann["performance_beats"], ann["midi_score_beats"])
+    tl = timeline_from_asap(timeline, measures) if isinstance(timeline, dict) else timeline
+    if isinstance(tl, str):
+        return [], {"skipped": tl}
+    tm, bars, starts, ends, lengths = tl.tm, tl.bars, tl.starts, tl.ends, tl.lengths
     inv = tm.inverse()
-    bars, starts, ends, lengths = bar_timeline(bars, measures, ann["midi_score_downbeats"])
     spq = np.median((ends - starts) / np.maximum([float(x) for x in lengths], 1e-6))
 
     score_on = tm(notes[:, ONSET])

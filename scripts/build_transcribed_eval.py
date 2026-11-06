@@ -1,4 +1,4 @@
-"""Build an evaluation split whose inputs are REAL Kong transcriptions instead of clean MIDI.
+"""Build an evaluation split whose inputs are REAL Transkun V2 transcriptions instead of clean MIDI.
 
 For every ASAP performance in ``--asap-split`` that has MAESTRO audio and a transcription in
 data/transcribed/, the transcription is shifted onto the ASAP performance timeline (ASAP files can
@@ -9,7 +9,7 @@ compared on identical targets.
 
     python scripts/build_transcribed_eval.py --asap-split test
 
-The ``maestro_split`` meta field records whether Kong's model was trained on that audio
+The ``maestro_split`` meta field records whether Transkun was trained on that audio
 (``train``); report those separately from ``validation``/``test`` recordings.
 """
 from __future__ import annotations
@@ -27,32 +27,12 @@ import numpy as np
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.preprocessing.performance import load_performance  # noqa: E402
+from src.preprocessing.performance import estimate_offset, load_performance  # noqa: E402,F401
 from src.preprocessing.score import load_score  # noqa: E402
 from src.preprocessing.segment import SegmentConfig, segment_pair, segment_windows  # noqa: E402
 from src.preprocessing.split import composition_id  # noqa: E402
 from src.preprocessing.store import SegmentStore, segment_sizes, write_split  # noqa: E402
 from src.preprocessing.vocab import Vocab  # noqa: E402
-
-
-def estimate_offset(ref: np.ndarray, other: np.ndarray, tol: float = 0.05, n_ref: int = 200) -> tuple[float, float]:
-    """Offset d such that other_onset - d ~= ref_onset. Returns (d, fraction of ref notes matched)."""
-    a = ref[:n_ref]
-    by_pitch = {p: np.sort(other[other[:, 0] == p, 1]) for p in np.unique(a[:, 0])}
-    cands = np.concatenate([by_pitch[a[k, 0]] - a[k, 1] for k in range(min(5, len(a)))])
-
-    def score(d):
-        hits = 0
-        for p, t in zip(a[:, 0], a[:, 1]):
-            arr = by_pitch[p]
-            j = np.searchsorted(arr, t + d)
-            hits += any(abs(arr[jj] - (t + d)) <= tol for jj in (j - 1, j) if 0 <= jj < len(arr))
-        return hits / len(a)
-
-    best = max(cands, key=score, default=0.0)
-    m = [o - t for p, t in zip(a[:, 0], a[:, 1]) for o in by_pitch[p] if abs(o - t - best) <= tol]
-    d = float(np.median(m)) if m else float(best)
-    return d, score(d)
 
 
 def main():
@@ -101,7 +81,7 @@ def main():
         if row["folder"] not in scores:
             scores[row["folder"]] = load_score(root / row["xml_score"])
         meta = {"dataset": "asap", "piece": row["folder"], "composition": composition_id("asap", row["folder"]),
-                "performance": perf, "split": f"{args.asap_split}_transcribed", "source": "kong2021",
+                "performance": perf, "split": f"{args.asap_split}_transcribed", "source": "transkun_real",
                 "maestro_split": maestro[mm]["split"]}
         if windows_mode:  # cut at exactly the clean windows' score-time cut points
             wins = sorted((m["s_lo"], m["s_hi"], m["win"]) for m in clean.meta if m["performance"] == perf)

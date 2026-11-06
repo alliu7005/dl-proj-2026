@@ -1,7 +1,7 @@
-# One env for everything: ASAP/PianoCoRe preprocessing, Kong et al. transcription, training.
+# One env for everything: ASAP/PianoCoRe preprocessing, Transkun V2 transcription, training.
 #   conda env create -f environment.yml
 #   conda activate dl-proj
-# Python 3.12: piano_transcription_inference does not support newer versions.
+#   pip install --no-deps transkun==2.0.1     # see note below
 name: dl-proj
 channels:
   - conda-forge
@@ -21,13 +21,20 @@ dependencies:
       # without the pin pip silently takes a newer CPU-only build from PyPI.
       - --extra-index-url https://download.pytorch.org/whl/cu128
       - torch==2.11.0+cu128
+      - torchaudio==2.11.0+cu128
       # symbolic music / scores
       - pretty_midi>=0.2.10
       - music21>=9.1
       - mido
-      # Kong et al. (2021) transcriber (scripts/transcribe.py)
-      - piano_transcription_inference
-      - torchlibrosa
+      # Transkun V2 transcriber (scripts/transcribe.py). transkun itself is installed with
+      # `pip install --no-deps transkun==2.0.1`: its `ncls` dependency needs a C compiler on Windows
+      # and, like `sox`/`tensorboard`, is only used by Transkun's training code. These are what the
+      # transcription path imports:
+      - moduleconf
+      - mir-eval
+      - pydub
+      - torch-optimizer
+      - soxr
       - librosa
       - audioread
       - soundfile

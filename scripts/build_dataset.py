@@ -1,13 +1,20 @@
-"""Build measure-aligned (performance MIDI -> score tokens) segments from ASAP.
+"""Build (performance MIDI -> score tokens) segments from ASAP and PianoCoRe's PERiScoPe subset.
 
     python scripts/build_dataset.py --config configs/preprocess.yaml
 
-Writes to ``out_dir``: {train,val,test}/ (memory-mapped arrays, see src/preprocessing/store.py),
-vocab.json, splits.json and report.json.
+Writes to ``out_dir``: {train,val,test,test_periscope}/ (memory-mapped arrays, see
+src/preprocessing/store.py), vocab.json, feature_stats.json, splits.json and report.json.
+
+* ASAP: clean Disklavier performances, bars from hand-checked beat annotations. ``test`` is
+  Beyer & Dai's ASAP test set.
+* PERiScoPe (``pianocore:`` in the config; download with scripts/fetch_pianocore.py): RAW Transkun V2
+  transcriptions (``source: transkun_real``, never noised), bars from PianoCoRe's note alignment.
+  Works that are also in ASAP inherit ASAP's split; the others are hashed into train / val /
+  ``test_periscope`` by work.
 
 Pieces are processed in parallel and written to per-piece shards first; the vocabulary is then
 built from the train shards and every split is streamed into flat arrays. Nothing has to fit in RAM
-at once, so the same flow scales to PianoCoRe.
+at once.
 """
 from __future__ import annotations
 
@@ -34,7 +41,76 @@ from src.preprocessing.split import assign_splits, composition_id, load_fixed_sp
 from src.preprocessing.store import segment_sizes, write_split  # noqa: E402
 from src.preprocessing.vocab import Vocab  # noqa: E402
 
-SPLITS = ("train", "val", "test")
+SPLITS = ("train", "val", "test", "test_periscope")
+PIANOCORE_COLS = ["id", "work_key", "score_xml_path", "asap_folders"]
+
+
+def load_pianocore(pc_dir: Path) -> dict[str, list[tuple[str, int, dict]]]:
+    """score_xml_path -> [(rows parquet file, row index, metadata)] from scripts/fetch_pianocore.py.
+    Keyed by path: PianoCoRe's score_id is not unique (all ASAP-sourced scores share one)."""
+    import pyarrow.parquet as pq
+
+    by_score = defaultdict(list)
+    for f in sorted(pc_dir.glob("rows-*.parquet")):
+        for i, r in enumerate(pq.read_table(f, columns=PIANOCORE_COLS).to_pylist()):
+            by_score[r["score_xml_path"]].append((str(f), i, r))
+    return by_score
+
+
+def process_pianocore_score(pc_dir: str, score_path: str, items, cfg: SegmentConfig, split: str,
+                            cid: str, shard_dir: str, min_score_match: float):
+    import warnings
+    warnings.filterwarnings("ignore")
+    import pyarrow.parquet as pq
+
+    from src.preprocessing.pianocore import load_unfolded_score, pianocore_performance, score_midi_shift
+
+    key = items[0][2]["work_key"]
+    tables = {}
+
+    def row(f, i):
+        if f not in tables:
+            tables[f] = pq.read_table(f)
+        return tables[f].slice(i, 1).to_pylist()[0]
+
+    try:
+        sc = next(r for p in Path(pc_dir).glob("scores-*.parquet")
+                  for r in pq.read_table(p, filters=[("score_xml_path", "=", score_path)]).to_pylist())
+        measures = load_unfolded_score(sc["score_xml_bytes"], Path(sc["score_xml_path"]).suffix)
+        shift, match = score_midi_shift(row(*items[0][:2])["refined_score_midi_bytes"], measures)
+    except Exception as e:  # noqa: BLE001
+        return None, [{"piece": key, "error": f"score: {e!r}"[:300]}], (0, 0, 0, 0), Counter()
+    if match < min_score_match:
+        return None, [{"piece": key, "skipped": f"score_midi_vs_xml_match_{match:.2f}"}], (0, 0, 0, 0), Counter()
+    segs, reports = [], []
+    for f, i, m in items:
+        perf = m["id"]
+        try:
+            res = pianocore_performance(row(f, i), measures, shift)
+            if isinstance(res, str):
+                s, st = [], {"skipped": res}
+            else:
+                notes, pedal, tl, info = res
+                meta = {"dataset": "pianocore", "piece": key, "composition": cid, "performance": perf,
+                        "split": split, "source": "transkun_real"}
+                seed = int(hashlib.sha1(perf.encode()).hexdigest()[:8], 16)
+                s, st = segment_windows(notes, pedal, tl, measures, cfg, meta, train=split == "train", seed=seed)
+                st.update(info, score_match=round(match, 3))
+        except Exception as e:  # noqa: BLE001
+            s, st = [], {"error": repr(e)[:300]}
+        segs += s
+        reports.append({"performance": perf, "dataset": "pianocore", **st})
+    return _write_shard(segs, reports, split, f"pc:{score_path}", shard_dir)
+
+
+def _write_shard(segs, reports, split, name, shard_dir):
+    shard = Path(shard_dir) / f"{split}__{hashlib.sha1(name.encode()).hexdigest()[:12]}.pkl"
+    with open(shard, "wb") as f:
+        pickle.dump(segs, f, protocol=pickle.HIGHEST_PROTOCOL)
+    sizes = tuple(sum(x) for x in zip(*map(segment_sizes, segs))) if segs else (0, 0, 0, 0)
+    tok_counts = Counter(t for s in segs for t in s["tokens"] + s.get("prompt", [])) \
+        if split == "train" else Counter()
+    return str(shard), reports, sizes, tok_counts
 
 
 def load_asap(root: Path, exclude: set[str]):
@@ -87,14 +163,8 @@ def process_piece(root: str, folder: str, items, cfg: SegmentConfig, split: str,
         except Exception as e:  # noqa: BLE001
             s, st = [], {"error": repr(e)}
         segs += s
-        reports.append({"performance": perf, **st})
-    shard = Path(shard_dir) / f"{split}_{hashlib.sha1(folder.encode()).hexdigest()[:12]}.pkl"
-    with open(shard, "wb") as f:
-        pickle.dump(segs, f, protocol=pickle.HIGHEST_PROTOCOL)
-    sizes = tuple(sum(x) for x in zip(*map(segment_sizes, segs))) if segs else (0, 0, 0, 0)
-    tok_counts = Counter(t for s in segs for t in s["tokens"] + s.get("prompt", [])) \
-        if split == "train" else Counter()
-    return str(shard), reports, sizes, tok_counts
+        reports.append({"performance": perf, "dataset": "asap", **st})
+    return _write_shard(segs, reports, split, folder, shard_dir)
 
 
 def iter_shards(paths):
@@ -107,7 +177,8 @@ def iter_shards(paths):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/preprocess.yaml")
-    ap.add_argument("--limit", type=int, default=0, help="only process N pieces (debugging)")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="only process N ASAP pieces and N PianoCoRe scores (debugging)")
     args = ap.parse_args()
     cfg = yaml.safe_load(open(args.config))
     root, out = Path(cfg["asap_root"]), Path(cfg["out_dir"])
@@ -118,11 +189,27 @@ def main():
         shutil.rmtree(shard_dir, ignore_errors=True)
     shard_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- what to process, and composition-level splits (decided before any segmentation) ---
     fixed, exclude = load_fixed_split(cfg.get("fixed_split"))
     by_piece, skipped = load_asap(root, exclude)
     cids = {f: composition_id("asap", f) for f in by_piece}
-    splits = assign_splits(cids.values(), tuple(cfg["split_ratios"]), cfg["seed"], fixed)
+    pc = cfg.get("pianocore") or {}
+    by_score = load_pianocore(Path(pc["dir"])) if pc.get("enabled") else {}
+    pc_cid = {}
+    for sid, items in by_score.items():  # works also in ASAP share the ASAP composition id
+        m = items[0][2]
+        folders = sorted(f for f in (m.get("asap_folders") or "").split(";") if f)
+        pc_cid[sid] = composition_id("asap", folders[0]) if folders else composition_id("pianocore", m["work_key"])
+    asap_like = set(cids.values()) | {c for s, c in pc_cid.items() if (by_score[s][0][2].get("asap_folders") or "")}
+    splits = assign_splits(asap_like, tuple(cfg["split_ratios"]), cfg["seed"], fixed)
+    pc_only = {c for c in pc_cid.values() if c not in splits}
+    for c, sp in assign_splits(pc_only, tuple(pc.get("split_ratios", (0.85, 0.05, 0.10))), cfg["seed"]).items():
+        splits[c] = "test_periscope" if sp == "test" else sp
+    if any(splits[c] == "test" for c in pc_cid.values()):
+        raise RuntimeError("a PianoCoRe work landed in the Beyer & Dai test split")
+
     pieces = sorted(by_piece)[: args.limit] if args.limit else sorted(by_piece)
+    scores = sorted(by_score)[: args.limit] if args.limit else sorted(by_score)
 
     seg = dict(cfg["segment"])
     seg["window_notes"] = tuple(seg.get("window_notes", SegmentConfig.window_notes))
@@ -130,17 +217,26 @@ def main():
     eval_cfg = replace(base, stride=base.bars_per_segment)  # windows mode: eval is handled by train=False
     shards, sizes = defaultdict(list), defaultdict(lambda: [0, 0, 0, 0])
     reports, train_counts = [], Counter()
+    units = []  # (dataset, split, composition, performance ids) per task, for the summary
     with ProcessPoolExecutor(max_workers=cfg.get("workers", 4)) as ex:
-        futs = [ex.submit(process_piece, str(root), f, by_piece[f],
-                          base if splits[cids[f]] == "train" else eval_cfg,
-                          splits[cids[f]], cids[f], str(shard_dir),
-                          cfg.get("score_fallback_root")) for f in pieces]
+        futs = []
+        for f in pieces:
+            sp = splits[cids[f]]
+            futs.append(ex.submit(process_piece, str(root), f, by_piece[f], base if sp == "train" else eval_cfg,
+                                  sp, cids[f], str(shard_dir), cfg.get("score_fallback_root")))
+            units.append(("asap", sp, cids[f], [r["midi_performance"] for r, _ in by_piece[f]]))
+        for s in scores:
+            sp = splits[pc_cid[s]]
+            futs.append(ex.submit(process_pianocore_score, pc["dir"], s, by_score[s],
+                                  base if sp == "train" else eval_cfg, sp, pc_cid[s], str(shard_dir),
+                                  pc.get("min_score_match", 0.9)))
+            units.append(("pianocore", sp, pc_cid[s], [m["id"] for _, _, m in by_score[s]]))
         for fu in tqdm(as_completed(futs), total=len(futs), desc="pieces"):
             shard, rep, sz, tc = fu.result()
             reports += rep
             train_counts += tc
             if shard:
-                sp = Path(shard).name.split("_")[0]
+                sp = Path(shard).name.split("__")[0]
                 shards[sp].append(shard)
                 sizes[sp] = [x + y for x, y in zip(sizes[sp], sz)]
 
@@ -148,32 +244,41 @@ def main():
     vocab.save(out / "vocab.json")
     for sp in SPLITS:
         write_split(out / sp, iter_shards(shards[sp]), tuple(sizes[sp]), vocab)
+    if sizes["train"][0]:  # mean/std of the continuous note features, applied by the Dataset
+        from src.dataset import compute_feature_stats
+        compute_feature_stats(out / "train", out / "feature_stats.json")
     if not cfg.get("keep_shards", False):
         shutil.rmtree(shard_dir, ignore_errors=True)
 
-    json.dump({f: splits[cids[f]] for f in sorted(by_piece)}, open(out / "splits.json", "w"), indent=1)
-    perf_by_split = defaultdict(set)
-    for f in pieces:
-        for row, _ in by_piece[f]:
-            perf_by_split[splits[cids[f]]].add(row["midi_performance"])
-    summary = {sp: {"segments": sizes[sp][0], "notes": sizes[sp][1], "tokens": sizes[sp][3],
-                    "performances": len(perf_by_split[sp]),
-                    "compositions": len({cids[f] for f in pieces if splits[cids[f]] == sp})}
-               for sp in SPLITS}
-    dropped, carry = Counter(), Counter()
+    json.dump({"asap": {f: splits[cids[f]] for f in sorted(by_piece)},
+               "pianocore": {by_score[s][0][2]["work_key"]: splits[pc_cid[s]] for s in sorted(by_score)}},
+              open(out / "splits.json", "w"), indent=1)
+    ok = {r["performance"] for r in reports if r.get("segments")}
+    summary = {}
+    for sp in SPLITS:
+        row = {"segments": sizes[sp][0], "notes": sizes[sp][1], "tokens": sizes[sp][3]}
+        for ds in ("asap", "pianocore"):
+            us = [u for u in units if u[0] == ds and u[1] == sp]
+            row[f"{ds}_performances"] = len({p for u in us for p in u[3] if p in ok})
+            row[f"{ds}_compositions"] = len({u[2] for u in us})
+        summary[sp] = row
+    dropped, carry, skips = Counter(), Counter(), Counter()
     for r in reports:
         for k in ("too_long", "empty", "long_bar", "low_pitch_f1"):
-            dropped[k] += r.get(k, 0)
+            dropped[f"{r.get('dataset', '?')}:{k}"] += r.get(k, 0)
         for k in ("carry_candidates", "carried_notes", "ties_at_window_start", "ties_with_carried_note"):
             carry[k] += r.get(k, 0)
+        if "skipped" in r or "error" in r:
+            why = r.get("skipped") or r.get("error", "")
+            skips[f"{r.get('dataset', '?')}:{why.split('_0.')[0].split('(')[0][:60]}"] += 1
     errs = [r for r in reports if "error" in r or "skipped" in r]
     json.dump({"summary": summary, "skipped_at_load": skipped, "dropped_segments": dropped,
-               "carried_over_notes": carry,
+               "skipped_performances": skips, "carried_over_notes": carry,
                "vocab_size": len(vocab), "problems": errs, "performances": reports},
               open(out / "report.json", "w"), indent=1)
     print(json.dumps(summary, indent=1))
-    print("skipped at load:", dict(skipped), "| dropped segments:", dict(dropped),
-          "| problem performances:", len(errs), "| vocab:", len(vocab))
+    print("skipped at load:", dict(skipped), "| problem performances/scores:", dict(skips))
+    print("dropped segments:", {k: v for k, v in dropped.items() if v}, "| vocab:", len(vocab))
     if carry["ties_at_window_start"]:
         print(f"carried-over notes: {carry['carried_notes']} key-held (+ {carry['carry_candidates'] - carry['carried_notes']}"
               f" pedal-sustained candidates) | ties into a window's first beat: "
