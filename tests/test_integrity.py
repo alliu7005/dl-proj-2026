@@ -33,18 +33,21 @@ def main():
     vocab = Vocab.load(D / "vocab.json")
     splits = json.load(open(D / "splits.json"))
     splits = splits.get("asap", splits)  # ASAP pieces (PianoCoRe works are keyed separately)
-    names = [s for s in ("train", "val", "test", "train_transcribed", "val_transcribed", "test_transcribed")
+    names = [s for s in ("train", "val", "test", "train_transcribed", "val_transcribed", "test_transcribed",
+                          "train_transcribed_kong", "val_transcribed_kong", "test_transcribed_kong",
+                          "test_periscope")
              if (D / s).exists()]
     st = {s: SegmentStore(D / s) for s in names}
 
     print("leakage")
     comps = {s: {m["composition"] for m in st[s].meta} for s in names}
-    for a in ("train", "val", "test"):
-        for b in ("train", "val", "test"):
+    main = [s for s in ("train", "val", "test", "test_periscope") if s in comps]
+    for a in main:
+        for b in main:
             if a < b:
                 check(not comps[a] & comps[b], f"no composition shared by {a} and {b}")
     for s in names:
-        if s.endswith("_transcribed"):
+        if "_transcribed" in s:
             base = s.split("_")[0]
             check(comps[s] <= comps[base], f"{s} compositions all belong to {base}")
     perfs = {s: {m["performance"] for m in st[s].meta} for s in ("train", "val", "test")}
@@ -61,7 +64,7 @@ def main():
     held = {r["maestro_midi_performance"].replace("{maestro}/", "")
             for r in csv.DictReader(open(ASAP / "metadata.csv"))
             if splits.get(r["folder"]) in ("val", "test") and r["maestro_midi_performance"]}
-    fit_rows = [r for r in csv.DictReader(open("data/transcribed/pairs.csv"))
+    fit_rows = [r for r in csv.DictReader(open("data/transcribed_transkun/pairs.csv"))
                 if r["maestro_split"] in ("test", "validation")]
     diag = json.load(open("configs/noise_stats.diagnostics.json"))
     n_clean = sum(not any(r["gt"].endswith(h) for h in held) for r in fit_rows)
@@ -70,7 +73,7 @@ def main():
 
     print("real-transcription splits")
     for s in names:
-        if not s.endswith("_transcribed"):
+        if "_transcribed" not in s:
             continue
         base = st[s.split("_")[0]]
         wk = "win" if "win" in base.meta[0] else "bar_start"  # windows mode vs bars mode
@@ -82,7 +85,7 @@ def main():
                      and np.array_equal(base.get_prompt(ci), st[s].get_prompt(j)))
         check(same == len(st[s]), f"{s}: all {len(st[s])} targets and prompts identical to clean")
         ms = Counter(m["maestro_split"] for m in st[s].meta)
-        if s != "test_transcribed":
+        if not s.startswith("test_"):
             check("train" not in ms, f"{s}: no audio Kong trained on ({dict(ms)})")
 
     print("arrays / tokens")

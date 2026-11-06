@@ -73,6 +73,9 @@ def conditions(nm: NoiseModel):
     yield "synthetic", test, synthetic
     real = SegmentStore(D / "test_transcribed")
     yield "real", real, lambda i: real.get(i)[:2]
+    if (D / "test_transcribed_kong").exists():  # second transcriber, for robustness across transcribers
+        kong = SegmentStore(D / "test_transcribed_kong")
+        yield "real_kong", kong, lambda i: kong.get(i)[:2]
     # clean inputs on exactly the windows that have a real transcription (paired comparison)
     key = {(m["performance"], m.get("win")): i for i, m in enumerate(test.meta)}
     paired = [key[(m["performance"], m.get("win"))] for m in real.meta]
@@ -135,7 +138,7 @@ def main():
             print(f"done {mname} / {cond}", flush=True)
     json.dump(results, open(out / "results.json", "w"), indent=1)
 
-    conds = ["clean", "synthetic", "clean_paired", "real", "real_unseen_audio"]
+    conds = ["clean", "synthetic", "clean_paired", "real", "real_unseen_audio", "real_kong"]
     for mname in results:
         print(f"\n{mname}")
         print(f"  {'metric':18s}" + "".join(f"{c:>18s}" for c in conds))

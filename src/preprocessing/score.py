@@ -40,6 +40,9 @@ ORNAMENT_CLASSES = [(name, getattr(m21.expressions, cls)) for name, cls in _ORNA
 from .vocab import ALLOWED_DENOMINATORS  # noqa: E402  (single source of truth for the grid)
 
 
+MAX_STAFF = 3  # the vocabulary has staff_0..staff_3
+
+
 def piano_range(pitch: int) -> int:
     """Fold pitches outside the 88 keys back by octaves (mis-encoded ottavas, e.g. Ravel's Ondine)."""
     while pitch > 108:
@@ -122,6 +125,7 @@ def load_score(path) -> list[Measure]:
         meas = Measure(length=length, time_signature=ts, key=key)
         seq = 0
         for staff, s in enumerate(staves):
+            staff = min(staff, MAX_STAFF)  # rare extra staves (e.g. ossia) fold into the last one
             if i >= len(s):
                 continue
             for el in s[i].flatten().notes:

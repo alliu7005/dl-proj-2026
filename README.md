@@ -2,14 +2,16 @@
 
 Audio → transcriber → noisy performance MIDI → seq2seq transformer → score tokens → MusicXML.
 
-Two transcribers are supported (`scripts/transcribe.py --model`): **Kong et al. (2021)**, the one in
-the proposal, which all current noise statistics, real-transcription splits and baselines use; and
-**Transkun V2** (Yan & Duan, ISMIR 2024), the one PianoCoRe's PERiScoPe subset was made with.
+The transcriber is **Transkun V2** (Yan & Duan, ISMIR 2024), the one PianoCoRe's PERiScoPe subset
+was made with: training on PERiScoPe and testing on Transkun output use the same kind of errors.
+**Kong et al. (2021)**, the transcriber in the proposal, is kept as a second transcriber
+(`scripts/transcribe.py --model kong`, `*_transcribed_kong` splits, `configs/noise_stats_kong.json`)
+to test robustness across transcribers.
 
 Training data:
 - **ASAP**: clean Disklavier MIDI with hand-checked beat annotations, plus synthetic
-  transcription noise fitted on real transcription errors (Kong; see [Noise model](#noise-model)),
-  plus real transcriptions of ASAP performances whose audio the transcriber never saw.
+  transcription noise fitted on real Transkun errors (see [Noise model](#noise-model)), plus real
+  Transkun transcriptions of ASAP performances whose audio Transkun never saw.
 - **PianoCoRe's PERiScoPe subset**: real Transkun V2 transcriptions aligned to scores, so the
   model sees the inference transcriber's own errors.
 
@@ -35,10 +37,10 @@ python scripts/fetch_pianocore.py
 
 | step | command | time |
 |---|---|---|
-| 1. build train/val/test/test_periscope segments | `python scripts/build_dataset.py` | ~3 min ASAP; PianoCoRe (if downloaded) ~1–2 h with 6 workers (raise `workers` on a bigger machine) |
+| 1. build train/val/test/test_periscope segments | `python scripts/build_dataset.py` | ~3 min ASAP only; ~25 min with PERiScoPe (4 workers) |
 | 2. check the data: leakage, pairing, arrays, loaders; then tokens → MusicXML → tokens | `python -m tests.test_integrity` and `python -m tests.test_roundtrip --split val` | ~3 min |
 | 2b. check window cutting (stitching, prompts) | `python -m tests.test_windows --n 40` | ~3 min |
-| 3. *(already done for Kong: `configs/noise_stats.json`)* fit the noise model on real transcriptions | see [Noise model](#noise-model) | ~30–60 min with a GPU |
+| 3. *(already done: `configs/noise_stats.json`)* transcribe MAESTRO audio and fit the noise model | see [Noise model](#noise-model) | ~1–2 h with a GPU |
 | 4. *(needs transcriptions)* build the real-transcription ASAP splits | `python scripts/build_transcribed.py --asap-split train --maestro-splits test,validation` (same with `val`), then `--asap-split test` | ~2 min |
 | 5. baselines | `python -m scripts.train_xgb_quantizer` then `python scripts/run_baselines.py --methods beat_snap,xgb_quantizer` | ~15 min |
 
@@ -100,8 +102,9 @@ columns 5–6. The raw pedal intervals are in `pedal.npy` if the model wants the
 | `val` | ASAP + PERiScoPe | clean / real Transkun | model selection |
 | `test` | Beyer & Dai's ASAP test set (14 pieces, 59 performances) | clean Disklavier MIDI | comparison with Beyer & Dai |
 | `test_periscope` | 10% of PERiScoPe works, none seen in training | real Transkun output | **main test: realistic inference input** |
-| `train_transcribed` / `val_transcribed` | ASAP train/val performances with real transcriptions of MAESTRO audio the transcriber never saw | real transcriptions (Kong) | training with real errors / model selection |
-| `test_transcribed` | ASAP test with real transcriptions of MAESTRO audio | real transcriptions (Kong) | small real-audio check; most of this audio was in the transcriber's training data |
+| `train_transcribed` / `val_transcribed` | ASAP train/val performances with Transkun transcriptions of MAESTRO audio Transkun never saw | real Transkun output | training with real errors / model selection |
+| `test_transcribed` | ASAP test with Transkun transcriptions of MAESTRO audio | real Transkun output | small real-audio check; most of this audio was in Transkun's training data |
+| `*_transcribed_kong` | the same three, transcribed with Kong | real Kong output | robustness to a different transcriber |
 
 Every item's `meta.jsonl` line has `dataset` (`asap`/`pianocore`) and `source` (`clean` /
 `kong_real` / `transkun_real`); the Dataset adds synthetic noise only to `source == "clean"` items.
@@ -163,9 +166,10 @@ train/ val/ test/ test_periscope/   one directory per split, each holding:
   index.npy   int64   [n_windows, 7]     note_lo, note_hi, pedal_lo, pedal_hi, tok_lo, tok_hi, tgt_lo
   meta.jsonl  one line per window        dataset, source, piece, performance, win, s_lo, s_hi, start_pos, ...
 train_transcribed/  val_transcribed/  test_transcribed/
-                           same layout; inputs are REAL transcriptions (Kong by default) of the same
-                           ASAP performances, cut at the clean windows' exact cut points; targets
-                           and prompts copied from the matching clean window
+                           same layout; inputs are REAL Transkun transcriptions of the same ASAP
+                           performances, cut at the clean windows' exact cut points; targets and
+                           prompts copied from the matching clean window
+train_transcribed_kong/ ...  the same with Kong transcriptions
 ```
 
 Window `i`'s notes are `notes[index[i,0]:index[i,1]]`, and likewise for pedal. Its prompt is
@@ -173,32 +177,29 @@ Window `i`'s notes are `notes[index[i,0]:index[i,1]]`, and likewise for pedal. I
 The arrays are memory-mapped, so nothing loads into RAM until it's used. Read through the Dataset,
 not the raw arrays: it also drops released carried-over candidates (below) and scales the features.
 
-Current build (ASAP only, PianoCoRe not downloaded; `report.json` has the exact counts):
+Current build (ASAP + PERiScoPe; `report.json` has the exact counts):
 
-| split | windows | performances | compositions |
+| split | windows | ASAP performances (compositions) | PERiScoPe performances (works) |
 |---|---|---|---|
-| train | 36,172 (48–192 notes, 50% overlap) | 743 | 153 |
-| val | 2,093 (~128 notes, no overlap) | 102 | 29 |
-| test | 1,725 (~128 notes, no overlap) | 59 | 14 |
-| train_transcribed | 3,841 | 87 (all audio unseen by the transcriber) | |
-| val_transcribed | 394 | 20 (all audio unseen by the transcriber) | |
-| test_transcribed | 611 | 24 (21 seen by the transcriber, 3 unseen) | 11 |
+| train | 205,089 | 739 (153) | 5,260 (971) |
+| val | 10,252 | 106 (29) | 434 (78) |
+| test | 1,725 | 59 (14), Beyer & Dai's test set | none |
+| test_periscope | 6,755 | none | 490 (104) |
+| train_transcribed | 3,733 | 85, audio unseen by Transkun | |
+| val_transcribed | 445 | 22, audio unseen by Transkun | |
+| test_transcribed | 611 | 24 (21 seen by Transkun, 3 unseen) | |
 
-Real transcriptions cover 99–99.5% of their performances' clean windows (a few windows end up
-empty or over the length cap). They can contain more notes per window than clean MIDI: p99 251,
-max ~1,530, vs. a clean max of 761. Cap or truncate the input length in the model.
+The `*_transcribed_kong` splits have the same windows.
 
-Expected PERiScoPe additions with the full download (estimates from the download selection):
-
-| split | PERiScoPe |
-|---|---|
-| train | ~85% of 1,200 works, ~5.7k performances → roughly 250k windows |
-| val | ~5% of works |
-| test | none (Beyer & Dai test works are excluded from PERiScoPe) |
-| test_periscope | ~10% of works, ~670 performances |
-
-The per-performance alignment checks (`tests/test_windows.py --source pianocore`) passed on all 25
-sampled PERiScoPe performances, with a median window input-vs-target pitch F1 of 0.975.
+- **Coverage:** real transcriptions cover 99–99.5% of their performances' clean windows.
+- **Input length:** real transcriptions can have more notes per window than clean MIDI (p99 235,
+  max ~1,530, vs. a clean max of 761). Cap or truncate the input length in the model.
+- **Target length:** p99 904, max 1,489 tokens.
+- **PERiScoPe drops:** 3,714 windows were dropped by the input-vs-score pitch filter (<0.6 F1).
+  On real transcriptions this filter also removes some genuinely noisy windows; lower
+  `min_pitch_f1` if that matters.
+- **Unusual scores:** one PERiScoPe score (Liszt, *Mephisto Waltz No. 3*) has 5 staves. Staves
+  beyond the 4th fold into `staff_3`.
 
 ### Note details
 
@@ -330,9 +331,9 @@ To go back from tokens to MusicXML (for MUSTER/MV2H evaluation):
 
 10% of segments are left clean.
 
-Everything is **fitted on real Kong transcriptions** of 95 recordings (425k notes) from the
-MAESTRO test and validation splits.
-- Kong's model was trained on MAESTRO train, so only test/validation audio gives realistic errors.
+Everything is **fitted on real Transkun V2 transcriptions** of 93 recordings (419k notes) from
+the MAESTRO test and validation splits.
+- Transkun was trained on MAESTRO train, so only test/validation audio gives realistic errors.
 - Audio of ASAP **val and test** performances is excluded from the fit, so `val_transcribed` and
   `test_transcribed` remain independent checks.
 
@@ -341,79 +342,63 @@ parameters for timing, velocity and pedal.
 
 - **Missing notes:** a miss-rate table indexed by chord size × velocity bin.
 - **Hallucination rate:** hallucinations spawned per real note, by the source note's velocity.
-- **Error bank:** 7,739 real hallucinations, each stored relative to its most likely source. The
-  source is a recent, loud note that is still sounding, counting the sustain pedal. Each entry
-  records interval, delay, velocity ratio and duration.
+- **Error bank:** real hallucinations, each stored relative to its most likely source. The source
+  is a recent, loud note that is still sounding, counting the sustain pedal. Each entry records
+  interval, delay, velocity ratio and duration.
 
 During training, loud notes spawn hallucinations by replaying sampled bank entries.
 
-| error | measured |
-|---|---|
-| missing notes | mostly a function of loudness. Lone notes: 29% if quiet (velocity < 40), 0.5% if loud. 8-note chords: 57% for quiet notes, 6% for loud ones |
-| hallucinated notes | 1.8% of notes. Loud notes spawn them 5.5× more often than quiet ones. Most common: an octave below or above the source (−12 / +12), then thirds and sixths, then two octaves |
-| onset jitter | 6.1 ms std |
-| notes lengthened to pedal release | 68% of notes released under sustain |
-| missed pedal presses | 8%, with ~75 ms timing error |
+The Kong fit (`configs/noise_stats_kong.json`) uses exactly the same procedure. The two
+transcribers make very different errors:
 
-`configs/noise_stats_parametric.json` is the first, hand-parametrized version. Keep it for ablations.
-
-**Validation with a detector** (`scripts/train_xgb_detector.py`, see [XGBoost baseline](#xgboost-baseline-note-level-error-detector)).
-An error detector trained only on synthetic noise and tested on **real** transcriptions of unseen
-audio scores:
-
-| noise model | AUC | AP |
+| error | Transkun V2 (`noise_stats.json`) | Kong 2021 (`noise_stats_kong.json`) |
 |---|---|---|
-| parametric | 0.660 | 0.010 |
-| empirical | 0.904 | 0.090 |
-| trained on real errors (upper bound) | 0.987 | 0.435 |
+| hallucinated notes | **0.19%**, mostly ±1 octave, then sixths and thirds | 1.83% (~10× more) |
+| notes lengthened to pedal release | **13%** of notes released under sustain | 68% |
+| missed lone notes, quiet (vel < 40) / loud | 25% / 0.5% | 29% / 0.5% |
+| missed notes in 8-note chords, quiet / loud | 56% / 8.5% | 57% / 5.7% |
+| missed pedal presses | 11% | 8% |
+| onset jitter | 5.5 ms | 6.1 ms |
 
-Random guessing gives AP 0.005. The empirical noise is much closer to real errors, but a gap
-remains. On 8-second windows, synthetic noise gives pitch F1 0.964 vs. 0.974 for real
-transcriptions, i.e. slightly harsher than real.
+**What this means for the model:** with Transkun, extra notes are rare. The errors the model has to
+fix are mostly **missing notes** (quiet notes and dense chords) and **rhythm/duration
+quantization**, not hallucinations.
+
+`configs/noise_stats_parametric.json` is the first, hand-parametrized version, kept for ablations.
+
+**Validation with a detector:** see [the error detector](#xgboost-baseline-note-level-error-detector).
+With Kong noise, a detector trained only on synthetic errors reached AUC 0.90 on real errors in
+unseen audio, vs. 0.66 for the parametric noise.
 
 To reproduce the fit:
 
 ```bash
-uv venv --python 3.12 .venv-transcribe       # Kong's package needs Python <= 3.12 + CUDA torch
-uv pip install --python .venv-transcribe/Scripts/python.exe torch --index-url https://download.pytorch.org/whl/cu128
-uv pip install --python .venv-transcribe/Scripts/python.exe piano_transcription_inference audioread librosa pretty_midi
-# checkpoint (the package's own download uses wget, which Windows lacks):
-curl -L -o ~/piano_transcription_inference_data/"note_F1=0.9677_pedal_F1=0.9186.pth" \
-  "https://zenodo.org/record/4034264/files/CRNN_note_F1%3D0.9677_pedal_F1%3D0.9186.pth?download=1"
-
-# range-downloads single recordings from the 108 GB zip (~10 GB total for all three)
+# range-downloads single recordings from the 108 GB MAESTRO zip (~10 GB for all three)
 python scripts/fetch_maestro_audio.py --split test --limit 40
 python scripts/fetch_maestro_audio.py --asap-split train,val --maestro-splits test,validation
 python scripts/fetch_maestro_audio.py --asap-split test
-.venv-transcribe/Scripts/python scripts/transcribe.py            # ~40x real time on an RTX 5070 Ti
-python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out configs/noise_stats.json
+
+# Transkun V2 (default). One process by default; --jobs N runs N workers (~4 GB GPU memory each).
+# Ctrl+C stops all of them cleanly; running the same command again resumes.
+python scripts/transcribe.py
+python scripts/fit_noise.py --pairs data/transcribed_transkun/pairs.csv --out configs/noise_stats.json
+
+# Kong, for comparison (env: Python <= 3.12, pip install piano_transcription_inference audioread;
+# get the checkpoint with curl, since the package's own download uses wget):
+#   curl -L -o ~/piano_transcription_inference_data/"note_F1=0.9677_pedal_F1=0.9186.pth" \
+#     "https://zenodo.org/record/4034264/files/CRNN_note_F1%3D0.9677_pedal_F1%3D0.9186.pth?download=1"
+python scripts/transcribe.py --model kong
+python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out configs/noise_stats_kong.json
 ```
 
-### Transkun V2 errors (measured by Alex, not yet committed)
+**Transcriber speed on an RTX 5070 Ti:**
+- **Transkun:** ~12× real time per process. The in-process mode loads the model once; `--isolate`
+  restores a fresh process per recording, for small GPUs.
+- **Kong:** ~40× real time.
 
-Transkun V2, the transcriber PERiScoPe was made with, makes very different errors from Kong, as
-measured on 40 MAESTRO-test recordings (170k notes):
-
-| error | Transkun V2 | Kong 2021 |
-|---|---|---|
-| missing notes | 3.7% for single notes → 15% in 8-note chords | 4.5% → 20% |
-| extra (hallucinated) notes | 0.23% of notes, mostly ±1–4 semitones | 2.3% (10× more) |
-| onset jitter | 5.9 ms std | 6.5 ms |
-| notes lengthened to pedal release | 12% of notes released under sustain | 65% |
-| missed pedal presses | 12%, ~80 ms timing error | 9% |
-
-So the synthetic noise must match the transcriber used at inference. The committed
-`configs/noise_stats.json` is **Kong**. To train for Transkun, fit and commit a Transkun model:
-
-```bash
-python scripts/transcribe.py --model transkun        # -> data/transcribed_transkun (~5x real time)
-python scripts/fit_noise.py --pairs data/transcribed_transkun/pairs.csv --out configs/noise_stats_transkun.json
-
-```
-
-`transcribe.py` gives the same output as the package's `PianoTranscription.transcribe`: about 0.3%
-of notes shift by at most ~1 ms, from GPU rounding differences between batch sizes. It's about 20×
-faster:
+For Kong, `transcribe.py` gives the same output as the package's `PianoTranscription.transcribe`:
+about 0.3% of notes shift by at most ~1 ms, from GPU rounding differences between batch sizes.
+It's about 20× faster:
 - batched GPU inference (the package hard-codes batch size 1);
 - audio decoding prefetched in background threads;
 - note/pedal decoding in worker processes.
@@ -435,23 +420,24 @@ python scripts/run_baselines.py --methods beat_snap,xgb_quantizer   # ~5 min
 | baseline | category | what it does |
 |---|---|---|
 | **1. Beat-snap** (`src/baselines/quantize.py`) | classical heuristic | Maps each note to score time through the **annotated (oracle) beats**, snaps onsets to the nearest 16th / 8th-triplet and durations to the nearest common value, and splits staffs at middle C. No grace notes, ties or ornaments. |
-| **2. Beat-snap + XGBoost** (`src/baselines/xgb_quantizer.py`) | lightweight supervised | Baseline 1, plus four per-note XGBoost classifiers (keep/delete, staff, written duration, onset shift). Trained on synthetic-noise and real-transcription training windows (1.17M notes). |
+| **2. Beat-snap + XGBoost** (`src/baselines/xgb_quantizer.py`) | lightweight supervised | Baseline 1, plus four per-note XGBoost classifiers (keep/delete, staff, written duration, onset shift). Trained on synthetic-noise (Transkun) and real-Transkun training windows (1.16M notes). |
 | 3. Beyer & Dai (2024), pretrained | prior published | Not run yet: needs their code and checkpoint (external code; see below). |
 
 Conditions (same windows, same targets):
 - **clean:** clean MIDI.
-- **synthetic:** clean MIDI plus our fitted noise.
+- **synthetic:** clean MIDI plus our fitted (Transkun) noise.
 - **clean_paired:** clean MIDI on exactly the windows that have a real transcription.
-- **real:** Kong transcriptions.
-- **real_unseen:** real transcriptions of audio Kong never saw (3 performances, 62 windows).
+- **real:** Transkun transcriptions.
+- **real_unseen:** real transcriptions of audio Transkun never saw (3 performances, 62 windows).
+- **real_kong:** the same windows transcribed by Kong.
 
-| metric | B1 clean | B1 real | B2 clean | B2 synthetic | B2 clean_paired | B2 real | B2 real_unseen |
-|---|---|---|---|---|---|---|---|
-| note F1 | 0.929 | 0.926 | 0.930 | 0.906 | 0.935 | 0.930 | 0.914 |
-| onset F1 (rhythm) | 0.631 | 0.646 | 0.714 | 0.688 | 0.732 | 0.732 | 0.791 |
-| duration acc | 0.341 | 0.289 | 0.538 | 0.517 | 0.491 | 0.517 | 0.545 |
-| staff acc | 0.743 | 0.786 | 0.827 | 0.828 | 0.865 | 0.868 | 0.913 |
-| tie / grace F1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| metric | B1 clean | B1 real | B2 clean | B2 synthetic | B2 clean_paired | B2 real | B2 real_unseen | B2 real_kong |
+|---|---|---|---|---|---|---|---|---|
+| note F1 | 0.929 | 0.927 | 0.932 | 0.914 | 0.935 | 0.932 | 0.918 | 0.930 |
+| onset F1 (rhythm) | 0.631 | 0.645 | 0.718 | 0.700 | 0.738 | 0.738 | 0.801 | 0.740 |
+| duration acc | 0.341 | 0.242 | 0.557 | 0.546 | 0.530 | 0.535 | 0.537 | 0.541 |
+| staff acc | 0.743 | 0.786 | 0.829 | 0.830 | 0.871 | 0.871 | 0.925 | 0.869 |
+| tie / grace F1 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
 
 **Reading the table:**
 - **Not meaningful for these baselines:** bar F1 (≈1.0) and pedal F1 (1.0 on clean). Both
@@ -459,8 +445,12 @@ Conditions (same windows, same targets):
 - **What the transformer has to beat:** rhythm (onset F1 ~0.71–0.79), written durations
   (~0.5), staff (~0.83–0.91), and ties/grace notes, which the baselines can't produce at all.
 - **Which columns to compare:** "clean" and "real" cover different performances; compare
-  `clean_paired` with `real`. The real column is mostly audio the transcriber was trained on,
-  hence barely any drop. Synthetic noise costs Baseline 2 about 2.6 points of onset F1.
+  `clean_paired` with `real`. The real column is mostly audio Transkun was trained on, hence no
+  drop.
+- **Synthetic noise** costs Baseline 2 about 1.8 points of onset F1.
+- **Transkun vs Kong inputs:** almost the same for these baselines.
+- **test_periscope:** the baselines need ASAP's beat annotations (oracle beats), so they can't
+  run on `test_periscope`. Only the transformer is evaluated there.
 
 **Baseline 3 (Beyer & Dai) needs a decision.** Their pretrained checkpoint and their MUSTER /
 score-similarity metrics need their code: a patched music21 fork plus the `score_transformer` and
@@ -486,41 +476,50 @@ uses 56 local-context features (`src/baselines/note_features.py`), such as:
 Two detectors are trained:
 
 - **On synthetic noise** (ASAP train). Labels are the notes the noise injector added.
-- **On real Kong errors** (95 MAESTRO test/validation transcriptions, with ASAP val/test
-  recordings excluded). Labels come from matching each note against the ground truth within 50 ms.
+- **On real errors** (MAESTRO test/validation transcriptions, with ASAP val/test recordings
+  excluded). Labels come from matching each note against the ground truth within 50 ms.
 
 | detector | synthetic test AUC / AP | real test AUC / AP | real, unseen audio AUC / AP |
 |---|---|---|---|
-| flag quietest notes | 0.658 / 0.027 | 0.689 / 0.031 | 0.695 / 0.017 |
-| trained on synthetic (empirical noise) | 0.961 / 0.589 | 0.540 / 0.030 | 0.904 / 0.090 |
+| **Transkun** (current) | | | |
+| flag quietest notes | 0.722 / 0.004 | 0.652 / 0.011 | 0.849 / 0.033 |
+| trained on synthetic noise | 0.983 / 0.430 | 0.202 / 0.005 | 0.924 / 0.005 |
+| trained on real errors | 0.914 / 0.019 | 0.315 / 0.006 | 0.994 / 0.098 |
+| **Kong** (earlier run) | | | |
+| trained on synthetic noise | 0.961 / 0.589 | 0.540 / 0.030 | 0.904 / 0.090 |
 | trained on real errors | 0.818 / 0.062 | 0.620 / 0.117 | 0.987 / 0.435 |
+
+Error rates (= AP of random guessing): Transkun synthetic 0.002, real 0.008, unseen 0.001; Kong
+about 10× higher.
 
 **Takeaways:**
 
-- **What real errors look like.** The strongest features are a louder note an octave below that is
-  still sounding, being the lowest note of a chord, and being quiet relative to the chord. So
-  hallucinations are mostly overtones.
-- **The unseen-audio column is small:** only 3 performances, about 40 error notes.
-- **"Real test" is mostly audio Kong was trained on**, where the remaining errors are rare and
-  atypical.
-- **Deleting flagged notes doesn't help yet** (precision about 0.2). Use the detector score as an
-  input feature rather than as a hard filter.
+- **With Kong, the detector works.** Hallucinations are 1.8% of notes, mostly quiet octave
+  overtones of a louder note that is still sounding, and they are detectable (AUC 0.90–0.99 on
+  unseen audio).
+- **With Transkun, there's almost nothing to detect.** Hallucinations are 0.19% of notes; on
+  unseen audio only ~0.1% of notes are errors (a handful of notes), so the AP numbers are noise.
+- **Transkun "real test" AUC is below 0.5.** The few mismatches there are mostly timing differences
+  on audio Transkun was trained on, not hallucinations, and they look like confident real notes.
+- **Conclusion:** with Transkun, a delete-the-extra-notes step isn't worth it. The model's work is
+  recovering missing notes and quantizing rhythm and durations. The detector score is unlikely to
+  help as an input feature; keep it only as an ablation.
 
 ## Real-transcription splits
 
-- **`train_transcribed` / `val_transcribed`:** only audio Kong never trained on (MAESTRO
-  test/validation). 87 training and 20 validation performances. Against the score, pitch agreement
-  drops from 0.961 for clean inputs to 0.946 for real transcriptions (train; val: 0.967 to 0.955).
+- **`train_transcribed` / `val_transcribed`:** only audio Transkun never trained on (MAESTRO
+  test/validation): 85 training and 22 validation performances. Against the score, input pitch
+  agreement drops from 0.962 (clean) to 0.955 (Transkun) / 0.948 (Kong) on train; on val from
+  0.957 to 0.952 / 0.945.
 - **`test_transcribed`:** see the caveat below.
 
 ### Caveat: test_transcribed
 
-Only 25 of the 59 ASAP test performances have MAESTRO audio (segment counts: rebuild with
-`build_transcribed_eval.py`):
+Only 25 of the 59 ASAP test performances have MAESTRO audio :
 
 | MAESTRO split of the audio | performances | segments | meaning |
 |---|---|---|---|
-| train | 21 | 549 | the transcriber (Kong) was trained on this audio, so transcriptions are optimistic |
+| train | 21 | 549 | Transkun (and Kong) were trained on this audio, so transcriptions are optimistic |
 | validation | 2 | 42 | unseen by the transcriber |
 | test | 1 | 20 | unseen by the transcriber |
 

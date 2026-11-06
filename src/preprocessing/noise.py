@@ -2,8 +2,9 @@
 
 Defaults are placeholders. Run ``scripts/fit_noise.py`` on transcribed MAESTRO test/validation
 files vs. ground-truth MIDI to fit them, then pass the resulting JSON to ``NoiseModel.from_json``.
-The committed ``configs/noise_stats.json`` is fitted on **Kong et al.** transcriptions; to match
-Transkun V2 (PERiScoPe) instead, refit on ``data/transcribed_transkun/pairs.csv``.
+The committed ``configs/noise_stats.json`` is fitted on **Transkun V2** transcriptions (the
+transcriber used at inference, and the one PERiScoPe was made with); ``configs/noise_stats_kong.json``
+is the same fit on Kong et al. transcriptions, kept for comparison.
 """
 from __future__ import annotations
 

@@ -1,8 +1,8 @@
 """Fit noise-model parameters by comparing transcribed MIDI against ground-truth MIDI.
 
-    python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out configs/noise_stats.json
-    # Transkun V2 instead of Kong:
-    python scripts/fit_noise.py --pairs data/transcribed_transkun/pairs.csv --out configs/noise_stats_transkun.json
+    python scripts/fit_noise.py --pairs data/transcribed_transkun/pairs.csv --out configs/noise_stats.json
+    # Kong (kept for comparison):
+    python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out configs/noise_stats_kong.json
 
 ``pairs.csv`` (written by scripts/transcribe.py) has columns ``pred,gt[,maestro_split]``. Only rows
 from unseen MAESTRO splits are used (``--maestro-split``, default test,validation): both Kong and

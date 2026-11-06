@@ -60,7 +60,11 @@ def main():
 
     t = time.time()
     tr = SegmentStore(D / "train")
-    syn_idx = rng.choice(len(tr), size=min(args.windows, len(tr)), replace=False)
+    # clean ASAP windows only: they get synthetic noise here, and the beat-snap placement needs
+    # ASAP's beat annotations (PERiScoPe windows are real transcriptions without them)
+    clean = np.array([i for i, m in enumerate(tr.meta) if m.get("source", "clean") == "clean"
+                      and m.get("dataset", "asap") == "asap"])
+    syn_idx = rng.choice(clean, size=min(args.windows, len(clean)), replace=False)
     X1, L1 = collect(tr, syn_idx, vocab, timings, nm, rng)
     real = SegmentStore(D / "train_transcribed")
     X2, L2 = collect(real, range(len(real)), vocab, timings)

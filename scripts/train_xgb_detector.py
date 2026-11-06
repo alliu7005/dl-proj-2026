@@ -67,7 +67,9 @@ def _carried_keep(notes: np.ndarray, min_end) -> np.ndarray:
 
 def synthetic(store: SegmentStore, nm: NoiseModel, n_seg: int, seed: int):
     rng = np.random.default_rng(seed)
-    idx = rng.choice(len(store), size=min(n_seg, len(store)), replace=False)
+    # synthetic noise only makes sense on clean windows (PERiScoPe windows are real transcriptions)
+    clean = np.array([i for i, m in enumerate(store.meta) if m.get("source", "clean") == "clean"])
+    idx = rng.choice(clean, size=min(n_seg, len(clean)), replace=False)
     X, y = [], []
     for i in idx:
         notes, pedal, _ = store.get(i)
@@ -160,7 +162,8 @@ def main():
     ap.add_argument("--data", default="data/processed")
     ap.add_argument("--asap", default="data/raw/asap_bd")
     ap.add_argument("--noise", default="configs/noise_stats.json")
-    ap.add_argument("--pairs", default="data/transcribed/pairs.csv")
+    ap.add_argument("--pairs", default="data/transcribed_transkun/pairs.csv",
+                    help="data/transcribed_transkun/pairs.csv (Transkun) or data/transcribed/pairs.csv (Kong)")
     ap.add_argument("--split-file", default="data/processed/splits.json")
     ap.add_argument("--train-segments", type=int, default=25000)
     ap.add_argument("--out", default="outputs")

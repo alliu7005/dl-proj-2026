@@ -13,8 +13,8 @@ clean segment (same performance + bar_start), so they are always ground truth.
     # training / model selection on real errors: only audio the transcriber was NOT trained on
     python scripts/build_transcribed.py --asap-split train --maestro-splits test,validation
     python scripts/build_transcribed.py --asap-split val --maestro-splits test,validation
-    # Transkun V2 transcriptions instead of Kong (see scripts/transcribe.py --model transkun)
-    python scripts/build_transcribed.py --asap-split test --transcribed data/transcribed_transkun
+    # Kong transcriptions instead of Transkun V2 (-> <split>_transcribed_kong)
+    python scripts/build_transcribed.py --asap-split test --transcribed data/transcribed
 """
 from __future__ import annotations
 
@@ -43,8 +43,10 @@ def main():
     ap.add_argument("--config", default="configs/preprocess.yaml")
     ap.add_argument("--asap-split", default="test")
     ap.add_argument("--maestro", default="data/raw/maestro")
-    ap.add_argument("--transcribed", default="data/transcribed",
-                    help="data/transcribed (Kong) or data/transcribed_transkun (Transkun V2)")
+    ap.add_argument("--transcribed", default="data/transcribed_transkun",
+                    help="data/transcribed_transkun (Transkun V2, default) or data/transcribed (Kong)")
+    ap.add_argument("--suffix", default=None,
+                    help="output dir = <split>_transcribed<suffix>; default '' for Transkun, '_kong' for Kong")
     ap.add_argument("--maestro-splits", default="train,validation,test",
                     help="only use audio from these MAESTRO splits (Kong was trained on 'train')")
     ap.add_argument("--min-offset-match", type=float, default=0.8,
@@ -53,6 +55,7 @@ def main():
     warnings.filterwarnings("ignore")
 
     cfg = yaml.safe_load(open(args.config))
+    suffix = args.suffix if args.suffix is not None else ("" if "transkun" in args.transcribed else "_kong")
     root, out = Path(cfg["asap_root"]), Path(cfg["out_dir"])
     seg = dict(cfg["segment"])
     seg["window_notes"] = tuple(seg.get("window_notes", SegmentConfig.window_notes))
@@ -99,7 +102,7 @@ def main():
         if row["folder"] not in scores:
             scores[row["folder"]] = load_score(root / row["xml_score"])
         meta = {"dataset": "asap", "piece": row["folder"], "composition": composition_id("asap", row["folder"]),
-                "performance": perf, "split": f"{args.asap_split}_transcribed",
+                "performance": perf, "split": f"{args.asap_split}_transcribed{suffix}",
                 "source": "transkun_real" if "transkun" in args.transcribed else "kong_real",
                 "maestro_split": maestro[mm]["split"]}
         if windows_mode:  # cut at exactly the clean windows' score-time cut points
@@ -120,7 +123,7 @@ def main():
                        "maestro_split": maestro[mm]["split"], "segments": len(s)})
 
     sizes = tuple(sum(x) for x in zip(*map(segment_sizes, segs))) if segs else (0, 0, 0, 0)
-    dst = out / f"{args.asap_split}_transcribed"
+    dst = out / f"{args.asap_split}_transcribed{suffix}"
     write_split(dst, iter(segs), sizes, vocab)
     json.dump(report, open(dst / "report.json", "w"), indent=1)
     skipped = Counter(r["skipped"].split(" ")[0] for r in report if "skipped" in r)
