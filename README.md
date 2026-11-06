@@ -405,6 +405,41 @@ It's about 20× faster:
 
 Other GPU-heavy programs (e.g. games) slow it down noticeably.
 
+## Training the transformer
+
+```bash
+python scripts/train.py --name base             # start; Ctrl+C saves and stops
+python scripts/train.py --name base --resume    # continue
+python scripts/evaluate.py --run base           # test sets, same metrics/windows as the baselines
+```
+
+**Model** (`src/model.py`): encoder-decoder transformer, about 10M parameters by default.
+- **Encoder:** the performed notes. Each note gets a pitch embedding, its continuous features, a
+  Fourier encoding of its onset time, and a note-index position.
+- **Decoder:** writes the score tokens autoregressively after `<bos> prompt <sep>`. Its output
+  embeddings are tied to the input embeddings.
+- **Size flags:** `--d-model`, `--enc-layers`, `--dec-layers`.
+
+**Training** (`scripts/train.py`):
+- **Data:** all of `train` (real PERiScoPe transcriptions, plus clean ASAP with synthetic Transkun
+  noise and augmentation) and `train_transcribed`, in their natural proportion.
+- **Optimization:** bf16 mixed precision, AdamW, 2,000 warmup steps then cosine decay, label
+  smoothing 0.1, rare ornament/pedal tokens weighted 5× in the loss.
+- **Speed:** about 20 min per epoch on an RTX 5070 Ti (~83k target tokens/s, batch 16). The
+  default 10 epochs takes about 3.5 h plus evaluations.
+- **Runs at below-normal CPU priority** with 2 data-loading workers (`--workers`).
+- **Every `--eval-every` steps:** teacher-forced loss and token accuracy on fixed val subsets, plus
+  greedy decoding of a few windows from `val` (ASAP), `val` (PERiScoPe) and `val_transcribed`,
+  scored with the baseline metrics. Logged to `outputs/runs/<name>/log.csv`.
+- **Checkpoints:** `last.pt` at every eval and on Ctrl+C; `best.pt` has the best `val_real` loss.
+
+**Clean-input baseline** (Beyer & Dai-style, for H1): `--no-noise` trains on clean ASAP windows
+only, with augmentation but no synthetic noise and no real transcriptions.
+
+**Evaluation** (`scripts/evaluate.py`): greedy decoding of every test window under the same
+conditions as `run_baselines.py`, plus `periscope` (`test_periscope`). It uses the ground-truth
+prompt before each window, the same window-level protocol as the baselines.
+
 ## Baselines
 
 The milestone asks for 1–3 baselines evaluated "with the same data, metrics, and protocol" as our
@@ -546,6 +581,7 @@ src/baselines/note_features.py   per-note context features (XGBoost detector / q
 src/baselines/quantize.py        Baseline 1: beat-snap quantizer
 src/baselines/xgb_quantizer.py   Baseline 2: beat-snap + per-note XGBoost
 src/eval/metrics.py              shared window-level metrics
+src/model.py                     encoder-decoder transformer
 src/dataset.py     PyTorch Dataset / sampler / collate
 scripts/           build_dataset, make_bd_split, fetch_maestro_audio, transcribe, fit_noise,
                    build_transcribed, train_xgb_detector, audit_data

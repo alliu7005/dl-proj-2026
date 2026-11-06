@@ -66,14 +66,30 @@ class SegmentStore:
 
     def __init__(self, split_dir: str | Path, load_meta: bool = True):
         d = Path(split_dir)
-        self.notes = np.load(d / "notes.npy", mmap_mode="r")
-        self.pedal = np.load(d / "pedal.npy", mmap_mode="r")
-        self.tokens = np.load(d / "tokens.npy", mmap_mode="r")
+        self.dir = d
+        self._open_arrays()
         index = np.load(d / "index.npy")
         if index.shape[1] == 6:  # older build without prompts
             index = np.concatenate([index, index[:, 4:5]], axis=1)
         self.index = index
         self.meta = [json.loads(line) for line in open(d / "meta.jsonl")] if load_meta else None
+
+    def _open_arrays(self):
+        self.notes = np.load(self.dir / "notes.npy", mmap_mode="r")
+        self.pedal = np.load(self.dir / "pedal.npy", mmap_mode="r")
+        self.tokens = np.load(self.dir / "tokens.npy", mmap_mode="r")
+
+    # DataLoader workers (spawned on Windows) receive a pickled copy of the dataset; pickling a
+    # memmap would copy the whole array, so drop it and reopen the files in the worker instead
+    def __getstate__(self):
+        st = dict(self.__dict__)
+        for k in ("notes", "pedal", "tokens"):
+            st.pop(k, None)
+        return st
+
+    def __setstate__(self, st):
+        self.__dict__.update(st)
+        self._open_arrays()
 
     def __len__(self):
         return len(self.index)
