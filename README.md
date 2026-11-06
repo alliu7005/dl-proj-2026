@@ -447,6 +447,55 @@ only, with augmentation but no synthetic noise and no real transcriptions.
 conditions as `run_baselines.py`, plus `periscope` (`test_periscope`). It uses the ground-truth
 prompt before each window, the same window-level protocol as the baselines.
 
+## Scoreformer (main model)
+
+`src/scoreformer.py` is the main model. Score2Seq (`src/model.py`, ~10M parameters) was a
+first small-scale check. The Scoreformer uses the same data, windows, noise and token grammar, and
+the same `forward` / `generate` interface, so both are trained and scored by the same scripts.
+
+```bash
+python scripts/train_model.py --name sf_base                      # base size, ~45M parameters
+python scripts/train_model.py --name sf_base --resume             # continue after Ctrl+C / time limit
+python scripts/evaluate_pieces.py --run sf_base --musicxml 5      # test sets, 3 prompt modes
+python -m tests.test_scoreformer                                  # model + chained-prompt checks
+sbatch pace/train.sbatch                                          # train + evaluate on a PACE GPU
+```
+
+**What differs from Score2Seq:**
+
+| | Score2Seq | Scoreformer |
+|---|---|---|
+| size | 10M (d=256, 4+6 layers) | `--size small/base/large`: 8M / 45M / 133M |
+| note timing | Fourier features of the *standardized* onset (finest period ~0.4 s, since onset std is 6.3 s) | **rotary attention on onset seconds**, periods 20 ms to 60 s: attention depends on how far apart two notes were played |
+| note features | one linear layer on the standardized values | log-binned embeddings of gap and duration, binned velocity, plus the linear layer |
+| decoder positions | learned table (fixed max length) | rotary over token index |
+| feed-forward | GELU | SwiGLU |
+| best.pt | lowest `val_real` loss | lowest mean unweighted loss over all validation sets |
+
+**Training** (`scripts/train_model.py`): the same loop and helpers as `scripts/train.py` (token-budget
+batches, bf16, warmup + cosine, label smoothing, 5× weight on ornament/pedal tokens). Additions:
+`--arch score2seq` trains Michael's model under the identical loop (a fair architecture comparison),
+`--no-noise` is the clean-input ablation, `--grad-accum` / `--compile` for big runs, and missing
+splits (`train_transcribed`, PERiScoPe) are skipped instead of crashing. 20 epochs by default.
+
+**Evaluation** (`scripts/evaluate_pieces.py`), works for checkpoints of either script:
+
+| prompt mode | the decoder's context before each window | use |
+|---|---|---|
+| `oracle` | the ground-truth score before the window (= `scripts/evaluate.py`) | upper bound |
+| `chained` | the model's **own** output so far, window by window through each piece | **the system's real performance** |
+| `none` | nothing | robustness check |
+
+All three score each window against its ground truth with `src/eval/metrics.py`, so they compare
+directly with the baselines. `--musicxml N` writes the stitched prediction and ground truth of the
+first N pieces as MusicXML (for figures and for MUSTER / MV2H).
+
+**Prompt fix** (`segment.prompt_from_output`): when a position in the bar held only a pedal token,
+removing the pedal left an empty `pos_k sub_x` behind, so 43% of inference-time prompts differed
+from the training prompts (the old test compared them by meaning, not token by token). Empty
+positions are now dropped; `tests/test_scoreformer.py` checks all 3,631 val/test prompts are
+identical token for token.
+
 ## Baselines
 
 The milestone asks for 1–3 baselines evaluated "with the same data, metrics, and protocol" as our
@@ -588,8 +637,12 @@ src/baselines/note_features.py   per-note context features (XGBoost detector / q
 src/baselines/quantize.py        Baseline 1: beat-snap quantizer
 src/baselines/xgb_quantizer.py   Baseline 2: beat-snap + per-note XGBoost
 src/eval/metrics.py              shared window-level metrics
-src/model.py                     encoder-decoder transformer
+src/model.py                     Score2Seq: first small encoder-decoder transformer
+src/scoreformer.py               Scoreformer: main model (time-rotary encoder), checkpoint loading
 src/dataset.py     PyTorch Dataset / sampler / collate
+scripts/train_model.py           train either model; scripts/evaluate_pieces.py: oracle/chained/none
+pace/train.sbatch                PACE GPU job: train + evaluate
+tests/test_scoreformer.py        model checks + chained prompts == training prompts
 scripts/           build_dataset, make_bd_split, fetch_maestro_audio, transcribe, fit_noise,
                    build_transcribed, train_xgb_detector, audit_data
 tests/test_integrity.py   leakage, pairing, array and loader checks
