@@ -1,16 +1,17 @@
-"""Build an evaluation split whose inputs are REAL Kong transcriptions instead of clean MIDI.
+"""Build a split whose inputs are REAL Kong transcriptions instead of clean performance MIDI.
 
-For every ASAP performance in ``--asap-split`` that has MAESTRO audio and a transcription in
-data/transcribed/, the transcription is shifted onto the ASAP performance timeline (ASAP files can
-be cut/offset relative to MAESTRO), segmented with exactly the same bars as the clean split, and
-written to data/processed/<asap-split>_transcribed/ with the same vocab. Segment i there pairs with
-the clean segment that has the same (performance, bar_start), so clean-vs-real inputs can be
-compared on identical targets.
+For every ASAP performance in ``--asap-split`` that has MAESTRO audio (optionally only from
+``--maestro-splits``) and a transcription in data/transcribed/, the transcription is shifted onto
+the ASAP performance timeline (ASAP files can be cut/offset relative to MAESTRO), segmented with
+exactly the same bars/windows as the clean split, and written to
+data/processed/<asap-split>_transcribed/ with the same vocab. Targets are copied from the matching
+clean segment (same performance + bar_start), so they are always ground truth.
 
-    python scripts/build_transcribed_eval.py --asap-split test
-
-The ``maestro_split`` meta field records whether Kong's model was trained on that audio
-(``train``); report those separately from ``validation``/``test`` recordings.
+    # evaluation: all test performances with audio (meta "maestro_split" says if Kong saw the audio)
+    python scripts/build_transcribed.py --asap-split test
+    # training / model selection on real errors: only audio Kong was NOT trained on
+    python scripts/build_transcribed.py --asap-split train --maestro-splits test,validation
+    python scripts/build_transcribed.py --asap-split val --maestro-splits test,validation
 """
 from __future__ import annotations
 
@@ -61,36 +62,48 @@ def main():
     ap.add_argument("--asap-split", default="test")
     ap.add_argument("--maestro", default="data/raw/maestro")
     ap.add_argument("--transcribed", default="data/transcribed")
+    ap.add_argument("--maestro-splits", default="train,validation,test",
+                    help="only use audio from these MAESTRO splits (Kong was trained on 'train')")
+    ap.add_argument("--min-offset-match", type=float, default=0.8,
+                    help="skip a performance if the transcription can't be aligned this well")
     args = ap.parse_args()
     warnings.filterwarnings("ignore")
 
     cfg = yaml.safe_load(open(args.config))
     root, out = Path(cfg["asap_root"]), Path(cfg["out_dir"])
     seg_cfg = SegmentConfig(**cfg["segment"])
-    # same windows as the clean eval split; keep every window (transcriptions are noisy by design)
-    seg_cfg = replace(seg_cfg, stride=seg_cfg.bars_per_segment, min_pitch_f1=0.0,
-                      max_input_notes=seg_cfg.max_input_notes * 2)
+    # same windows as the clean split (train overlaps, val/test don't); no pitch-F1 filter since
+    # transcriptions are noisy by design -- only windows whose clean counterpart exists are kept
+    stride = seg_cfg.stride if args.asap_split == "train" else seg_cfg.bars_per_segment
+    seg_cfg = replace(seg_cfg, stride=stride, min_pitch_f1=0.0, max_input_notes=seg_cfg.max_input_notes * 2)
     vocab = Vocab.load(out / "vocab.json")
     clean = SegmentStore(out / args.asap_split)
     clean_keys = {(m["performance"], m["bar_start"]): i for i, m in enumerate(clean.meta)}
+    clean_perfs = {k[0] for k in clean_keys}
 
     ann = json.load(open(root / "asap_annotations.json"))
-    maestro = {r["midi_filename"]: r for r in csv.DictReader(open(Path(args.maestro) / "maestro-v3.0.0.csv", encoding="utf-8"))}
-    pieces = json.load(open(cfg["fixed_split"]))["pieces"] if cfg.get("fixed_split") else \
-        json.load(open(out / "splits.json"))
+    maestro = {r["midi_filename"]: r for r in
+               csv.DictReader(open(Path(args.maestro) / "maestro-v3.0.0.csv", encoding="utf-8"))}
+    pieces = json.load(open(out / "splits.json"))  # the split build_dataset.py actually used
+    ok_maestro = set(args.maestro_splits.split(","))
     scores, segs, report = {}, [], []
     for row in csv.DictReader(open(root / "metadata.csv")):
         mm = row["maestro_midi_performance"].replace("{maestro}/", "")
-        if pieces.get(row["folder"]) != args.asap_split or mm not in maestro:
+        if pieces.get(row["folder"]) != args.asap_split or mm not in maestro \
+                or maestro[mm]["split"] not in ok_maestro:
             continue
         pred = Path(args.transcribed) / Path(maestro[mm]["audio_filename"]).with_suffix(".mid")
         perf = row["midi_performance"]
-        if not pred.exists() or not any(k[0] == perf for k in clean_keys):
-            report.append({"performance": perf, "skipped": "no transcription" if not pred.exists() else "not in clean split"})
+        if not pred.exists() or perf not in clean_perfs:
+            report.append({"performance": perf,
+                           "skipped": "no transcription" if not pred.exists() else "not in clean split"})
             continue
         clean_notes, _ = load_performance(root / perf)
         notes, pedal = load_performance(pred)
         d, frac = estimate_offset(clean_notes, notes)
+        if frac < args.min_offset_match:
+            report.append({"performance": perf, "skipped": f"alignment match {frac:.2f}"})
+            continue
         notes[:, 1:3] -= d
         pedal = pedal - d if len(pedal) else pedal
         if row["folder"] not in scores:
@@ -98,22 +111,22 @@ def main():
         meta = {"dataset": "asap", "piece": row["folder"], "composition": composition_id("asap", row["folder"]),
                 "performance": perf, "split": f"{args.asap_split}_transcribed", "source": "kong2021",
                 "maestro_split": maestro[mm]["split"]}
-        s, st = segment_pair(notes, pedal, ann[perf], scores[row["folder"]], seg_cfg, meta)
+        s, _ = segment_pair(notes, pedal, ann[perf], scores[row["folder"]], seg_cfg, meta)
         s = [x for x in s if (perf, x["bar_start"]) in clean_keys]
-        for x in s:  # targets are ground truth: same tokens as the clean segment (incl. pedal from clean CC64)
+        for x in s:  # ground-truth targets: identical to the clean segment's (incl. pedal from clean CC64)
             x["tokens"] = vocab.decode(clean.get(clean_keys[(perf, x["bar_start"])])[2].tolist())
         segs += s
         report.append({"performance": perf, "offset_s": round(d, 3), "offset_match": round(frac, 3),
                        "maestro_split": maestro[mm]["split"], "segments": len(s)})
-        print(f"{perf}: offset {d:+.3f}s (match {frac:.2f}), MAESTRO {maestro[mm]['split']}, {len(s)} segments")
 
     sizes = (len(segs), sum(len(s["notes"]) for s in segs), sum(len(s["pedal"]) for s in segs),
              sum(len(s["tokens"]) for s in segs))
     dst = out / f"{args.asap_split}_transcribed"
     write_split(dst, iter(segs), sizes, vocab)
     json.dump(report, open(dst / "report.json", "w"), indent=1)
-    print(f"{len(segs)} segments from {sum('segments' in r for r in report)} performances "
-          f"(MAESTRO split of the audio: {dict(Counter(s['maestro_split'] for s in segs))}) -> {dst}")
+    skipped = Counter(r["skipped"].split(" ")[0] for r in report if "skipped" in r)
+    print(f"{dst}: {len(segs)} segments from {sum('segments' in r for r in report)} performances "
+          f"(audio MAESTRO split: {dict(Counter(s['maestro_split'] for s in segs))}); skipped: {dict(skipped)}")
 
 
 if __name__ == "__main__":

@@ -4,8 +4,9 @@ Reads the zip's central directory with HTTP range requests, then pulls only the 
 
     # 40 MAESTRO test-split recordings for fitting the noise model
     python scripts/fetch_maestro_audio.py --split test --limit 40
-    # audio for ASAP performances in a given ASAP split (real-transcription evaluation)
+    # audio for ASAP performances in given ASAP splits (real-transcription eval / training data)
     python scripts/fetch_maestro_audio.py --asap-split test
+    python scripts/fetch_maestro_audio.py --asap-split train,val --maestro-splits test,validation
 
 Files land in data/raw/maestro/<year>/<name>.wav (+ .midi), mirroring the MAESTRO layout.
 """
@@ -81,9 +82,12 @@ def main():
     ap.add_argument("--out", default="data/raw/maestro")
     ap.add_argument("--split", help="MAESTRO split to fetch (train/validation/test)")
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--asap-split", help="fetch audio for ASAP performances in this split")
+    ap.add_argument("--asap-split", help="fetch audio for ASAP performances in these splits (comma-sep.)")
     ap.add_argument("--asap", default="data/raw/asap_bd")
-    ap.add_argument("--split-file", default="configs/splits/beyer_dai.json")
+    ap.add_argument("--split-file", default="data/processed/splits.json",
+                    help="{piece: split} (data/processed/splits.json) or a configs/splits/*.json file")
+    ap.add_argument("--maestro-splits", default="train,validation,test",
+                    help="with --asap-split: only fetch audio from these MAESTRO splits")
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -102,11 +106,14 @@ def main():
             sel = [sel[int(i * step)] for i in range(args.limit)]
         wanted += sel
     if args.asap_split:
-        pieces = json.load(open(args.split_file))["pieces"]
+        d = json.load(open(args.split_file))
+        pieces = d.get("pieces", d)
         by_midi = {r["midi_filename"]: r for r in rows}
+        ok = set(args.maestro_splits.split(","))
         for r in csv.DictReader(open(Path(args.asap) / "metadata.csv")):
             mm = r["maestro_midi_performance"].replace("{maestro}/", "")
-            if pieces.get(r["folder"]) == args.asap_split and mm in by_midi:
+            if (pieces.get(r["folder"]) in args.asap_split.split(",") and mm in by_midi
+                    and by_midi[mm]["split"] in ok):
                 wanted.append(by_midi[mm])
 
     members = {m for r in wanted for m in (r["audio_filename"], r["midi_filename"])}

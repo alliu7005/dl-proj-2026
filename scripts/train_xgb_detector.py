@@ -86,7 +86,7 @@ def real_asap(store: SegmentStore, asap_root: Path):
 
 def real_maestro(pairs_csv: str, exclude_gt: set[str], window: float = 8.0):
     """Real Kong errors on MAESTRO-test recordings, cut into windows. Returns X, y, recording id."""
-    rows = [r for r in csv.DictReader(open(pairs_csv)) if r["maestro_split"] == "test"
+    rows = [r for r in csv.DictReader(open(pairs_csv)) if r["maestro_split"] in ("test", "validation")
             and not any(r["gt"].endswith(e) for e in exclude_gt)]
     X, y, rec = [], [], []
     for ri, r in enumerate(rows):
@@ -149,7 +149,7 @@ def main():
     ap.add_argument("--asap", default="data/raw/asap_bd")
     ap.add_argument("--noise", default="configs/noise_stats.json")
     ap.add_argument("--pairs", default="data/transcribed/pairs.csv")
-    ap.add_argument("--split-file", default="configs/splits/beyer_dai.json")
+    ap.add_argument("--split-file", default="data/processed/splits.json")
     ap.add_argument("--train-segments", type=int, default=25000)
     ap.add_argument("--out", default="outputs")
     args = ap.parse_args()
@@ -166,10 +166,11 @@ def main():
     Xte, yte = synthetic(te, nm, len(te), 2)
     real_store = SegmentStore(data / "test_transcribed")
     Xre, yre, gre, sre = real_asap(real_store, Path(args.asap))
-    pieces = json.load(open(args.split_file))["pieces"]
+    pieces = json.load(open(args.split_file))
+    pieces = pieces.get("pieces", pieces)
     asap_test_audio = {r["maestro_midi_performance"].replace("{maestro}/", "")
                        for r in csv.DictReader(open(Path(args.asap) / "metadata.csv"))
-                       if pieces.get(r["folder"]) == "test" and r["maestro_midi_performance"]}
+                       if pieces.get(r["folder"]) in ("test", "val") and r["maestro_midi_performance"]}
     Xm, ym, rm, n_rec = real_maestro(args.pairs, asap_test_audio)
     val_rec = rm % 5 == 0  # hold out every 5th recording for early stopping / threshold
     print(f"features [{time.time() - t:.0f}s]: synthetic train {Xtr.shape} (errors {ytr.mean():.2%}); "

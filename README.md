@@ -22,9 +22,9 @@ git clone --depth 1 https://github.com/fosfrancesco/asap-dataset.git data/raw/as
 | step | command | time |
 |---|---|---|
 | 1. build train/val/test segments | `python scripts/build_dataset.py` | ~3 min |
-| 2. check targets survive tokens → MusicXML → tokens | `python -m tests.test_roundtrip --split val` | ~2 min |
+| 2. check the data: leakage, pairing, arrays, loaders; then tokens → MusicXML → tokens | `python -m tests.test_integrity` and `python -m tests.test_roundtrip --split val` | ~3 min |
 | 3. *(already done; output in `configs/noise_stats.json`)* fit the noise model on real transcriptions | see [Noise model](#noise-model) | ~1 h with a GPU |
-| 4. *(optional)* build the real-transcription eval split | `python scripts/build_transcribed_eval.py --asap-split test` | ~1 min |
+| 4. *(needs transcriptions, see [Noise model](#noise-model))* build the real-transcription splits | `python scripts/build_transcribed.py --asap-split train --maestro-splits test,validation` (and the same with `val`), then `python scripts/build_transcribed.py --asap-split test` | ~2 min |
 
 `data/` is git-ignored. The fitted noise model `configs/noise_stats.json` is committed, so step 3 is only needed to refit it.
 
@@ -33,7 +33,7 @@ git clone --depth 1 https://github.com/fosfrancesco/asap-dataset.git data/raw/as
 `data/processed/` contains:
 
 ```
-vocab.json                 342 target tokens (+ training counts)
+vocab.json                 620 target tokens (+ training counts)
 splits.json                piece -> train/val/test
 report.json                per-performance stats, skips, and dropped segments
 train/  val/  test/        one directory per split, each holding:
@@ -42,7 +42,9 @@ train/  val/  test/        one directory per split, each holding:
   tokens.npy  int16   [total_tokens]     target token ids (no <bos>/<eos>)
   index.npy   int64   [n_segments, 6]    note_lo, note_hi, pedal_lo, pedal_hi, tok_lo, tok_hi
   meta.jsonl  one line per segment       piece, performance, composition, bar_start, n_bars, ...
-test_transcribed/          same layout; inputs are REAL Kong transcriptions, targets = clean test targets
+train_transcribed/  val_transcribed/  test_transcribed/
+                           same layout; inputs are REAL Kong transcriptions of the same performances,
+                           targets copied from the matching clean segment
 ```
 
 Segment `i`'s notes are `notes[index[i,0]:index[i,1]]`, and likewise for pedal and tokens. The
@@ -50,33 +52,65 @@ arrays are memory-mapped, so nothing loads into RAM until it's used.
 
 | split | segments | performances | compositions |
 |---|---|---|---|
-| train | 60,180 (4 bars, stride 2) | 779 | 166 |
-| val | 3,528 (4 bars, no overlap) | 79 | 16 |
+| train | 60,742 (4 bars, stride 2) | 756 | 153 |
+| val | 3,295 (4 bars, no overlap) | 102 | 29 |
 | test | 2,663 (4 bars, no overlap) | 59 | 14 |
-| test_transcribed | 1,078 | 24 | 11 |
+| train_transcribed | 7,162 | 87 (all audio unseen by Kong) | |
+| val_transcribed | 696 | 20 (all audio unseen by Kong) | |
+| test_transcribed | 1,078 | 24 (21 seen by Kong, 3 unseen) | 11 |
+
+Real transcriptions can contain more notes per segment than clean MIDI: up to about 870, vs. 768.
 
 ### Loading for training
 
 ```python
 from torch.utils.data import DataLoader
-from src.dataset import ScoreSegmentDataset, collate
+from src.dataset import AugmentConfig, MixedTrainDataset, ScoreSegmentDataset, collate
 from src.preprocessing.noise import NoiseModel
 
-train = ScoreSegmentDataset("data/processed/train", "data/processed/vocab.json",
-                            noise=NoiseModel.from_json("configs/noise_stats.json"))
+V = "data/processed/vocab.json"
+# synthetic noise on clean train segments + 30% of samples from REAL Kong transcriptions
+train = MixedTrainDataset("data/processed/train", "data/processed/train_transcribed", V,
+                          noise=NoiseModel.from_json("configs/noise_stats.json"),
+                          augment=AugmentConfig(), real_fraction=0.3)
 dl = DataLoader(train, batch_size=32, sampler=train.sampler(), collate_fn=collate, num_workers=4)
 for epoch in range(E):
     train.set_epoch(epoch)                   # fresh (reproducible) noise every epoch
     for b in dl: ...                         # notes [B,N,7], note_mask [B,N], target [B,T] (pad = 0)
 
 loss_w = train.vocab.loss_weights(ornament_weight=5.0)   # -> nn.CrossEntropyLoss(weight=...)
-val = ScoreSegmentDataset("data/processed/val", "data/processed/vocab.json")          # clean inputs
-real = ScoreSegmentDataset("data/processed/test_transcribed", "data/processed/vocab.json")
+val_clean = ScoreSegmentDataset("data/processed/val", V)               # clean inputs
+val_real = ScoreSegmentDataset("data/processed/val_transcribed", V)    # real transcriptions
+test_real = ScoreSegmentDataset("data/processed/test_transcribed", V)
 ```
+
+For synthetic-only training (e.g. the Beyer & Dai-style clean baseline), use
+`ScoreSegmentDataset("data/processed/train", V, noise=..., augment=AugmentConfig())`, or pass
+`noise=None` for clean inputs.
+
+**Model selection.** Validation is composer-balanced; report the macro-average over composers too.
+`val_real` is the best predictor of performance on real audio. Its audio was never used to fit the
+noise model.
 
 - **Note features (7 per note):** pitch, onset, inter-onset gap, log duration, velocity/127, and
   whether the pedal is down at onset and at offset.
 - **Oversampling:** `sampler()` draws segments with grace notes, arpeggios or ornaments 3× as often.
+- **Augmentation** (`AugmentConfig`, training only): applied to the clean segment before noise.
+  - Transposition by −6…+6 semitones: input pitches and target `p_*` tokens shift together, and
+    `key_*` is re-spelled. Only shifts that keep every note on the keyboard are used.
+  - Tempo stretch ×0.85–1.18.
+  - Velocity scale ×0.8–1.2.
+
+### Data audit
+
+`python scripts/audit_data.py` prints a data-quality report. Re-run it after changing the pipeline.
+It covers:
+
+- token mix and pedal flutter;
+- target notes with no input onset (ties);
+- target diversity and composer balance per split;
+- key coverage and input timing;
+- `<unk>` rate, and what the build dropped.
 
 ### Target tokens
 
@@ -95,7 +129,7 @@ bar ts_3/4 key_-2  pos_0 ped_on staff_1 p_46 d_2 p_53 d_1  pos_1 p_65 d_1/2 tie 
 - **Pedal** (`ped_on`, `ped_off`): taken from the performance's sustain-pedal data, as the proposal
   specifies.
 - **Note order** within a position is by staff, then pitch (grace notes keep their written order).
-- **Vocabulary:** structural tokens are a fixed grammar. Only `sub_*` and `d_*` come from training data.
+- **Vocabulary:** a fixed grammar covering every snapped position and duration, so val/test never produce `<unk>`. Rare durations seen in training are added on top.
 
 Positions and durations are exact fractions, snapped to common denominators (2, 3, 4, …, 16, 24,
 32, 48).
@@ -105,11 +139,15 @@ To go back from tokens to MusicXML (for MUSTER/MV2H evaluation):
 
 ## Pipeline details
 
-1. **Split by composition, before segmenting.** We use Beyer & Dai's exact split
-   (`configs/splits/beyer_dai.json`, regenerated by `scripts/make_bd_split.py`).
-   - Their 14 test pieces / 59 test performances are reproduced exactly, along with their list of
-     69 badly aligned performances, which we exclude.
-   - Pieces not in their list are hash-split into train or val only.
+1. **Split by composition, before segmenting.**
+   - **Test** is Beyer & Dai's exact 14 pieces / 59 performances (`configs/splits/beyer_dai.json`,
+     regenerated by `scripts/make_bd_split.py`). We also exclude their list of 69 badly aligned
+     performances.
+   - **Validation is composer-stratified** (`val_strategy: composer_stratified`). Beyer & Dai's val
+     (`piece_id % 10 == 0`) was 77% Beethoven. Ours takes about 10% of each composer's
+     performances, choosing whole compositions and skipping any piece so large it would drain that
+     composer from train. The result mirrors train's composer mix (Beethoven 31% val / 36% train).
+   - The test set is identical either way. `val_strategy: fixed` restores Beyer & Dai's val.
    - Repeat variants (`X` and `X_no_repeat`) always share one composition ID.
 2. **Parse the score** (`src/preprocessing/score.py`, music21). Each measure index gets its notes
    with staff, duration, grace, tie, arpeggio and ornaments.
@@ -119,7 +157,7 @@ To go back from tokens to MusicXML (for MUSTER/MV2H evaluation):
    annotations.
 4. **Segment into 4-bar windows.** A note belongs to the bar its score-time onset falls in, with a
    1/8-quarter tolerance so slightly early notes stay in the right bar.
-5. **Quality filters.** These dropped 300 of about 66k segments:
+5. **Quality filters.** These dropped 287 of about 67k segments:
    - performed pitches vs. score pitches below 0.6 F1 (local beat-annotation errors);
    - bars longer than 16 quarters (unbarred cadenzas);
    - segments too long for the model.
@@ -148,15 +186,18 @@ To go back from tokens to MusicXML (for MUSTER/MV2H evaluation):
 
 10% of segments are left clean.
 
-Everything is **fitted on real Kong transcriptions** of 40 MAESTRO-*test* recordings (172k notes).
-Kong's model was trained on MAESTRO train, so only test-split audio gives realistic errors.
+Everything is **fitted on real Kong transcriptions** of 95 recordings (425k notes) from the
+MAESTRO test and validation splits.
+- Kong's model was trained on MAESTRO train, so only test/validation audio gives realistic errors.
+- Audio of ASAP **val and test** performances is excluded from the fit, so `val_transcribed` and
+  `test_transcribed` remain independent checks.
 
 The model is **empirical**: `configs/noise_stats.json` holds three fitted pieces, plus a few scalar
 parameters for timing, velocity and pedal.
 
 - **Missing notes:** a miss-rate table indexed by chord size × velocity bin.
 - **Hallucination rate:** hallucinations spawned per real note, by the source note's velocity.
-- **Error bank:** 3,923 real hallucinations, each stored relative to its most likely source. The
+- **Error bank:** 7,739 real hallucinations, each stored relative to its most likely source. The
   source is a recent, loud note that is still sounding, counting the sustain pedal. Each entry
   records interval, delay, velocity ratio and duration.
 
@@ -164,11 +205,11 @@ During training, loud notes spawn hallucinations by replaying sampled bank entri
 
 | error | measured |
 |---|---|
-| missing notes | mostly a function of loudness. Lone notes: 29% if quiet (velocity < 40), 0.8% if loud. 8-note chords: 81% for quiet notes, 6% for loud ones |
-| hallucinated notes | 2.3% of notes. Loud notes spawn them 6× more often than quiet ones. Most common: an octave below or above the source (−12 / +12), then thirds, then two octaves |
-| onset jitter | 6.5 ms std |
-| notes lengthened to pedal release | 65% of notes released under sustain |
-| missed pedal presses | 9%, with ~80 ms timing error |
+| missing notes | mostly a function of loudness. Lone notes: 29% if quiet (velocity < 40), 0.5% if loud. 8-note chords: 57% for quiet notes, 6% for loud ones |
+| hallucinated notes | 1.8% of notes. Loud notes spawn them 5.5× more often than quiet ones. Most common: an octave below or above the source (−12 / +12), then thirds and sixths, then two octaves |
+| onset jitter | 6.1 ms std |
+| notes lengthened to pedal release | 68% of notes released under sustain |
+| missed pedal presses | 8%, with ~75 ms timing error |
 
 `configs/noise_stats_parametric.json` is the first, hand-parametrized version. Keep it for ablations.
 
@@ -179,11 +220,11 @@ audio scores:
 | noise model | AUC | AP |
 |---|---|---|
 | parametric | 0.660 | 0.010 |
-| empirical | 0.911 | 0.088 |
-| trained on real errors (upper bound) | 0.981 | 0.396 |
+| empirical | 0.901 | 0.090 |
+| trained on real errors (upper bound) | 0.982 | 0.422 |
 
 Random guessing gives AP 0.005. The empirical noise is much closer to real errors, but a gap
-remains. On 8-second windows, synthetic noise gives pitch F1 0.957 vs. 0.970 for real
+remains. On 8-second windows, synthetic noise gives pitch F1 0.964 vs. 0.974 for real
 transcriptions, i.e. slightly harsher than real.
 
 To reproduce the fit:
@@ -196,11 +237,22 @@ uv pip install --python .venv-transcribe/Scripts/python.exe piano_transcription_
 curl -L -o ~/piano_transcription_inference_data/"note_F1=0.9677_pedal_F1=0.9186.pth" \
   "https://zenodo.org/record/4034264/files/CRNN_note_F1%3D0.9677_pedal_F1%3D0.9186.pth?download=1"
 
-python scripts/fetch_maestro_audio.py --split test --limit 40    # range-downloads from the 108 GB zip (~3 GB)
-python scripts/fetch_maestro_audio.py --asap-split test          # audio for the real-transcription eval
-.venv-transcribe/Scripts/python scripts/transcribe.py            # ~1.5 recordings/min on an RTX 5070 Ti
+# range-downloads single recordings from the 108 GB zip (~10 GB total for all three)
+python scripts/fetch_maestro_audio.py --split test --limit 40
+python scripts/fetch_maestro_audio.py --asap-split train,val --maestro-splits test,validation
+python scripts/fetch_maestro_audio.py --asap-split test
+.venv-transcribe/Scripts/python scripts/transcribe.py            # ~40x real time on an RTX 5070 Ti
 python scripts/fit_noise.py --pairs data/transcribed/pairs.csv --out configs/noise_stats.json
 ```
+
+`transcribe.py` gives the same output as the package's `PianoTranscription.transcribe`: about 0.3%
+of notes shift by at most ~1 ms, from GPU rounding differences between batch sizes. It's about 20×
+faster:
+- batched GPU inference (the package hard-codes batch size 1);
+- audio decoding prefetched in background threads;
+- note/pedal decoding in worker processes.
+
+Other GPU-heavy programs (e.g. games) slow it down noticeably.
 
 ## XGBoost baseline: note-level error detector
 
@@ -221,14 +273,14 @@ uses 56 local-context features (`src/baselines/note_features.py`), such as:
 Two detectors are trained:
 
 - **On synthetic noise** (ASAP train). Labels are the notes the noise injector added.
-- **On real Kong errors** (MAESTRO-test transcriptions, ASAP test recordings excluded). Labels come
-  from matching each note against the ground truth within 50 ms.
+- **On real Kong errors** (95 MAESTRO test/validation transcriptions, with ASAP val/test
+  recordings excluded). Labels come from matching each note against the ground truth within 50 ms.
 
 | detector | synthetic test AUC / AP | real test AUC / AP | real, unseen audio AUC / AP |
 |---|---|---|---|
-| flag quietest notes | 0.660 / 0.035 | 0.691 / 0.032 | 0.695 / 0.017 |
-| trained on synthetic (empirical noise) | 0.961 / 0.603 | 0.512 / 0.028 | 0.911 / 0.088 |
-| trained on real errors | 0.816 / 0.077 | 0.622 / 0.095 | 0.981 / 0.396 |
+| flag quietest notes | 0.676 / 0.029 | 0.691 / 0.032 | 0.695 / 0.017 |
+| trained on synthetic (empirical noise) | 0.961 / 0.573 | 0.538 / 0.030 | 0.901 / 0.090 |
+| trained on real errors | 0.822 / 0.063 | 0.617 / 0.118 | 0.982 / 0.422 |
 
 **Takeaways:**
 
@@ -238,10 +290,17 @@ Two detectors are trained:
 - **The unseen-audio column is small:** only 3 performances, about 40 error notes.
 - **"Real test" is mostly audio Kong was trained on**, where the remaining errors are rare and
   atypical.
-- **Deleting flagged notes doesn't help yet** (precision about 0.15). Use the detector score as an
+- **Deleting flagged notes doesn't help yet** (precision about 0.2). Use the detector score as an
   input feature rather than as a hard filter.
 
-## Real-transcription eval split: caveat
+## Real-transcription splits
+
+- **`train_transcribed` / `val_transcribed`:** only audio Kong never trained on (MAESTRO
+  test/validation). 87 training and 20 validation performances. Against the score, pitch agreement
+  drops from 0.967 for clean inputs to 0.955 for real transcriptions.
+- **`test_transcribed`:** see the caveat below.
+
+### Caveat: test_transcribed
 
 Only 25 of the 59 test performances have MAESTRO audio:
 
@@ -273,8 +332,9 @@ src/preprocessing/
 src/baselines/note_features.py   per-note context features (XGBoost baseline)
 src/dataset.py     PyTorch Dataset / sampler / collate
 scripts/           build_dataset, make_bd_split, fetch_maestro_audio, transcribe, fit_noise,
-                   build_transcribed_eval, train_xgb_detector
-tests/test_roundtrip.py
+                   build_transcribed, train_xgb_detector, audit_data
+tests/test_integrity.py   leakage, pairing, array and loader checks
+tests/test_roundtrip.py   tokens -> MusicXML -> tokens
 ```
 
 ## Not done yet: PianoCoRe

@@ -34,7 +34,16 @@ ORNAMENT_CLASSES = [(name, getattr(m21.expressions, cls)) for name, cls in _ORNA
                     if hasattr(m21.expressions, cls)]
 
 
-ALLOWED_DENOMINATORS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 16, 20, 24, 32, 48)
+from .vocab import ALLOWED_DENOMINATORS  # noqa: E402  (single source of truth for the grid)
+
+
+def piano_range(pitch: int) -> int:
+    """Fold pitches outside the 88 keys back by octaves (mis-encoded ottavas, e.g. Ravel's Ondine)."""
+    while pitch > 108:
+        pitch -= 12
+    while pitch < 21:
+        pitch += 12
+    return pitch
 
 
 def frac(x) -> Fraction:
@@ -120,7 +129,7 @@ def load_score(path: str) -> list[Measure]:
                 for nt in sub:
                     tie = nt.tie if nt.tie is not None else el.tie
                     meas.events.append(NoteEvent(
-                        offset=off, staff=staff, pitch=int(nt.pitch.midi), duration=dur, grace=grace,
+                        offset=off, staff=staff, pitch=piano_range(int(nt.pitch.midi)), duration=dur, grace=grace,
                         tie=tie is not None and tie.type in ("stop", "continue"),
                         arpeggio=arp, ornaments=orn, seq=seq))
                     seq += 1

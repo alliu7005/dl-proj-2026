@@ -36,7 +36,8 @@ def pedal_intervals(ccs, threshold: int, end_time: float) -> np.ndarray:
             on = None
     if on is not None:
         out.append((on, max(end_time, on)))
-    return np.asarray(out, dtype=np.float32).reshape(-1, 2)
+    arr = np.asarray(out, dtype=np.float32).reshape(-1, 2)
+    return arr[arr[:, 1] > arr[:, 0]]  # drop presses that collapse to zero length in float32
 
 
 class TimeMap:

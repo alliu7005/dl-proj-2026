@@ -11,6 +11,10 @@ seed: 0
 # (regenerate with scripts/make_bd_split.py). Set to null for a hash-based split with split_ratios.
 fixed_split: configs/splits/beyer_dai.json
 split_ratios: [0.8, 0.1, 0.1]
+# val: "fixed" = Beyer & Dai's val (piece_id % 10 == 0; 77% Beethoven), or "composer_stratified" =
+# ~val_frac of each composer's compositions (test pieces unchanged either way)
+val_strategy: composer_stratified
+val_frac: 0.1
 workers: 6
 keep_shards: false
 
@@ -20,6 +24,7 @@ segment:
   onset_tolerance: 0.125   # quarter notes
   pedal_targets: true
   pedal_grid: 4
+  pedal_min_quarters: 0.5  # drop pedal flutter (presses shorter than an eighth note)
   max_input_notes: 768
   max_target_tokens: 1536
   max_bar_quarters: 16

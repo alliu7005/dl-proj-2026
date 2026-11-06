@@ -19,6 +19,7 @@ class SegmentConfig:
     onset_tolerance: float = 0.125  # quarter notes; notes played this early still belong to the next bar
     pedal_targets: bool = True      # add ped_on / ped_off tokens derived from performance CC64
     pedal_grid: int = 4             # pedal positions quantized to 1/pedal_grid quarter note
+    pedal_min_quarters: float = 0.5 # drop shorter presses (pedal flutter, not notation)
     max_input_notes: int = 768
     max_target_tokens: int = 1536
     max_bar_quarters: int = 16      # drop segments containing longer bars (unbarred cadenzas)
@@ -64,9 +65,21 @@ def bar_timeline(bars: list[list[int]], measures: list[Measure], downbeats) -> t
     return bars, np.asarray(starts), np.asarray(ends), lengths
 
 
+def _to_quarters(s: float, starts, ends, cum_q) -> float:
+    """Score time (s) -> quarter notes since the first bar."""
+    k = int(np.clip(np.searchsorted(starts, s, side="right") - 1, 0, len(starts) - 1))
+    span = ends[k] - starts[k]
+    return cum_q[k] + (s - starts[k]) / span * (cum_q[k + 1] - cum_q[k]) if span > 0 else cum_q[k]
+
+
 def _pedal_tokens(pedal, tm: TimeMap, starts, ends, lengths, j0, j1, lo, hi, cfg) -> list[list]:
     out = [[] for _ in range(j1 - j0)]
+    cum_q = np.concatenate([[0.0], np.cumsum([float(x) for x in lengths])])
     for on, off in pedal:
+        q_len = (_to_quarters(float(tm(off)), starts, ends, cum_q)
+                 - _to_quarters(float(tm(on)), starts, ends, cum_q))
+        if q_len < cfg.pedal_min_quarters:
+            continue
         for t, tok in ((on, "ped_on"), (off, "ped_off")):
             s = float(tm(t))
             if tok == "ped_on" and s < lo <= float(tm(off)):

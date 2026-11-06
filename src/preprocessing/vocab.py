@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from fractions import Fraction
 
 PAD, BOS, EOS, UNK = "<pad>", "<bos>", "<eos>", "<unk>"
 SPECIALS = [PAD, BOS, EOS, UNK]
@@ -11,8 +12,26 @@ ORNAMENT_PREFIXES = ("grace", "arp", "orn_", "ped_")
 
 # Structural tokens are fixed by the grammar (so e.g. a time signature that only occurs in val/test
 # is still in-vocabulary). Only sub-beat positions (sub_*) and durations (d_*) come from the data.
+# Positions/durations are snapped to these denominators (see score.frac)
+ALLOWED_DENOMINATORS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 16, 20, 24, 32, 48)
+
+
+def _fstr(x: Fraction) -> str:
+    return str(x.numerator) if x.denominator == 1 else f"{x.numerator}/{x.denominator}"
+
+
+def _fractions(lo: Fraction, hi: Fraction, dens) -> list[str]:
+    vals = {Fraction(k, d) for d in dens for k in range(int(lo * d), int(hi * d) + 1)}
+    return sorted(_fstr(v) for v in vals if lo < v <= hi)
+
+
 GRAMMAR = (
-    ["bar", "grace", "tie", "arp", "ped_on", "ped_off"]
+    ["bar", "grace", "tie", "arp", "ped_on", "ped_off", "d_0"]
+    # every snapped sub-beat position, every snapped duration up to a half note,
+    # and common longer durations (so test-time durations are never <unk>)
+    + [f"sub_{f}" for f in _fractions(Fraction(0), Fraction(1), ALLOWED_DENOMINATORS) if f != "1"]
+    + [f"d_{f}" for f in _fractions(Fraction(0), Fraction(2), ALLOWED_DENOMINATORS)]
+    + [f"d_{f}" for f in _fractions(Fraction(2), Fraction(16), (1, 2, 3, 4, 8))]
     + [f"orn_{o}" for o in ("fermata", "mordent", "tremolo", "trill", "turn")]
     + [f"staff_{i}" for i in range(4)]
     + [f"key_{k}" for k in range(-7, 8)]
@@ -57,7 +76,7 @@ class Vocab:
 
     def save(self, path: str):
         with open(path, "w") as f:
-            json.dump({"itos": self.itos, "counts": self.counts}, f, indent=0)
+            json.dump({"itos": self.itos, "counts": dict(sorted(self.counts.items()))}, f, indent=0)
 
     @classmethod
     def load(cls, path: str) -> "Vocab":

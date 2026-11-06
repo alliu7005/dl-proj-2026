@@ -48,3 +48,36 @@ def load_fixed_split(path: str | None) -> tuple[dict, set]:
         if fixed.setdefault(cid, v) != v:
             raise ValueError(f"split file puts variants of {cid} in different splits")
     return fixed, set(d.get("exclude_performances", []))
+
+
+def composer_stratified_val(comp_ids, composer_of: dict, fixed_test: set, val_frac: float = 0.1,
+                            min_comps: int = 3, seed: int = 0, weight: dict | None = None) -> dict:
+    """Test = ``fixed_test`` (unchanged). Of the remaining compositions, roughly ``val_frac`` of
+    EACH composer's data (``weight`` = performances per composition) goes to val, so val mirrors the
+    training composer mix instead of being dominated by one composer. Compositions are taken in a
+    deterministic hash order, skipping any that would push the composer's val share past
+    2 * val_frac, so one large piece can't drain a composer from train. Composers with fewer than
+    ``min_comps`` compositions stay entirely in train."""
+    weight = weight or {}
+    out = {c: "test" for c in comp_ids if c in fixed_test}
+    by_composer: dict[str, list[str]] = {}
+    for c in sorted(set(comp_ids) - fixed_test):
+        by_composer.setdefault(composer_of[c], []).append(c)
+    for comps in by_composer.values():
+        comps.sort(key=lambda c: hashlib.sha1(f"{seed}:{c}".encode()).hexdigest())
+        for c in comps:
+            out[c] = "train"
+        if len(comps) < min_comps:
+            continue
+        total = sum(weight.get(c, 1) for c in comps)
+        taken = 0
+        for c in comps:
+            w = weight.get(c, 1)
+            if taken >= val_frac * total:
+                break
+            if taken + w <= 2 * val_frac * total:
+                out[c] = "val"
+                taken += w
+        if taken == 0:  # every piece too big: take the smallest
+            out[min(comps, key=lambda c: weight.get(c, 1))] = "val"
+    return out

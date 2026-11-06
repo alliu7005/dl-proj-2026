@@ -30,7 +30,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.preprocessing.performance import load_performance  # noqa: E402
 from src.preprocessing.score import load_score  # noqa: E402
 from src.preprocessing.segment import SegmentConfig, segment_pair  # noqa: E402
-from src.preprocessing.split import assign_splits, composition_id, load_fixed_split  # noqa: E402
+from src.preprocessing.split import (assign_splits, composer_stratified_val, composition_id,  # noqa: E402
+                                     load_fixed_split)
 from src.preprocessing.store import write_split  # noqa: E402
 from src.preprocessing.vocab import Vocab  # noqa: E402
 
@@ -117,7 +118,15 @@ def main():
     fixed, exclude = load_fixed_split(cfg.get("fixed_split"))
     by_piece, skipped = load_asap(root, exclude)
     cids = {f: composition_id("asap", f) for f in by_piece}
-    splits = assign_splits(cids.values(), tuple(cfg["split_ratios"]), cfg["seed"], fixed)
+    if cfg.get("val_strategy") == "composer_stratified":
+        # keep the fixed (Beyer & Dai) TEST pieces; rebuild val composer-stratified
+        composer_of = {cids[f]: f.split("/")[0] for f in by_piece}
+        splits = composer_stratified_val(cids.values(), composer_of,
+                                         {c for c, sp in fixed.items() if sp == "test"},
+                                         cfg.get("val_frac", 0.1), seed=cfg["seed"],
+                                         weight=Counter({cids[f]: len(by_piece[f]) for f in by_piece}))
+    else:
+        splits = assign_splits(cids.values(), tuple(cfg["split_ratios"]), cfg["seed"], fixed)
     pieces = sorted(by_piece)[: args.limit] if args.limit else sorted(by_piece)
 
     base = SegmentConfig(**cfg["segment"])

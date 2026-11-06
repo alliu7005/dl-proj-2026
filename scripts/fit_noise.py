@@ -50,7 +50,12 @@ def main():
     ap.add_argument("--pairs", required=True, help="csv with columns pred,gt (paths)")
     ap.add_argument("--chord-window", type=float, default=0.03)
     ap.add_argument("--out", default="configs/noise_stats.json")
-    ap.add_argument("--maestro-split", default="test", help="only use pairs from this MAESTRO split")
+    ap.add_argument("--maestro-split", default="test,validation",
+                    help="only use pairs from these MAESTRO splits (Kong was trained on 'train')")
+    ap.add_argument("--exclude-asap-split", default="test,val",
+                    help="never fit on audio of ASAP performances in this split (test leakage)")
+    ap.add_argument("--asap", default="data/raw/asap_bd")
+    ap.add_argument("--splits", default="data/processed/splits.json")
     args = ap.parse_args()
 
     n_gt = n_pred = 0
@@ -64,9 +69,15 @@ def main():
     notes_per_vbin, sources_per_vbin = Counter(), Counter()
     bank, orphans = [], 0
 
+    ok = set(args.maestro_split.split(","))
+    pieces = json.load(open(args.splits))
+    held_out = {r["maestro_midi_performance"].replace("{maestro}/", "")
+                for r in csv.DictReader(open(Path(args.asap) / "metadata.csv"))
+                if pieces.get(r["folder"]) in args.exclude_asap_split.split(",") and r["maestro_midi_performance"]}
     rows = [r for r in csv.DictReader(open(args.pairs, newline=""))
-            if r.get("maestro_split", args.maestro_split) == args.maestro_split]
-    print(f"fitting on {len(rows)} recordings from MAESTRO {args.maestro_split}")
+            if r.get("maestro_split", "test") in ok and not any(r["gt"].endswith(h) for h in held_out)]
+    print(f"fitting on {len(rows)} recordings from MAESTRO {sorted(ok)} "
+          f"(audio of ASAP {args.exclude_asap_split} performances excluded)")
     for row in tqdm(rows):
         gt, gped = load_performance(row["gt"])
         pr, pped = load_performance(row["pred"])
