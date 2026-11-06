@@ -6,7 +6,10 @@ Target token grammar for one bar (all positions/durations in quarter notes, exac
       pos_0  [ped_on|ped_off ...]  [staff_1] p_60 d_1/2 [tie] [arp] [orn_trill]  p_64 d_1/2 ...
       pos_0 sub_1/2 ...      (position = integer quarter + optional fractional part)
 
-* ``ts_*`` / ``key_*`` are emitted on the first bar of a segment and whenever they change.
+* ``bar`` marks a bar line. A segment that starts mid-bar has no leading ``bar``: it opens with
+  ``ts_* key_*`` and its first position token says where in the bar it starts, e.g.
+  ``ts_3/4 key_0 pos_1 sub_1/2 p_60 ...`` = "starts on beat 2.5 of a 3/4 bar".
+* ``ts_*`` / ``key_*`` are emitted at the start of a segment and whenever they change.
 * ``staff_k`` is emitted only when the staff changes within the bar (staff resets to 0 every bar).
 * Grace notes use ``grace`` instead of a ``d_*`` token and sit at the position of their main note.
 * ``tie`` marks a note that continues a tied note (no new onset in the performance).
@@ -133,14 +136,24 @@ def bar_length(measures: list[Measure], bar: list[int]) -> Fraction:
 
 
 def tokenize_bars(measures: list[Measure], bars: list[list[int]],
-                  pedal: list[list[tuple[Fraction, str]]] | None = None) -> list[str]:
+                  pedal: list[list[tuple[Fraction, str]]] | None = None,
+                  start_pos: float | None = None, end_pos: float | None = None) -> list[str]:
     """Tokenize consecutive bars. ``bars[j]`` lists the measure indices played as one bar
-    (usually one, two for bars split across a repeat). ``pedal[j]`` holds (position, token)."""
+    (usually one, two for bars split across a repeat). ``pedal[j]`` holds (position, token).
+
+    ``start_pos`` / ``end_pos`` (quarters) cut the first / last bar: only events at
+    ``start_pos <= pos < end_pos`` are kept. A span starting mid-bar gets no leading ``bar`` token
+    (``bar`` always means "a bar line here"), so the token streams of consecutive spans concatenate
+    into one valid stream. Pedal items are taken as given."""
     toks: list[str] = []
     prev_ts = prev_key = None
+    eps = 1e-9
     for j, bar in enumerate(bars):
         first = measures[bar[0]]
-        toks.append("bar")
+        lo = start_pos if j == 0 and start_pos is not None and start_pos > eps else None
+        hi = end_pos if j == len(bars) - 1 else None
+        if lo is None:
+            toks.append("bar")
         if first.time_signature != prev_ts:
             toks.append(f"ts_{first.time_signature}")
             prev_ts = first.time_signature
@@ -153,15 +166,19 @@ def tokenize_bars(measures: list[Measure], bars: list[list[int]],
         shift = Fraction(0)
         for mi in bar:
             for e in measures[mi].events:
+                p = e.offset + shift
+                if (lo is not None and float(p) < lo - eps) or (hi is not None and float(p) >= hi - eps):
+                    continue
                 # canonical order: grace notes keep their written sequence, other notes go by pitch
-                items.append((e.offset + shift, 1 if e.grace else 2, e.staff, e.seq if e.grace else 0,
-                              e.pitch, e))
+                items.append((p, 1 if e.grace else 2, e.staff, e.seq if e.grace else 0, e.pitch, e))
             shift += measures[mi].length
         for pos, tok in (pedal[j] if pedal else []):
             items.append((pos, 0, -1, 0, 0, tok))
         items.sort(key=lambda x: x[:5])
 
-        cur_pos, cur_staff = None, 0
+        # staff_k is written when the staff changes, assuming staff 0 at a bar line; a span that
+        # starts mid-bar states its first staff explicitly so concatenated spans parse correctly
+        cur_pos, cur_staff = None, (None if lo is not None else 0)
         for pos, _, staff, _, _, e in items:
             if pos != cur_pos:
                 whole = pos.numerator // pos.denominator

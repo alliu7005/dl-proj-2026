@@ -82,7 +82,7 @@ class NoiseModel:
         if not keep.any():
             keep[rng.integers(len(n))] = True
 
-        # 3) hallucinated notes (mostly overtones of real notes)
+        # 3) hallucinated notes (mostly overtones of real notes; may be carried-over if their source is)
         src = n[rng.random(len(n)) < c.halluc_rate]
         if len(src):
             h = src.copy()
@@ -90,18 +90,24 @@ class NoiseModel:
             h[:, ON] += rng.normal(0, c.halluc_onset_std, len(h))
             h[:, DUR] *= rng.uniform(*c.halluc_dur_ratio, len(h))
             h[:, VEL] *= rng.uniform(*c.halluc_vel_ratio, len(h))
-            h = h[(h[:, P] >= 21) & (h[:, P] <= 108)]
+            h_carried = src[:, ON] < 0
+            keep_h = (h[:, P] >= 21) & (h[:, P] <= 108)
+            h, h_carried = h[keep_h], h_carried[keep_h]
         else:
-            h = n[:0]
+            h, h_carried = n[:0], np.zeros(0, dtype=bool)
         n = n[keep]
+        n_carried = n[:, ON] < 0
 
         # 4) timing / duration / velocity jitter on real notes
         n[:, ON] += rng.normal(0, c.onset_std, len(n))
         n[:, DUR] *= np.exp(rng.normal(0, c.offset_log_std, len(n)))
         n[:, VEL] += rng.normal(0, c.velocity_std, len(n))
 
+        # negative onset = struck before the segment and still held (see segment.carry_notes):
+        # jitter must not move notes across t=0 in either direction
         out = np.concatenate([n, h])
-        out[:, ON] = np.maximum(out[:, ON], 0)
+        carried = np.concatenate([n_carried, h_carried])
+        out[:, ON] = np.where(carried, np.minimum(out[:, ON], -1e-3), np.maximum(out[:, ON], 0))
         out[:, DUR] = np.maximum(out[:, DUR], 0.01)
         out[:, VEL] = np.clip(np.round(out[:, VEL]), 1, 127)
         out = out[np.lexsort((out[:, P], out[:, ON]))]
@@ -109,7 +115,8 @@ class NoiseModel:
         ped = pedal.copy()
         if len(ped):
             ped = ped[rng.random(len(ped)) >= c.pedal_drop_prob]
+            held = ped[:, 0] < 0  # pressed before the segment: keep that visible
             ped = ped + rng.normal(0, c.pedal_time_std, ped.shape).astype(np.float32)
-            ped[:, 0] = np.maximum(ped[:, 0], 0)
+            ped[:, 0] = np.where(held, np.minimum(ped[:, 0], -1e-3), np.maximum(ped[:, 0], 0))
             ped = ped[ped[:, 1] > ped[:, 0]]
         return out.astype(np.float32), ped.astype(np.float32)

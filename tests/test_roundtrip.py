@@ -19,8 +19,19 @@ from src.preprocessing.vocab import Vocab
 
 
 def canonical(tokens):
-    """Drop pedal tokens and the position tokens left without any note after removing them."""
-    toks = [t for t in tokens if not t.startswith("ped_")]
+    """Drop pedal tokens, the position tokens left without any note after removing them, and staff
+    tokens that repeat the current staff (a window starting mid-bar states its first staff)."""
+    toks, staff = [], 0
+    for t in tokens:
+        if t.startswith("ped_"):
+            continue
+        if t == "bar":
+            staff = 0
+        elif t.startswith("staff_"):
+            if int(t[6:]) == staff:
+                continue
+            staff = int(t[6:])
+        toks.append(t)
     out, pending = [], []
     for t in toks:
         if t.startswith(("pos_", "sub_")):
@@ -64,6 +75,8 @@ def main():
                 tokens_to_musicxml(toks, path)
                 ms = load_score(path)
                 back = tokenize_bars(ms, [[k] for k in range(len(ms))])
+                if toks and toks[0] != "bar" and back and back[0] == "bar":
+                    back = back[1:]  # window started mid-bar: the rendered score has a full first bar
             except Exception as e:  # noqa: BLE001
                 fails += 1
                 print("FAIL", i, repr(e)[:200])

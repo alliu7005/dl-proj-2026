@@ -29,9 +29,9 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.preprocessing.performance import load_performance  # noqa: E402
 from src.preprocessing.score import load_score  # noqa: E402
-from src.preprocessing.segment import SegmentConfig, segment_pair  # noqa: E402
+from src.preprocessing.segment import SegmentConfig, segment_pair, segment_windows  # noqa: E402
 from src.preprocessing.split import assign_splits, composition_id, load_fixed_split  # noqa: E402
-from src.preprocessing.store import write_split  # noqa: E402
+from src.preprocessing.store import segment_sizes, write_split  # noqa: E402
 from src.preprocessing.vocab import Vocab  # noqa: E402
 
 SPLITS = ("train", "val", "test")
@@ -79,7 +79,11 @@ def process_piece(root: str, folder: str, items, cfg: SegmentConfig, split: str,
             notes, pedal = load_performance(root / perf)
             meta = {"dataset": "asap", "piece": folder, "composition": cid, "performance": perf,
                     "split": split, "source": "clean"}
-            s, st = segment_pair(notes, pedal, ann, measures, cfg, meta)
+            if cfg.mode == "windows":  # window sizes drawn reproducibly per performance
+                seed = int(hashlib.sha1(perf.encode()).hexdigest()[:8], 16)
+                s, st = segment_windows(notes, pedal, ann, measures, cfg, meta, train=split == "train", seed=seed)
+            else:
+                s, st = segment_pair(notes, pedal, ann, measures, cfg, meta)
         except Exception as e:  # noqa: BLE001
             s, st = [], {"error": repr(e)}
         segs += s
@@ -87,9 +91,9 @@ def process_piece(root: str, folder: str, items, cfg: SegmentConfig, split: str,
     shard = Path(shard_dir) / f"{split}_{hashlib.sha1(folder.encode()).hexdigest()[:12]}.pkl"
     with open(shard, "wb") as f:
         pickle.dump(segs, f, protocol=pickle.HIGHEST_PROTOCOL)
-    sizes = (len(segs), sum(len(s["notes"]) for s in segs), sum(len(s["pedal"]) for s in segs),
-             sum(len(s["tokens"]) for s in segs))
-    tok_counts = Counter(t for s in segs for t in s["tokens"]) if split == "train" else Counter()
+    sizes = tuple(sum(x) for x in zip(*map(segment_sizes, segs))) if segs else (0, 0, 0, 0)
+    tok_counts = Counter(t for s in segs for t in s["tokens"] + s.get("prompt", [])) \
+        if split == "train" else Counter()
     return str(shard), reports, sizes, tok_counts
 
 
@@ -97,7 +101,7 @@ def iter_shards(paths):
     for p in sorted(paths):
         with open(p, "rb") as f:
             segs = pickle.load(f)
-        yield from sorted(segs, key=lambda s: (s["performance"], s["bar_start"]))
+        yield from sorted(segs, key=lambda s: (s["performance"], s.get("win", 0), s["bar_start"]))
 
 
 def main():
@@ -120,8 +124,10 @@ def main():
     splits = assign_splits(cids.values(), tuple(cfg["split_ratios"]), cfg["seed"], fixed)
     pieces = sorted(by_piece)[: args.limit] if args.limit else sorted(by_piece)
 
-    base = SegmentConfig(**cfg["segment"])
-    eval_cfg = replace(base, stride=base.bars_per_segment)
+    seg = dict(cfg["segment"])
+    seg["window_notes"] = tuple(seg.get("window_notes", SegmentConfig.window_notes))
+    base = SegmentConfig(**seg)
+    eval_cfg = replace(base, stride=base.bars_per_segment)  # windows mode: eval is handled by train=False
     shards, sizes = defaultdict(list), defaultdict(lambda: [0, 0, 0, 0])
     reports, train_counts = [], Counter()
     with ProcessPoolExecutor(max_workers=cfg.get("workers", 4)) as ex:
@@ -154,17 +160,25 @@ def main():
                     "performances": len(perf_by_split[sp]),
                     "compositions": len({cids[f] for f in pieces if splits[cids[f]] == sp})}
                for sp in SPLITS}
-    dropped = Counter()
+    dropped, carry = Counter(), Counter()
     for r in reports:
         for k in ("too_long", "empty", "long_bar", "low_pitch_f1"):
             dropped[k] += r.get(k, 0)
+        for k in ("carry_candidates", "carried_notes", "ties_at_window_start", "ties_with_carried_note"):
+            carry[k] += r.get(k, 0)
     errs = [r for r in reports if "error" in r or "skipped" in r]
     json.dump({"summary": summary, "skipped_at_load": skipped, "dropped_segments": dropped,
+               "carried_over_notes": carry,
                "vocab_size": len(vocab), "problems": errs, "performances": reports},
               open(out / "report.json", "w"), indent=1)
     print(json.dumps(summary, indent=1))
     print("skipped at load:", dict(skipped), "| dropped segments:", dict(dropped),
           "| problem performances:", len(errs), "| vocab:", len(vocab))
+    if carry["ties_at_window_start"]:
+        print(f"carried-over notes: {carry['carried_notes']} key-held (+ {carry['carry_candidates'] - carry['carried_notes']}"
+              f" pedal-sustained candidates) | ties into a window's first beat: "
+              f"{carry['ties_at_window_start']}, {carry['ties_with_carried_note']} "
+              f"({carry['ties_with_carried_note'] / carry['ties_at_window_start']:.1%}) have a carried note")
 
 
 if __name__ == "__main__":

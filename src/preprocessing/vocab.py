@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from collections import Counter
 
-PAD, BOS, EOS, UNK = "<pad>", "<bos>", "<eos>", "<unk>"
-SPECIALS = [PAD, BOS, EOS, UNK]
+PAD, BOS, EOS, UNK, SEP = "<pad>", "<bos>", "<eos>", "<unk>", "<sep>"
+SPECIALS = [PAD, BOS, EOS, UNK, SEP]  # SEP separates the context prompt from the target
 # Rare-but-important tokens the proposal wants up-weighted in the loss / oversampled.
 ORNAMENT_PREFIXES = ("grace", "arp", "orn_", "ped_")
 
@@ -44,7 +44,7 @@ class Vocab:
         return [self.stoi[BOS]] + ids + [self.stoi[EOS]] if add_special else ids
 
     def decode(self, ids) -> list[str]:
-        return [self.itos[i] for i in ids if self.itos[i] not in (PAD, BOS, EOS)]
+        return [self.itos[i] for i in ids if self.itos[i] not in (PAD, BOS, EOS, SEP)]
 
     def loss_weights(self, ornament_weight: float = 5.0) -> list[float]:
         """Per-token CE weights: ornament/pedal tokens get ``ornament_weight``, PAD gets 0."""

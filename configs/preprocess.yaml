@@ -15,6 +15,15 @@ workers: 6
 keep_shards: false
 
 segment:
+  # windows: cut at arbitrary note gaps; target starts mid-bar and marks bar lines itself
+  #          (no bar annotations needed at inference). bars: cut at annotated bar lines.
+  mode: windows
+  window_notes: [48, 192]  # train window size in notes, drawn per window
+  eval_window_notes: 128   # val/test window size (no overlap)
+  window_overlap: 0.5      # train overlap between consecutive windows
+  cut_search: 0.25         # cut at the largest onset gap within +-25% of the target size
+  prompt: true             # store the score just before each window as decoder context
+  # bars mode only:
   bars_per_segment: 4
   stride: 2                # train stride; val/test always use stride = bars_per_segment
   onset_tolerance: 0.125   # quarter notes
@@ -24,5 +33,9 @@ segment:
   max_target_tokens: 1536
   max_bar_quarters: 16
   min_pitch_f1: 0.6
+  carry_notes: true          # input notes struck before the window but still held (negative onset)
+  carry_min_quarters: 0.25   # must be held at least this far into the window
+  carry_pedal_sustained: true  # store pedal-sustained notes as candidates; Dataset keeps them only if
+                               # noise (pedal lengthening) leaves the key down past that point
 
 vocab_min_count: 2
