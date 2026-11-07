@@ -43,6 +43,10 @@ dependencies:
       - datasets
       - huggingface_hub
       - symusic
+      # web demo (demo/app.py)
+      - fastapi
+      - uvicorn
+      - python-multipart
       # dev
       - ipykernel
       - pytest

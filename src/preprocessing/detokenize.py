@@ -114,11 +114,41 @@ def _regrid(bars: list[_Bar], grid: int) -> list[_Bar]:
     return bars
 
 
-def tokens_to_score(tokens: list[str], min_staves: int = 2, grid: int | None = None) -> m21.stream.Score:
-    """``grid``: optionally snap positions/durations to 1/grid quarter (fallback for export)."""
+def _clip_to_bars(bars: list[_Bar]) -> list[_Bar]:
+    """Keep every note inside its bar. Model output can place a note past the bar's end (a wrong
+    time signature, a missed bar line) or hold it across the bar line; music21's export then tries
+    to carry the overflow into the next measure and fails (KeyError on a voice id, or "object
+    already found in this Stream"). Notes starting past the end are dropped, longer ones cut at
+    the bar line. Only used as an export fallback: some real scores have bars fuller than their
+    time signature (cadenzas, irregular measures) and export fine as they are."""
+    for b in bars:
+        try:
+            bl = Fraction(m21.meter.TimeSignature(b.ts).barDuration.quarterLength)
+        except Exception:  # noqa: BLE001
+            b.ts, bl = "4/4", Fraction(4)
+        kept = []
+        for n in b.notes:
+            if n.pos >= bl:
+                continue
+            if n.grace:  # a d_ token after "grace" would otherwise give it a length
+                n.dur = Fraction(0)
+            elif n.pos + n.dur > bl:
+                n.dur = bl - n.pos
+            kept.append(n)
+        b.notes = kept
+        b.pedal = [(p, t) for p, t in b.pedal if p < bl]
+    return bars
+
+
+def tokens_to_score(tokens: list[str], min_staves: int = 2, grid: int | None = None,
+                    clip: bool = False) -> m21.stream.Score:
+    """``grid``: optionally snap positions/durations to 1/grid quarter (fallback for export).
+    ``clip``: keep notes inside their bars (fallback for malformed model output, see _clip_to_bars)."""
     bars = parse_tokens(tokens)
     if grid:
         bars = _regrid(bars, grid)
+    if clip:
+        bars = _clip_to_bars(bars)
     n_staves = max([min_staves] + [n.staff + 1 for b in bars for n in b.notes])
     score = m21.stream.Score()
     parts = [m21.stream.PartStaff(id=f"P1-Staff{s + 1}") for s in range(n_staves)]
@@ -229,8 +259,13 @@ def write_musicxml(score: m21.stream.Score, path: str) -> str:
 
 def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48) -> str:
     """Tokens -> MusicXML file. Exact rendering first; if mixed tuplet grids make some duration
-    inexpressible, re-render with everything snapped to 1/``fallback_grid`` quarter."""
-    try:
-        return write_musicxml(tokens_to_score(tokens), path)
-    except Exception:  # noqa: BLE001  (a failed export can leave the score half-modified)
-        return write_musicxml(tokens_to_score(tokens, grid=fallback_grid), path)
+    inexpressible, re-render with everything snapped to 1/``fallback_grid`` quarter; if notes
+    overflowing their bars break the export (model output), clip them to the bar and retry.
+    Each attempt rebuilds the score: a failed export can leave it half-modified."""
+    attempts = [{}, {"grid": fallback_grid}, {"clip": True}, {"clip": True, "grid": fallback_grid}]
+    for k, kw in enumerate(attempts):
+        try:
+            return write_musicxml(tokens_to_score(tokens, **kw), path)
+        except Exception:  # noqa: BLE001
+            if k == len(attempts) - 1:
+                raise

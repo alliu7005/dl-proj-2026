@@ -496,6 +496,32 @@ from the training prompts (the old test compared them by meaning, not token by t
 positions are now dropped; `tests/test_scoreformer.py` checks all 3,631 val/test prompts are
 identical token for token.
 
+## Demo: audio in, score out
+
+A small web app runs the whole system on one recording: Transkun V2 transcribes the audio, the
+score model writes the score window by window (each window prompted with its own previous output,
+as in the chained evaluation), and the page shows the engraved score with playback and downloads.
+
+```bash
+pip install fastapi uvicorn python-multipart        # once (also listed in environment.yml)
+python demo/app.py --ckpt outputs/runs/sf_base/best.pt
+# open http://127.0.0.1:7860 and drop in a WAV / MP3 / FLAC (or a .mid to skip transcription)
+```
+
+Everything runs in that Python process, on the GPU if there is one, otherwise the CPU (a
+30-second clip: about 10 s of Transkun on a laptop CPU, plus a few seconds per 128-note window for
+the score model). The page only uploads and displays: the score is drawn with OpenSheetMusicDisplay
+and the MIDI players use html-midi-player, both loaded from a CDN. Each job's files go to
+`outputs/demo/<job id>/`: `transcription.mid`, `tokens.txt`, `score.musicxml`, `score.mid`,
+`result.json`. The same pipeline from the command line:
+
+```bash
+python scripts/audio_to_score.py recording.wav --ckpt outputs/runs/sf_base/best.pt
+```
+
+The demo needs `vocab.json` (and, for Score2Seq checkpoints, `feature_stats.json`) next to the
+checkpoint or in `data/processed/`. Copy both next to `best.pt` when sharing a checkpoint.
+
 ## Baselines
 
 The milestone asks for 1–3 baselines evaluated "with the same data, metrics, and protocol" as our
@@ -640,6 +666,8 @@ src/eval/metrics.py              shared window-level metrics
 src/model.py                     Score2Seq: first small encoder-decoder transformer
 src/scoreformer.py               Scoreformer: main model (time-rotary encoder), checkpoint loading
 src/dataset.py     PyTorch Dataset / sampler / collate
+src/pipeline.py                  audio / MIDI -> windows -> chained decoding -> MusicXML
+demo/app.py, demo/static/        web demo (FastAPI + one HTML page); scripts/audio_to_score.py: CLI
 scripts/train_model.py           train either model; scripts/evaluate_pieces.py: oracle/chained/none
 pace/train.sbatch                PACE GPU job: train + evaluate
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
