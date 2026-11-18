@@ -13,7 +13,10 @@ difference between two runs is what you change on the command line. Differences 
     instead of crashing, so it runs on an ASAP-only build too;
   * best.pt = lowest mean validation loss over all available validation sets (ASAP clean,
     PERiScoPe real, ASAP real transcriptions), instead of the small val_real set alone;
-  * ``--compile`` (torch.compile) and ``--grad-accum`` for big GPUs / big models.
+  * ``--compile`` (torch.compile) and ``--grad-accum`` for big GPUs / big models;
+  * early stopping: training ends once the mean validation loss has not improved for
+    ``--patience`` epochs (default 5; 0 = off). ``--epochs`` (default 20) is the maximum and also
+    sets the length of the cosine learning-rate schedule.
 
 Outputs in outputs/runs/<name>/: config.json, log.csv (one row per eval), last.pt, best.pt.
 """
@@ -117,7 +120,9 @@ def main():
     ap.add_argument("--dec-layers", type=int)
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--resume", action="store_true")
-    ap.add_argument("--epochs", type=float, default=20)
+    ap.add_argument("--epochs", type=float, default=20, help="maximum; also the length of the LR schedule")
+    ap.add_argument("--patience", type=float, default=5,
+                    help="stop when the mean validation loss has not improved for this many epochs (0 = off)")
     ap.add_argument("--batch-tokens", type=int, default=16384, help="token budget per batch (incl. padding)")
     ap.add_argument("--batch-notes", type=int, default=8192, help="input-note budget per batch")
     ap.add_argument("--grad-accum", type=int, default=1, help="batches per optimizer step")
@@ -239,10 +244,12 @@ def main():
 
     weights = torch.tensor(vocab.loss_weights(args.ornament_weight), device=device)
     step, epoch, best = 0, 0, float("inf")
+    best_step = 0  # step of the best validation loss (early stopping)
     if ck is not None:
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
         step, epoch, best = ck["step"], ck["epoch"], ck.get("best", best)
+        best_step = ck.get("best_step", step)
         print(f"resumed {run} at step {step} (epoch {epoch})", flush=True)
     elif (run / "last.pt").exists():
         raise SystemExit(f"{run} already has a checkpoint: use --resume, or a different --name")
@@ -256,14 +263,19 @@ def main():
 
     def save(path):
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": epoch,
-                    "best": best, "arch": args.arch, "config": cfg}, path)
+                    "best": best, "best_step": best_step, "arch": args.arch, "config": cfg}, path)
 
     log_path = run / "log.csv"
     model.train()
     t0 = t_int = time.time()
     tok_int, wait_int, run_loss, n_loss, micro = 0, 0.0, 0.0, 0, 0
+    patience_steps = int(args.patience * steps_per_epoch) if args.patience > 0 else 0
+    # a resumed run that had already stopped early (e.g. the job was resubmitted) stops right away
+    stopped_early = bool(ck is not None and patience_steps and step - best_step >= patience_steps)
+    if stopped_early:
+        print(f"already stopped early at step {step} (best at step {best_step}); nothing to train", flush=True)
     try:
-        while step < total_steps:
+        while step < total_steps and not stopped_early:
             if hasattr(train, "set_epoch"):
                 train.set_epoch(epoch)
             batches.set_epoch(epoch)
@@ -306,14 +318,18 @@ def main():
                                                 if isinstance(v, float) and ("loss" in k or "f1" in k or "acc" in k)),
                           flush=True)
                     if res["val_loss"] < best:
-                        best = res["val_loss"]
+                        best, best_step = res["val_loss"], step
                         save(run / "best.pt")
                     save(run / "last.pt")
                     t_int, tok_int, wait_int = time.time(), 0, 0.0
-                if step >= total_steps:
+                    if patience_steps and step - best_step >= patience_steps:
+                        stopped_early = True
+                        print(f"early stop at step {step} (epoch {epoch}): mean validation loss has not improved "
+                              f"for {args.patience:g} epochs (best {best:.4f} at step {best_step})", flush=True)
+                if step >= total_steps or stopped_early:
                     break
                 t_wait = time.time()
-            else:  # the epoch's batches ran out (not stopped by total_steps)
+            else:  # the epoch's batches ran out (not stopped by total_steps or early stopping)
                 epoch += 1
     except KeyboardInterrupt:
         save(run / "last.pt")
@@ -321,7 +337,8 @@ def main():
               f"python scripts/train_model.py --name {args.name} --resume", flush=True)
         sys.exit(130)
     save(run / "last.pt")
-    print(f"done: {step} steps. best mean val loss {best:.4f} -> {run / 'best.pt'}")
+    print(f"done: {step} steps{' (early stop)' if stopped_early else ''}. "
+          f"best mean val loss {best:.4f} at step {best_step} -> {run / 'best.pt'}")
 
 
 if __name__ == "__main__":
