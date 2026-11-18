@@ -1,0 +1,54 @@
+# Beyer & Dai's ASAP fork (fixes ties / duplicated notes in 49 scores), pinned for reproducibility:
+#   git clone https://github.com/TimFelixBeyer/asap-dataset.git data/raw/asap_bd
+#   git -C data/raw/asap_bd checkout 8cba199e15931975542010a7ea2ff94a6fc9cbee
+asap_root: data/raw/asap_bd
+# used only if a fork score fails to parse (Ravel/Pavane): original ASAP
+#   git clone --depth 1 https://github.com/fosfrancesco/asap-dataset.git data/raw/asap
+score_fallback_root: data/raw/asap
+out_dir: data/processed
+seed: 0
+# Beyer & Dai's exact train/val/test pieces + their list of badly aligned performances
+# (regenerate with scripts/make_bd_split.py). Set to null for a hash-based split with split_ratios.
+fixed_split: configs/splits/beyer_dai.json
+split_ratios: [0.8, 0.1, 0.1]
+# val: "fixed" = Beyer & Dai's val (piece_id % 10 == 0; 77% Beethoven), or "composer_stratified" =
+# ~val_frac of each composer's compositions (test pieces unchanged either way)
+val_strategy: composer_stratified
+val_frac: 0.1
+workers: 6
+keep_shards: false
+
+# PianoCoRe's PERiScoPe subset: raw Transkun V2 transcriptions aligned to scores.
+# Download with: python scripts/fetch_pianocore_meta.py && python scripts/fetch_pianocore.py
+pianocore:
+  enabled: true
+  dir: data/raw/pianocore/periscope
+  split_ratios: [0.85, 0.05, 0.10]   # train / val / test_periscope, by work (works not in ASAP)
+  min_score_match: 0.9               # skip scores whose score MIDI and MusicXML don't line up
+
+segment:
+  # windows: cut at arbitrary note gaps; target starts mid-bar and marks bar lines itself
+  #          (no bar annotations needed at inference). bars: cut at annotated bar lines.
+  mode: windows
+  window_notes: [48, 192]  # train window size in notes, drawn per window
+  eval_window_notes: 128   # val/test window size (no overlap)
+  window_overlap: 0.5      # train overlap between consecutive windows
+  cut_search: 0.25         # cut at the largest onset gap within +-25% of the target size
+  prompt: true             # store the score just before each window as decoder context
+  # bars mode only:
+  bars_per_segment: 4
+  stride: 2                # train stride; val/test always use stride = bars_per_segment
+  onset_tolerance: 0.125   # quarter notes
+  pedal_targets: true
+  pedal_grid: 4
+  pedal_min_quarters: 0.5  # drop pedal flutter (presses shorter than an eighth note)
+  max_input_notes: 768
+  max_target_tokens: 1536
+  max_bar_quarters: 16
+  min_pitch_f1: 0.6
+  carry_notes: true          # input notes struck before the window but still held (negative onset)
+  carry_min_quarters: 0.25   # must be held at least this far into the window
+  carry_pedal_sustained: true  # store pedal-sustained notes as candidates; Dataset keeps them only if
+                               # noise (pedal lengthening) leaves the key down past that point
+
+vocab_min_count: 2

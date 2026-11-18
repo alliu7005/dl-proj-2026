@@ -1,0 +1,52 @@
+# One env for everything: ASAP/PianoCoRe preprocessing, Transkun V2 transcription, training.
+#   conda env create -f environment.yml
+#   conda activate dl-proj
+#   pip install --no-deps transkun==2.0.1     # see note below
+name: dl-proj
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - numpy>=1.26
+  - libblas=*=*openblas   # the default MKL build crashes inside numpy.linalg on Windows here
+  - pyyaml>=6.0
+  - tqdm>=4.66
+  - pandas
+  - pyarrow           # PianoCoRe parquet shards
+  - ffmpeg            # audio decoding fallback for librosa/audioread
+  - setuptools<82     # torch 2.11 requirement
+  - pip:
+      # CUDA 12.8 wheels (needs NVIDIA driver >= 570). Pinned: the cu128 index stops at 2.11, and
+      # without the pin pip silently takes a newer CPU-only build from PyPI.
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.11.0+cu128
+      - torchaudio==2.11.0+cu128
+      # symbolic music / scores
+      - pretty_midi>=0.2.10
+      - music21>=9.1
+      - mido
+      # Transkun V2 transcriber (scripts/transcribe.py). transkun itself is installed with
+      # `pip install --no-deps transkun==2.0.1`: its `ncls` dependency needs a C compiler on Windows
+      # and, like `sox`/`tensorboard`, is only used by Transkun's training code. These are what the
+      # transcription path imports:
+      - moduleconf
+      - mir-eval
+      - pydub
+      - torch-optimizer
+      - soxr
+      - librosa
+      - audioread
+      - soundfile
+      # PianoCoRe (Hugging Face parquet; alignment .npz files load with numpy.load).
+      # Not symupe: it imports the Unix-only `resource` module and fails on Windows.
+      - datasets
+      - huggingface_hub
+      - symusic
+      # web demo (demo/app.py)
+      - fastapi
+      - uvicorn
+      - python-multipart
+      # dev
+      - ipykernel
+      - pytest
