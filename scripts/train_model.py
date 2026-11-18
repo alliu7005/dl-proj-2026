@@ -14,9 +14,14 @@ difference between two runs is what you change on the command line. Differences 
   * best.pt = lowest mean validation loss over all available validation sets (ASAP clean,
     PERiScoPe real, ASAP real transcriptions), instead of the small val_real set alone;
   * ``--compile`` (torch.compile) and ``--grad-accum`` for big GPUs / big models;
-  * early stopping: training ends once the mean validation loss has not improved for
-    ``--patience`` epochs (default 5; 0 = off). ``--epochs`` (default 20) is the maximum and also
-    sets the length of the cosine learning-rate schedule.
+  * early stopping with a cooldown. ``--epochs`` (default 20) is the maximum and the length of the
+    cosine learning-rate schedule. When the mean validation loss has not improved for
+    ``--patience`` epochs (default 5; 0 = off), training goes back to the best checkpoint (weights
+    and optimizer) and runs a ``--cooldown`` (default 1 epoch): the learning rate decays linearly
+    from its value at the best step to the schedule's minimum, the low-learning-rate phase an
+    early-stopped run would otherwise never get. best.pt keeps improving if the cooldown helps.
+    The phase (train / cooldown / done) is saved in every checkpoint, so a resubmitted job picks up
+    a cooldown where it was and a finished run exits at once.
 
 Outputs in outputs/runs/<name>/: config.json, log.csv (one row per eval), last.pt, best.pt.
 """
@@ -44,6 +49,21 @@ from src.preprocessing.vocab import EOS  # noqa: E402
 from src.scoreformer import PRESETS, build_model  # noqa: E402
 
 D = Path("data/processed")
+
+
+def learning_rate(step: int, *, lr: float, warmup: int, total_steps: int, min_lr_frac: float,
+                  phase: str = "train", cool: dict | None = None) -> float:
+    """Linear warm-up, then cosine decay to ``lr * min_lr_frac`` at ``total_steps``. In the cooldown
+    after an early stop (``phase == "cooldown"``), linear decay from ``cool["lr0"]`` (the rate at the
+    best step) to the same minimum over ``cool["steps"]`` steps from ``cool["start"]``."""
+    lr_min = lr * min_lr_frac
+    if phase == "cooldown":
+        prog = min(1.0, max(0.0, (step - cool["start"]) / max(1, cool["steps"])))
+        return cool["lr0"] + (lr_min - cool["lr0"]) * prog
+    if step < warmup:
+        return lr * (step + 1) / warmup
+    prog = min(1.0, (step - warmup) / max(1, total_steps - warmup))
+    return lr_min + (lr - lr_min) * 0.5 * (1 + math.cos(math.pi * prog))
 
 
 def has_split(name: str) -> bool:
@@ -123,6 +143,8 @@ def main():
     ap.add_argument("--epochs", type=float, default=20, help="maximum; also the length of the LR schedule")
     ap.add_argument("--patience", type=float, default=5,
                     help="stop when the mean validation loss has not improved for this many epochs (0 = off)")
+    ap.add_argument("--cooldown", type=float, default=1,
+                    help="after an early stop: epochs of linear LR decay from the best checkpoint (0 = stop at once)")
     ap.add_argument("--batch-tokens", type=int, default=16384, help="token budget per batch (incl. padding)")
     ap.add_argument("--batch-notes", type=int, default=8192, help="input-note budget per batch")
     ap.add_argument("--grad-accum", type=int, default=1, help="batches per optimizer step")
@@ -236,11 +258,13 @@ def main():
                             lr=args.lr, betas=(0.9, 0.98), fused=device.type == "cuda")
     fwd = torch.compile(model) if args.compile else model
 
+    # phase: "train" (cosine schedule) -> "cooldown" (after an early stop) -> "done"
+    phase, cool = "train", {"start": 0, "steps": 0, "lr0": 0.0}
+    lr_min = args.lr * args.min_lr_frac
+
     def lr_at(step):
-        if step < args.warmup:
-            return args.lr * (step + 1) / args.warmup
-        prog = min(1.0, (step - args.warmup) / max(1, total_steps - args.warmup))
-        return args.lr * (args.min_lr_frac + (1 - args.min_lr_frac) * 0.5 * (1 + math.cos(math.pi * prog)))
+        return learning_rate(step, lr=args.lr, warmup=args.warmup, total_steps=total_steps,
+                             min_lr_frac=args.min_lr_frac, phase=phase, cool=cool)
 
     weights = torch.tensor(vocab.loss_weights(args.ornament_weight), device=device)
     step, epoch, best = 0, 0, float("inf")
@@ -250,7 +274,9 @@ def main():
         opt.load_state_dict(ck["opt"])
         step, epoch, best = ck["step"], ck["epoch"], ck.get("best", best)
         best_step = ck.get("best_step", step)
-        print(f"resumed {run} at step {step} (epoch {epoch})", flush=True)
+        phase = ck.get("phase", "train" if step < total_steps else "done")
+        cool = ck.get("cool", cool)
+        print(f"resumed {run} at step {step} (epoch {epoch}, phase {phase})", flush=True)
     elif (run / "last.pt").exists():
         raise SystemExit(f"{run} already has a checkpoint: use --resume, or a different --name")
     json.dump({"args": vars(args), "arch": args.arch, "model": cfg, "params": n_params,
@@ -263,19 +289,45 @@ def main():
 
     def save(path):
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": epoch,
-                    "best": best, "best_step": best_step, "arch": args.arch, "config": cfg}, path)
+                    "best": best, "best_step": best_step, "phase": phase, "cool": cool,
+                    "arch": args.arch, "config": cfg}, path)
 
     log_path = run / "log.csv"
     model.train()
     t0 = t_int = time.time()
     tok_int, wait_int, run_loss, n_loss, micro = 0, 0.0, 0.0, 0, 0
-    patience_steps = int(args.patience * steps_per_epoch) if args.patience > 0 else 0
-    # a resumed run that had already stopped early (e.g. the job was resubmitted) stops right away
-    stopped_early = bool(ck is not None and patience_steps and step - best_step >= patience_steps)
-    if stopped_early:
-        print(f"already stopped early at step {step} (best at step {best_step}); nothing to train", flush=True)
+    patience_steps = max(1, int(args.patience * steps_per_epoch)) if args.patience > 0 else 0
+    stopped_early = phase != "train" and step < total_steps
+
+    def end_of_training():
+        """After an eval: move train -> cooldown / done, or cooldown -> done."""
+        nonlocal phase, stopped_early
+        if phase == "train" and step >= total_steps:
+            phase = "done"
+        elif phase == "train" and patience_steps and step - best_step >= patience_steps:
+            stopped_early = True
+            print(f"early stop at step {step} (epoch {epoch}): mean validation loss has not improved for "
+                  f"{args.patience:g} epochs (best {best:.4f} at step {best_step})", flush=True)
+            n = max(1, int(args.cooldown * steps_per_epoch)) if args.cooldown > 0 else 0
+            if n <= 0:
+                phase = "done"
+                return
+            ck_best = torch.load(run / "best.pt", map_location=device, weights_only=False)
+            model.load_state_dict(ck_best["model"])
+            opt.load_state_dict(ck_best["opt"])
+            cool.update(start=step, steps=n, lr0=lr_at(best_step))
+            phase = "cooldown"
+            print(f"cooldown: back to the best checkpoint (step {best_step}); learning rate "
+                  f"{cool['lr0']:.2e} -> {lr_min:.2e} over {n} steps ({args.cooldown:g} epochs)", flush=True)
+        elif phase == "cooldown" and step >= cool["start"] + cool["steps"]:
+            phase = "done"
+            print(f"cooldown finished at step {step}", flush=True)
+
+    if phase == "done":
+        print(f"{run} already finished (step {step}, best {best:.4f} at step {best_step}); nothing to train",
+              flush=True)
     try:
-        while step < total_steps and not stopped_early:
+        while phase != "done":
             if hasattr(train, "set_epoch"):
                 train.set_epoch(epoch)
             batches.set_epoch(epoch)
@@ -305,7 +357,8 @@ def main():
                     print(f"step {step}/{total_steps} ep {epoch} loss {run_loss / n_loss:.4f} lr {lr_at(step):.2e} "
                           f"| {tok_int / el:.0f} tok/s, waiting for data {100 * wait_int / el:.0f}%", flush=True)
                     t_int, tok_int, wait_int, run_loss, n_loss = time.time(), 0, 0.0, 0.0, 0
-                if step % args.eval_every == 0 or step == total_steps:
+                cool_end = phase == "cooldown" and step >= cool["start"] + cool["steps"]
+                if step % args.eval_every == 0 or step == total_steps or cool_end:
                     res = evaluator.run(model, device, amp, args.batch_size, weights)
                     res.update(step=step, epoch=epoch, lr=lr_at(step), minutes=round((time.time() - t0) / 60, 1))
                     new = not log_path.exists()
@@ -320,13 +373,10 @@ def main():
                     if res["val_loss"] < best:
                         best, best_step = res["val_loss"], step
                         save(run / "best.pt")
+                    end_of_training()
                     save(run / "last.pt")
                     t_int, tok_int, wait_int = time.time(), 0, 0.0
-                    if patience_steps and step - best_step >= patience_steps:
-                        stopped_early = True
-                        print(f"early stop at step {step} (epoch {epoch}): mean validation loss has not improved "
-                              f"for {args.patience:g} epochs (best {best:.4f} at step {best_step})", flush=True)
-                if step >= total_steps or stopped_early:
+                if phase == "done":
                     break
                 t_wait = time.time()
             else:  # the epoch's batches ran out (not stopped by total_steps or early stopping)
@@ -337,8 +387,8 @@ def main():
               f"python scripts/train_model.py --name {args.name} --resume", flush=True)
         sys.exit(130)
     save(run / "last.pt")
-    print(f"done: {step} steps{' (early stop)' if stopped_early else ''}. "
-          f"best mean val loss {best:.4f} at step {best_step} -> {run / 'best.pt'}")
+    how = " (early stop + cooldown)" if stopped_early and cool["steps"] else " (early stop)" if stopped_early else ""
+    print(f"done: {step} steps{how}. best mean val loss {best:.4f} at step {best_step} -> {run / 'best.pt'}")
 
 
 if __name__ == "__main__":

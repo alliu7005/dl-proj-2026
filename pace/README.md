@@ -87,9 +87,39 @@ bash pace/overnight.sh          # 1 short CPU check + 4 GPU runs (Blackwell); GP
 | `sf_small_ctx` | both | `sf_small`, `s2s_ctx` |
 | `sf_base_reg` | 45M model: dropout 0.2, weight decay 0.1, lr 2e-4, 6 epochs | `sf_base` |
 
-`sf_base` overfit: its mean validation loss bottomed out at epoch 3-5 of 20 (0.275) and rose to
-0.317. Context noise targets the other milestone finding: in chained evaluation every model scored
-below decoding with no context at all, because training only ever showed it correct context.
+`sf_base` overfit: its mean validation loss bottomed out at step 20,000, in the 3rd of 20 epochs
+(0.275), and rose to 0.317 by the end. Context noise targets the other milestone finding: in
+chained evaluation every model scored below decoding with no context at all, because training only
+ever showed it correct context.
+
+Since then, every training run stops early (no validation improvement for 5 epochs, then a 1-epoch
+learning-rate cooldown from the best checkpoint; see the main README), and every evaluation also
+runs the `guarded` mode, so new `pace/train.sbatch` jobs need no extra flags.
+
+## 4c. Re-evaluate and test the regularization
+
+```bash
+bash pace/reevaluate.sh         # re-evaluate the six comparison runs: oracle, chained, none, guarded
+sbatch -J simguard -c 4 --mem=16G -t 0:45:00 -o slurm-simguard-%j.out --wrap="source pace/common.sh; python scripts/simulate_guard.py"
+```
+
+`reevaluate.sh` submits one `pace/evaluate.sbatch` job per run (evaluation only, merged into the
+run's existing results). Re-running all modes together matters: decoding now caps each window's
+output length, so chained and guarded must come from the same code to be compared.
+
+Two runs separate the causes of `sf_base_reg`'s improvement (it changed dropout, weight decay,
+learning rate and run length at once, and stopped one epoch after its best, too early to show
+whether its validation loss would climb):
+
+```bash
+sbatch --gres=gpu:rtx_pro_6000_blackwell:1 --export=ALL,NAME=sf_base_e6,ARGS="--size base --epochs 6" pace/train.sbatch
+sbatch --gres=gpu:rtx_pro_6000_blackwell:1 --export=ALL,NAME=sf_base_reg20,ARGS="--size base --dropout 0.2 --weight-decay 0.1 --lr 2e-4 --epochs 20" pace/train.sbatch
+```
+
+`sf_base_e6` (original settings, 6 epochs) vs `sf_base_reg`: is the gain just the shorter schedule?
+`sf_base_reg20` (regularized, up to 20 epochs): does its validation loss stay near its minimum where
+`sf_base`'s climbed? With early stopping it ends 5 epochs after its best plus the cooldown, which
+answers the question either way.
 
 ## 5. Bring results back
 

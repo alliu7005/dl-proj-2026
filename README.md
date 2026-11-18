@@ -456,8 +456,11 @@ the same `forward` / `generate` interface, so both are trained and scored by the
 ```bash
 python scripts/train_model.py --name sf_base                      # base size, ~45M parameters
 python scripts/train_model.py --name sf_base --resume             # continue after Ctrl+C / time limit
-python scripts/evaluate_pieces.py --run sf_base --musicxml 5      # test sets, 3 prompt modes
+python scripts/evaluate_pieces.py --run sf_base --musicxml 5      # test sets, 4 context modes
 python -m tests.test_scoreformer                                  # model + chained-prompt checks
+python -m tests.test_decoding                                     # chained / guarded decoding logic
+python -m tests.test_pipeline                                     # demo pipeline end to end
+python -m tests.test_training_stop                                # LR schedule, early stop, cooldown
 sbatch pace/train.sbatch                                          # train + evaluate on a PACE GPU
 ```
 
@@ -476,19 +479,42 @@ sbatch pace/train.sbatch                                          # train + eval
 batches, bf16, warmup + cosine, label smoothing, 5× weight on ornament/pedal tokens). Additions:
 `--arch score2seq` trains Michael's model under the identical loop (a fair architecture comparison),
 `--no-noise` is the clean-input ablation, `--grad-accum` / `--compile` for big runs, and missing
-splits (`train_transcribed`, PERiScoPe) are skipped instead of crashing. 20 epochs by default.
+splits (`train_transcribed`, PERiScoPe) are skipped instead of crashing.
+
+**Early stopping with a cooldown.** `--epochs` (default 20) is the maximum and the length of the
+cosine learning-rate schedule. `sf_base` showed why a fixed 20 epochs is wrong for big models: its
+mean validation loss bottomed out at step 20,000, in the 3rd of 20 epochs (0.275), and rose to
+0.317 by the end. Now, once
+the mean validation loss has not improved for `--patience` epochs (default 5; `0` = off),
+training reloads the best checkpoint (weights and optimizer state) and runs a `--cooldown`
+(default 1 epoch) in which the learning rate decays linearly from its value at the best step to the
+schedule's minimum. An early-stopped run therefore still gets the low-learning-rate phase that the
+cosine schedule would have given it at the end, and `best.pt` keeps improving if the cooldown
+helps. The phase (`train` / `cooldown` / `done`) is stored in every checkpoint: a job killed
+mid-cooldown resumes the cooldown, and resubmitting a finished run trains nothing.
+`tests/test_training_stop.py` checks the schedule values and runs real short trainings for every
+path (stop + cooldown at the predicted steps, resume after finishing, resume mid-cooldown,
+`--cooldown 0`, `--patience 0`).
 
 **Evaluation** (`scripts/evaluate_pieces.py`), works for checkpoints of either script:
 
-| prompt mode | the decoder's context before each window | use |
+| context mode | the decoder's context before each window | use |
 |---|---|---|
 | `oracle` | the ground-truth score before the window (= `scripts/evaluate.py`) | upper bound |
-| `chained` | the model's **own** output so far, window by window through each piece | **the system's real performance** |
+| `chained` | the model's **own** output so far, window by window through each piece | what a real recording gets, unguarded |
 | `none` | nothing | robustness check |
+| `guarded` | chained, with degenerate windows redone without context (below) | **the system's real performance** (the demo's default) |
 
-All three score each window against its ground truth with `src/eval/metrics.py`, so they compare
+All four score each window against its ground truth with `src/eval/metrics.py`, so they compare
 directly with the baselines. `--musicxml N` writes the stitched prediction and ground truth of the
-first N pieces as MusicXML (for figures and for MUSTER / MV2H).
+first N pieces as MusicXML (for figures and for MUSTER / MV2H). Running the script with a subset of
+`--modes` adds those modes to an earlier evaluation's files instead of replacing them.
+
+Chained and guarded decoding live in `src/decoding.py` (`decode_pieces`), which the demo pipeline
+uses too, so the demo and the evaluation run identical decoding. Each window's output is capped at
+8 tokens per input note + 64 (`decoding.max_new_tokens`): real targets average 3.4 tokens per note
+and the longest train / val / test target is 80% of the cap, so it never truncates a real output;
+it only keeps a looping window from running on to the model's 2,048-token limit.
 
 **Prompt fix** (`segment.prompt_from_output`): when a position in the bar held only a pedal token,
 removing the pedal left an empty `pos_k sub_x` behind, so 43% of inference-time prompts differed
@@ -505,20 +531,36 @@ mistakes a model's own previous output makes: a wrong time signature, all positi
 durations, flipped staff. Targets and note inputs are never changed, and with the flag off the data
 is identical to before (`python -m tests.test_context_noise`).
 
-**Guarded chained decoding** (`evaluate_pieces.py --modes guarded`): `scripts/analyze_chained.py`
-showed the chained losses come from cascades. One degenerate window (no notes, or a loop far longer
-than its target) wrecks the next window's context, and pitch F1 after such a window drops to
-0.12-0.40 (degenerate windows on synthetic input: 0.6% for s2s, 21% for s2s_ctx, 57% for sf_base).
-Guarded mode also decodes every window without context and keeps that output when it agrees better
-with the window's input pitches (known at inference) by more than `--guard-margin`; the kept output
-becomes the next window's history. `scripts/simulate_guard.py` estimates it offline from saved
-chained/none predictions to choose the margin.
+**Guarded chained decoding** (`--modes guarded`, on by default). `scripts/analyze_chained.py`
+rebuilds every chained context from saved predictions and showed that the chained losses come from
+cascades, not from long contexts as such. One degenerate window (no notes, or a loop more than 3x
+its target's length) wrecks the next window's context, and pitch F1 after such a window drops to
+0.12-0.40, often degenerating again:
+
+| model, synthetic input | degenerate windows | pitch F1 after one | pitch F1 chained / none |
+|---|---|---|---|
+| s2s | 0.6% | 0.77 | 0.87 / 0.88 |
+| s2s_ctx | 20.9% | 0.16 | 0.70 / 0.88 |
+| sf_small_ctx | 71.2% | 0.12 | 0.24 / 0.86 |
+| sf_base | 56.9% | 0.21 | 0.36 / 0.81 |
+| sf_base_reg | 45.4% | 0.30 | 0.49 / 0.86 |
+
+The model cannot see the true score at inference, but it does know the notes it was given: a
+healthy output contains about the same pitches as its input, a degenerate one does not. Guarded mode
+also decodes every window without context and keeps that output when its pitch F1 against the
+window's input notes (`decoding.input_agreement`) beats the chained output's by more than
+`--guard-margin` (default 0.05). The kept output becomes the history the next context is built from,
+so one bad window can no longer take the rest of the piece down with it. `scripts/simulate_guard.py`
+estimates guarded decoding offline from saved chained / none predictions for several margins
+(conservatively: it cannot show the better contexts that follow a replaced window).
+`tests/test_decoding.py` checks the logic with a stand-in model.
 
 ## Demo: audio in, score out
 
 A small web app runs the whole system on one recording: Transkun V2 transcribes the audio, the
-score model writes the score window by window (each window prompted with its own previous output,
-as in the chained evaluation), and the page shows the engraved score with playback and downloads.
+score model writes the score window by window with guarded decoding (each window's context is the
+model's own previous output, and degenerate windows are redone without it; the page can also switch
+to plain chained or no context), and the page shows the engraved score with playback and downloads.
 
 ```bash
 pip install fastapi uvicorn python-multipart        # once (also listed in environment.yml)
@@ -683,12 +725,20 @@ src/baselines/xgb_quantizer.py   Baseline 2: beat-snap + per-note XGBoost
 src/eval/metrics.py              shared window-level metrics
 src/model.py                     Score2Seq: first small encoder-decoder transformer
 src/scoreformer.py               Scoreformer: main model (time-rotary encoder), checkpoint loading
-src/dataset.py     PyTorch Dataset / sampler / collate
+src/dataset.py     PyTorch Dataset / sampler / collate, context noise (ContextNoise)
+src/decoding.py                  chained / guarded decoding of whole pieces (evaluation and demo)
 src/pipeline.py                  audio / MIDI -> windows -> chained decoding -> MusicXML
 demo/app.py, demo/static/        web demo (FastAPI + one HTML page); scripts/audio_to_score.py: CLI
 scripts/train_model.py           train either model; scripts/evaluate_pieces.py: oracle/chained/none
 pace/train.sbatch                PACE GPU job: train + evaluate
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
+tests/test_decoding.py           chained / guarded decoding with a stand-in model
+tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget
+tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume
+tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes
+scripts/analyze_chained.py       why chained decoding loses notes (from saved predictions)
+scripts/simulate_guard.py        guarded decoding estimated offline, per guard margin
+scripts/export_musicxml.py       MusicXML from saved predictions (no GPU)
 scripts/           build_dataset, make_bd_split, fetch_maestro_audio, transcribe, fit_noise,
                    build_transcribed, train_xgb_detector, audit_data
 tests/test_integrity.py   leakage, pairing, array and loader checks
