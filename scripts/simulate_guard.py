@@ -3,7 +3,7 @@
     python scripts/simulate_guard.py --runs s2s,s2s_ctx,sf_base_reg --conditions synthetic,clean
 
 For each window, keep the chained output unless the no-prompt output agrees better with the
-window's input pitches by more than a margin (evaluate_pieces.input_agreement), then score with the
+window's input pitches by more than a margin (src.decoding.input_agreement), then score with the
 standard metrics. This picks between the outputs that were actually decoded, so it cannot show the
 second effect of the real guarded mode (a replaced window also gives the next window a better
 context): it is a conservative estimate, used to choose --guard-margin before spending GPU time.
@@ -17,7 +17,8 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.evaluate_pieces import SPLITS, input_agreement  # noqa: E402
+from scripts.evaluate_pieces import SPLITS  # noqa: E402
+from src.decoding import input_agreement  # noqa: E402
 from src.dataset import ScoreSegmentDataset  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
@@ -67,7 +68,8 @@ def main():
                 item = ds[idx[k]]
                 gt = ds.vocab.decode(item["target"][item["prompt_len"]:-1].tolist())
                 c, n = preds["chained"][k], preds["none"][k]
-                rows.append((gt, c, n, input_agreement(item["notes"], c), input_agreement(item["notes"], n)))
+                x = item["notes"][:, 0].tolist()
+                rows.append((gt, c, n, input_agreement(x, c), input_agreement(x, n)))
 
             def score(pick):
                 acc, fb = Accumulator(), 0

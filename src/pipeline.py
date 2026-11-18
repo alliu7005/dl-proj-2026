@@ -1,12 +1,17 @@
 """End-to-end inference: piano recording (or performance MIDI) -> engraved score.
 
-    audio --Transkun V2--> performance MIDI --note windows--> Scoreformer (chained) --> tokens
+    audio --Transkun V2--> performance MIDI --note windows--> score model (guarded) --> tokens
           --> MusicXML + score MIDI
 
 Used by the demo (demo/app.py) and by scripts/audio_to_score.py. Windows are cut exactly like the
-test sets (128 notes, cut at the largest onset gap nearby, carried-over notes and pedal included),
-and each window is decoded with the model's own previous output as its prompt ("chained" mode in
-scripts/evaluate_pieces.py), so the demo runs the system the way it is evaluated.
+test sets (128 notes, cut at the largest onset gap nearby, carried-over notes and pedal included)
+and decoded by src/decoding.py, the same code scripts/evaluate_pieces.py scores, with the same
+per-window output budget. Modes:
+  guarded  (default) each window's context is the model's own previous output, but a window whose
+           output clearly disagrees with its input notes (a degenerate window) is replaced by the
+           window decoded without context, so one bad window cannot derail the rest of the piece
+  chained  the model's own previous output as context, unguarded
+  none     every window decoded on its own
 """
 from __future__ import annotations
 
@@ -20,13 +25,16 @@ import numpy as np
 import torch
 
 from .dataset import note_features
+from .decoding import decode_pieces, max_new_tokens
 from .preprocessing.performance import OFFSET, ONSET, load_performance
-from .preprocessing.segment import SegmentConfig, cut_windows, prompt_from_output
+from .preprocessing.segment import SegmentConfig, cut_windows
 from .preprocessing.vocab import BOS, EOS, SEP, Vocab
 from .scoreformer import load_model
 
 AUDIO_EXT = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".aiff", ".aif"}
 MIDI_EXT = {".mid", ".midi"}
+MODES = ("guarded", "chained", "none")
+GUARD_MARGIN = 0.05  # scripts/evaluate_pieces.py --guard-margin default
 CARRY_MIN_SEC = 0.125  # training uses 1/4 quarter note past the cut; ~0.125 s at 120 bpm
 
 Progress = Callable[[str, float, str], None]  # (stage, fraction 0..1, message)
@@ -34,22 +42,6 @@ Progress = Callable[[str, float, str], None]  # (stage, fraction 0..1, message)
 
 def _noop(stage: str, frac: float, msg: str):
     pass
-
-
-def pedal_down(tokens: list[str]) -> bool:
-    for t in reversed(tokens):
-        if t in ("ped_on", "ped_off"):
-            return t == "ped_on"
-    return False
-
-
-def stitch(history: list[str], window: list[str]) -> list[str]:
-    """Append a window's tokens, dropping its opening ``ped_on`` if the pedal is already down."""
-    if pedal_down(history):
-        first = next((k for k, t in enumerate(window) if t.startswith("ped_")), None)
-        if first is not None and window[first] == "ped_on":
-            window = window[:first] + window[first + 1:]
-    return history + window
 
 
 def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
@@ -149,25 +141,33 @@ class ScorePipeline:
     def decode_window(self, feats: torch.Tensor, prefix: torch.Tensor) -> list[str]:
         notes = feats[None].to(self.device)
         mask = torch.ones(1, len(feats), dtype=torch.bool, device=self.device)
-        # test windows average 3.4 target tokens per input note (99th percentile 4.7): the cap only
-        # stops a degenerate loop from running to max_tokens on every window
-        max_new = max(16, min(self.cfg.max_tokens - len(prefix), 6 * len(feats) + 64))
+        max_new = max_new_tokens(len(feats), len(prefix), self.cfg.max_tokens)
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
             ids = self.model.generate(notes, mask, [prefix], self.eos, max_new=max_new)[0]
-        return self.vocab.decode(ids.tolist() if torch.is_tensor(ids) else ids)
+        ids = ids.tolist() if torch.is_tensor(ids) else list(ids)
+        return self.vocab.decode(ids[:max_new])
 
-    def decode(self, windows: list[dict], mode: str = "chained", progress: Progress = _noop) -> list[str]:
-        history: list[str] = []
-        for j, w in enumerate(windows):
-            prompt = prompt_from_output(history) if (mode == "chained" and j) else []
-            out = self.decode_window(self.features(w), self.prefix(prompt))
-            history = stitch(history, out)
-            progress("score", (j + 1) / len(windows), f"window {j + 1} of {len(windows)}")
-        return history
+    def decode(self, windows: list[dict], mode: str = "guarded", progress: Progress = _noop,
+               guard_margin: float = GUARD_MARGIN) -> tuple[list[str], int]:
+        """Decode a piece window by window (see the module docstring for the modes). Returns the
+        stitched tokens and how many windows guarded mode replaced by their no-context output."""
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
+
+        def decode(ws, contexts):
+            return [self.decode_window(self.features(w), self.prefix(c)) for w, c in zip(ws, contexts)]
+
+        _, history, fallbacks = decode_pieces(
+            {0: windows}, decode,
+            contiguous=(lambda prev, w: mode != "none"),
+            guard_margin=guard_margin if mode == "guarded" else None,
+            pitches=lambda w: w["notes"][:, 0].tolist(),
+            progress=lambda j, total: progress("score", j / total, f"window {j} of {total}"))
+        return history[0], len(fallbacks)
 
     # ------------------------------------------------------------------ all of it
-    def run(self, src: str | Path, out_dir: str | Path, mode: str = "chained",
-            progress: Progress = _noop) -> Result:
+    def run(self, src: str | Path, out_dir: str | Path, mode: str = "guarded",
+            progress: Progress = _noop, guard_margin: float = GUARD_MARGIN) -> Result:
         src, out = Path(src), Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         timing, files = {}, {}
@@ -189,7 +189,7 @@ class ScorePipeline:
         windows = performance_windows(notes, pedal, self.window_notes)
         progress("score", 0.0, f"window 0 of {len(windows)}")
         t = time.perf_counter()
-        tokens = self.decode(windows, mode, progress)
+        tokens, n_fallback = self.decode(windows, mode, progress, guard_margin)
         timing["score_s"] = round(time.perf_counter() - t, 1)
         (out / "tokens.txt").write_text(" ".join(tokens))
         files["tokens"] = out / "tokens.txt"
@@ -212,7 +212,7 @@ class ScorePipeline:
 
         dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())
         res.stats = {**self.info, "mode": mode, "duration_s": round(dur, 1), "notes": int(len(notes)),
-                     "pedal_presses": int(len(pedal)), "windows": len(windows),
+                     "pedal_presses": int(len(pedal)), "windows": len(windows), "guard_fallbacks": n_fallback,
                      "bars": tokens.count("bar"), "tokens": len(tokens), **timing}
         (out / "result.json").write_text(json.dumps({"stats": res.stats, "errors": res.errors,
                                                      "files": {k: str(v) for k, v in files.items()}}, indent=1))

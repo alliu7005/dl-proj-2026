@@ -19,7 +19,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.evaluate_pieces import stitch  # noqa: E402
+from src.decoding import stitch  # noqa: E402
 from src.dataset import ScoreSegmentDataset, collate  # noqa: E402
 from src.model import token_loss  # noqa: E402
 from src.preprocessing.segment import prompt_from_output  # noqa: E402

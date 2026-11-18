@@ -1,4 +1,4 @@
-"""Evaluate a checkpoint (Scoreformer or Score2Seq) on the test sets, with three prompt modes.
+"""Evaluate a checkpoint (Scoreformer or Score2Seq) on the test sets, with four context modes.
 
     python scripts/evaluate_pieces.py --run sf_base                     # all conditions, all modes
     python scripts/evaluate_pieces.py --run sf_base --modes chained --conditions periscope --musicxml 5
@@ -18,6 +18,7 @@ Prompt modes (the decoder's context before each window):
            (by more than --guard-margin pitch F1) with the window's INPUT notes, which are known at
            inference. The kept output is also the next window's history, so one degenerate window
            (no notes, or a loop) no longer derails the windows after it.
+Chained and guarded decoding are src/decoding.py.decode_pieces, the same code the demo runs.
 All modes score every window against its ground-truth target with src/eval/metrics.py, so the
 numbers are comparable with each other and with scripts/run_baselines.py. A window whose
 predecessor was dropped by preprocessing starts without a prompt in chained mode.
@@ -36,7 +37,7 @@ import argparse
 import json
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -45,42 +46,15 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import SHOW, TruncatingCollate, lower_priority, pick_device  # noqa: E402
 from src.dataset import ScoreSegmentDataset  # noqa: E402
+from src.decoding import decode_pieces, input_agreement, max_new_tokens, pedal_down, stitch  # noqa: E402,F401
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
-from src.preprocessing.segment import prompt_from_output  # noqa: E402
 from src.preprocessing.vocab import BOS, EOS, SEP  # noqa: E402
 from src.scoreformer import load_model  # noqa: E402
 
 D = Path("data/processed")
 SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed",
           "real_kong": "test_transcribed_kong", "periscope": "test_periscope"}
-
-
-def pedal_down(tokens: list[str]) -> bool:
-    for t in reversed(tokens):
-        if t in ("ped_on", "ped_off"):
-            return t == "ped_on"
-    return False
-
-
-def stitch(history: list[str], window: list[str]) -> list[str]:
-    """Append a window's tokens to the piece so far, dropping the window's opening ``ped_on`` if
-    the pedal is already down (the only cleanup consecutive windows need, see README)."""
-    if pedal_down(history):
-        first = next((k for k, t in enumerate(window) if t.startswith("ped_")), None)
-        if first is not None and window[first] == "ped_on":
-            window = window[:first] + window[first + 1:]
-    return history + window
-
-
-def input_agreement(notes: torch.Tensor, tokens: list[str]) -> float:
-    """Pitch F1 between a window's input notes (feature 0 = MIDI pitch, unscaled) and the pitches
-    of a decoded output. Computable at inference; a degenerate output (no notes, a loop) scores low."""
-    a = Counter(int(round(float(x))) for x in notes[:, 0].tolist())
-    b = Counter(int(t[2:]) for t in tokens if t.startswith("p_"))
-    tp = sum((a & b).values())
-    n = sum(a.values()) + sum(b.values())
-    return 2 * tp / n if n else 1.0
 
 
 def write_xml(tokens: list[str], path: Path) -> str:
@@ -112,11 +86,16 @@ class Decoder:
         for k in range(0, len(order), self.bs):
             idx = order[k:k + self.bs]
             b = self.coll([dict(items[i]) for i in idx])
+            # per-window output budgets (the same as the demo's); greedy decoding is independent per
+            # window, so decoding to the batch's largest budget and cutting each output to its own
+            # equals decoding each window with its own budget
+            caps = [max_new_tokens(min(len(items[i]["notes"]), self.coll.max_notes), len(prefixes[i]),
+                                   self.max_new) for i in idx]
             with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
                 preds = self.model.generate(b["notes"].to(self.device), b["note_mask"].to(self.device),
-                                            [prefixes[i] for i in idx], self.eos, max_new=self.max_new)
-            for i, p in zip(idx, preds):
-                res[i] = self.vocab.decode(p)
+                                            [prefixes[i] for i in idx], self.eos, max_new=max(caps))
+            for i, p, cap in zip(idx, preds, caps):
+                res[i] = self.vocab.decode(list(p)[:cap])
         out.extend(res)
         return out
 
@@ -125,7 +104,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
     ap.add_argument("--ckpt", default="best.pt")
-    ap.add_argument("--modes", default="oracle,chained,none")
+    ap.add_argument("--modes", default="oracle,chained,none,guarded")
     ap.add_argument("--conditions", default="clean,synthetic,real,real_kong,periscope")
     ap.add_argument("--limit-perfs", type=int, default=0, help="performances per condition (0 = all)")
     ap.add_argument("--musicxml", type=int, default=0, help="write MusicXML for the first N pieces (chained)")
@@ -188,37 +167,27 @@ def main():
             preds.update({("none", i): o for i, o in zip(windows, out)})
             print(f"{cond}: none done", flush=True)
         pieces, fallback = {}, {}
+        meta = ds.store.meta
+
+        def contiguous(prev, i):  # the window starts where the previous one ended (none was dropped)
+            return meta[prev].get("s_hi") is not None and meta[prev]["s_hi"] == meta[i].get("s_lo")
+
+        def decode(ws, contexts):
+            return dec([items[i] for i in ws], [dec.prefix(c) for c in contexts])
+
         for cmode in [m for m in ("chained", "guarded") if m in modes]:
-            history = {p: [] for p in names}
-            n_fb = 0
-            for j in range(max(len(perfs[p]) for p in names)):
-                step = [(p, perfs[p][j]) for p in names if j < len(perfs[p])]
-                prefixes = []
-                for p, i in step:
-                    prev = perfs[p][j - 1] if j else None
-                    contiguous = (prev is not None and ds.store.meta[prev].get("s_hi") is not None
-                                  and ds.store.meta[prev]["s_hi"] == ds.store.meta[i].get("s_lo"))
-                    prefixes.append(dec.prefix(prompt_from_output(history[p]) if contiguous else []))
-                out = dec([items[i] for _, i in step], prefixes)
-                if cmode == "guarded":  # no-prompt outputs: reuse "none" mode's if it was decoded
-                    alone = [preds.get(("none", i)) for _, i in step]
-                    todo = [k for k, a in enumerate(alone) if a is None]
-                    if todo:
-                        for k, o in zip(todo, dec([items[step[k][1]] for k in todo],
-                                                  [dec.prefix([]) for _ in todo])):
-                            alone[k] = o
-                    for k, (_, i) in enumerate(step):
-                        x = items[i]["notes"]
-                        if input_agreement(x, alone[k]) > input_agreement(x, out[k]) + args.guard_margin:
-                            out[k] = alone[k]
-                            n_fb += 1
-                for (p, i), o in zip(step, out):
-                    preds[(cmode, i)] = o
-                    history[p] = stitch(history[p], o)
-                print(f"{cond}: {cmode} window {j + 1}", end="\r", flush=True)
-            if cmode == "guarded":
-                fallback[cond] = n_fb / len(windows)
-                print(f"{cond}: guarded done, {fallback[cond]:.1%} of windows fell back to no prompt", flush=True)
+            guarded = cmode == "guarded"
+            outs, history, fbs = decode_pieces(
+                {p: perfs[p] for p in names}, decode, contiguous=contiguous,
+                guard_margin=args.guard_margin if guarded else None,
+                pitches=lambda i: items[i]["notes"][:, 0].tolist(),
+                alone={(p, j): preds[("none", i)] for p in names for j, i in enumerate(perfs[p])
+                       if ("none", i) in preds} if guarded else None,
+                progress=lambda j, n: print(f"{cond}: {cmode} window {j}/{n}", end="\r", flush=True))
+            preds.update({(cmode, perfs[p][j]): o for (p, j), o in outs.items()})
+            if guarded:
+                fallback[cond] = len(fbs) / len(windows)
+                print(f"{cond}: guarded done, {fallback[cond]:.1%} of windows fell back to no prompt   ", flush=True)
             else:
                 print(f"{cond}: chained done                ", flush=True)
             if cmode == "chained" or not pieces:

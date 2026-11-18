@@ -20,7 +20,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.evaluate_pieces import SPLITS, stitch  # noqa: E402
+from scripts.evaluate_pieces import SPLITS  # noqa: E402
+from src.decoding import stitch  # noqa: E402
 from src.preprocessing.segment import prompt_from_output  # noqa: E402
 from src.preprocessing.store import SegmentStore  # noqa: E402
 from src.preprocessing.vocab import Vocab  # noqa: E402

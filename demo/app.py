@@ -26,7 +26,7 @@ import uvicorn  # noqa: E402
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 
-from src.pipeline import AUDIO_EXT, MIDI_EXT, ScorePipeline  # noqa: E402
+from src.pipeline import AUDIO_EXT, MIDI_EXT, MODES, ScorePipeline  # noqa: E402
 
 MAX_MB = 100
 STAGES = {"transcribe": (0.0, 0.45), "score": (0.45, 0.95), "engrave": (0.95, 1.0)}
@@ -76,12 +76,12 @@ def create_app(pipe: ScorePipeline, out_root: Path) -> FastAPI:
         return {**pipe.info, "audio": sorted(AUDIO_EXT), "midi": sorted(MIDI_EXT), "max_mb": MAX_MB}
 
     @app.post("/api/jobs")
-    async def submit(file: UploadFile = File(...), mode: str = Form("chained")):
+    async def submit(file: UploadFile = File(...), mode: str = Form("guarded")):
         ext = Path(file.filename or "").suffix.lower()
         if ext not in AUDIO_EXT | MIDI_EXT:
             raise HTTPException(400, f"unsupported file type {ext or '(none)'}; use audio or .mid")
-        if mode not in ("chained", "none"):
-            raise HTTPException(400, "mode must be 'chained' or 'none'")
+        if mode not in MODES:
+            raise HTTPException(400, f"mode must be one of {', '.join(MODES)}")
         data = await file.read()
         if len(data) > MAX_MB * 2**20:
             raise HTTPException(413, f"file larger than {MAX_MB} MB")

@@ -108,7 +108,8 @@
     <div class="options">
       <span>Context between windows</span>
       <div class="seg">
-        <label title="Each window is prompted with the model's own previous output (how the system is evaluated)"><input type="radio" name="mode" value="chained" checked><span>Previous output</span></label>
+        <label title="The model's own previous output, but a window that clearly disagrees with its notes is redone without context, so one bad window cannot derail the rest"><input type="radio" name="mode" value="guarded" checked><span>Guarded</span></label>
+        <label title="The model's own previous output, unguarded"><input type="radio" name="mode" value="chained"><span>Previous output</span></label>
         <label title="Every window is decoded on its own"><input type="radio" name="mode" value="none"><span>None</span></label>
       </div>
       <span>Short clips (30–90 s) are best on a CPU.</span>
@@ -256,6 +257,10 @@ function showResult(id, job) {
   ];
   if (s.transcribe_s != null) items.push([fmtTime(s.transcribe_s), 'transcription']);
   items.push([fmtTime(s.score_s || 0), 'score model']);
+  if (s.mode === 'guarded') {
+    const n = s.guard_fallbacks ?? 0;
+    items.push([n, `${n === 1 ? 'window' : 'windows'} redone without context`]);
+  }
   $('#stats').innerHTML = items.map(([v, l]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
 
   const base = `/api/jobs/${id}/files/`;
