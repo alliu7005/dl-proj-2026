@@ -1,13 +1,17 @@
 """Rebuild the MusicXML of an evaluation from its saved predictions (no GPU, no decoding).
 
-    python scripts/export_musicxml.py --run sf_base                 # first 5 pieces per condition
-    python scripts/export_musicxml.py --run sf_base --n 20 --conditions periscope --mode none
+    python scripts/export_musicxml.py --run s2s                     # first 5 pieces per condition
+    python scripts/export_musicxml.py --run s2s --n 20 --conditions periscope --mode chained
 
 Reads outputs/runs/<run>/pred_pieces_<ckpt>_<condition>.jsonl (written by evaluate_pieces.py),
 stitches each piece's windows in order exactly as evaluate_pieces.py does, and writes
-musicxml/<condition>/<piece>_{pred,true}.musicxml. Pieces are taken in the same sorted order as
-evaluate_pieces.py --musicxml N, so this regenerates (and overwrites) the same files, e.g. after
-a fix to src/preprocessing/detokenize.py.
+musicxml/<condition>/<piece>_true.musicxml plus the prediction:
+  --mode auto (default)  guarded if it was evaluated, else chained -> <piece>_pred.musicxml, the
+                         same file evaluate_pieces.py --musicxml N writes (regenerated, e.g. after a
+                         fix to src/preprocessing/detokenize.py)
+  --mode guarded / chained / oracle / none  -> <piece>_pred_<mode>.musicxml, so modes can be
+                         compared side by side
+Pieces are taken in the same sorted order as evaluate_pieces.py --musicxml N.
 """
 from __future__ import annotations
 
@@ -32,7 +36,7 @@ def main():
     ap.add_argument("--run", required=True)
     ap.add_argument("--ckpt", default="best", help="checkpoint stem in the file names (best, last)")
     ap.add_argument("--conditions", default="clean,synthetic,real,real_kong,periscope")
-    ap.add_argument("--mode", default="chained", choices=["chained", "oracle", "none"])
+    ap.add_argument("--mode", default="auto", choices=["auto", "guarded", "chained", "oracle", "none"])
     ap.add_argument("--n", type=int, default=5, help="pieces per condition (0 = all)")
     args = ap.parse_args()
     run = Path("outputs/runs") / args.run
@@ -43,14 +47,18 @@ def main():
         if not pred_file.exists():
             print(f"skip {cond}: {pred_file} not found")
             continue
-        preds = defaultdict(dict)  # performance -> win -> tokens
+        by_mode = defaultdict(lambda: defaultdict(dict))  # mode -> performance -> win -> tokens
         for line in open(pred_file):
             r = json.loads(line)
-            if r["mode"] == args.mode:
-                preds[r["performance"]][r["win"]] = r["pred"]
+            by_mode[r["mode"]][r["performance"]][r["win"]] = r["pred"]
+        mode = args.mode
+        if mode == "auto":
+            mode = "guarded" if "guarded" in by_mode else "chained"
+        preds = by_mode.get(mode, {})
         if not preds:
-            print(f"skip {cond}: no {args.mode} predictions in {pred_file.name}")
+            print(f"skip {cond}: no {mode} predictions in {pred_file.name} (has: {', '.join(sorted(by_mode))})")
             continue
+        suffix = "pred" if args.mode == "auto" else f"pred_{mode}"
         store = SegmentStore(D / SPLITS[cond])
         truth = defaultdict(dict)
         for i, m in enumerate(store.meta):
@@ -65,11 +73,11 @@ def main():
                 true = stitch(true, truth[p].get(w, []))
             slug = re.sub(r"[^A-Za-z0-9_-]+", "_", p.rsplit(".", 1)[0])
             d = run / "musicxml" / cond
-            a = write_xml(pred, d / f"{slug}_pred.musicxml")
+            a = write_xml(pred, d / f"{slug}_{suffix}.musicxml")
             b = write_xml(true, d / f"{slug}_true.musicxml")
             ok += a == "ok"
-            print(f"  {cond}/{slug}: pred {a}, true {b}", flush=True)
-        print(f"{cond}: {ok}/{len(names)} predicted scores written")
+            print(f"  {cond}/{slug}: {mode} {a}, true {b}", flush=True)
+        print(f"{cond}: {ok}/{len(names)} predicted scores written ({mode} mode -> *_{suffix}.musicxml)")
 
 
 if __name__ == "__main__":

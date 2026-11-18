@@ -29,7 +29,8 @@ Outputs in outputs/runs/<run>/ (modes already in these files from an earlier run
 ``--modes guarded`` adds to a full evaluation instead of replacing it):
   eval_pieces_<ckpt>.json                      metrics[condition][mode]
   pred_pieces_<ckpt>_<condition>.jsonl         per window and mode: performance, win, mode, pred tokens
-  musicxml/<condition>/<performance>_{pred,true}.musicxml   (--musicxml N: first N pieces, chained mode)
+  musicxml/<condition>/<performance>_{pred,true}.musicxml   (--musicxml N: first N pieces, guarded mode
+                                               if it is run, else chained)
 """
 from __future__ import annotations
 
@@ -190,8 +191,8 @@ def main():
                 print(f"{cond}: guarded done, {fallback[cond]:.1%} of windows fell back to no prompt   ", flush=True)
             else:
                 print(f"{cond}: chained done                ", flush=True)
-            if cmode == "chained" or not pieces:
-                pieces = history  # MusicXML from chained mode (guarded if chained was not run)
+            if guarded or "guarded" not in modes:
+                pieces = history  # MusicXML from guarded mode (the system's), else chained
 
         res = {}
         for mode in modes:
