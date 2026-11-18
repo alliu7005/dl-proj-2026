@@ -4,6 +4,7 @@
     python scripts/train_model.py --name sf_base --resume              # continue after Ctrl+C / crash
     python scripts/train_model.py --name sf_clean --no-noise           # clean-input ablation
     python scripts/train_model.py --name s2s --arch score2seq          # Michael's model, same loop
+    python scripts/train_model.py --name s2s_ctx --arch score2seq --context-noise 0.5   # imperfect context
 
 Same data, batching and noise as scripts/train.py (it reuses that script's helpers), so the only
 difference between two runs is what you change on the command line. Differences from train.py:
@@ -32,7 +33,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import (SHOW, TokenBudgetBatches, TruncatingCollate, lower_priority,  # noqa: E402
                            pick_device, store_lengths)
-from src.dataset import AugmentConfig, MixedTrainDataset, ScoreSegmentDataset  # noqa: E402
+from src.dataset import AugmentConfig, ContextNoise, MixedTrainDataset, ScoreSegmentDataset  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.model import token_loss  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
@@ -131,6 +132,9 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=2048)
     ap.add_argument("--no-noise", action="store_true", help="clean inputs only (no synthetic noise, no real transcriptions)")
     ap.add_argument("--noise", default="configs/noise_stats.json")
+    ap.add_argument("--context-noise", type=float, default=0.0,
+                    help="fraction of training windows whose context (prompt) is corrupted with the kind of "
+                         "errors a model's own previous output contains (src.dataset.ContextNoise); 0 = off")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--eval-every", type=int, default=2000)
     ap.add_argument("--eval-loss-windows", type=int, default=400)
@@ -157,8 +161,9 @@ def main():
 
     # ---- data (same recipe as scripts/train.py)
     real_ok = has_split("train_transcribed")
+    ctx = ContextNoise(prob=args.context_noise) if args.context_noise > 0 else None
     if args.no_noise:
-        train = ScoreSegmentDataset(str(D / "train"), vocab_path, augment=AugmentConfig())
+        train = ScoreSegmentDataset(str(D / "train"), vocab_path, augment=AugmentConfig(), context_noise=ctx)
         clean_idx = [i for i, m in enumerate(train.store.meta) if m.get("source", "clean") == "clean"]
         w = np.zeros(len(train))
         w[clean_idx] = train.weights[clean_idx]
@@ -168,7 +173,7 @@ def main():
     elif real_ok:
         nm = NoiseModel.from_json(args.noise)
         train = MixedTrainDataset(str(D / "train"), str(D / "train_transcribed"), vocab_path, noise=nm,
-                                  augment=AugmentConfig(), real_fraction=0.0)
+                                  augment=AugmentConfig(), real_fraction=0.0, context_noise=ctx)
         train.real_fraction = len(train.real) / len(train)  # natural proportion
         sampler = train.sampler()
         a, b = store_lengths(train.synthetic.store, args.max_notes, args.max_tokens)
@@ -177,7 +182,7 @@ def main():
     else:
         print("note: no data/processed/train_transcribed, training on `train` only", flush=True)
         train = ScoreSegmentDataset(str(D / "train"), vocab_path, noise=NoiseModel.from_json(args.noise),
-                                    augment=AugmentConfig())
+                                    augment=AugmentConfig(), context_noise=ctx)
         sampler = train.sampler()
         tok_len, note_len = store_lengths(train.store, args.max_notes, args.max_tokens)
     vocab = train.vocab

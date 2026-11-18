@@ -19,6 +19,7 @@ Train only on target tokens: ``collate`` returns ``loss_mask`` for that.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -117,14 +118,125 @@ class _Transposer:
         return out
 
 
+@dataclass
+class ContextNoise:
+    """Training-time corruption of the context (prompt), so the model learns not to trust it
+    blindly. At inference the context is the model's own output for the previous window, and its
+    mistakes carry over: in chained evaluation every model scored below decoding with no context
+    at all. ``prob`` is the fraction of training windows (with a context) that get corrupted; each
+    corrupted context gets one or more of the errors below (at least one)."""
+    prob: float = 0.0
+    ts: float = 0.25           # wrong time signature (one of the common ones)
+    shift: float = 0.35        # every position moved by 1-2 quarter notes (misplaced bar phase)
+    drop_leading: float = 0.2  # bar line placed too late: the first positions of the fragment are gone
+    drop_notes: float = 0.35   # notes deleted, each with probability ``note_p``
+    durations: float = 0.3     # written durations replaced, each with probability ``note_p``
+    staff: float = 0.15        # staff changes flipped (0 <-> 1), each with probability 1/2
+    note_p: float = 0.2
+
+
+_NOTE_ATTR = ("d_", "tie", "arp", "orn_", "grace")
+
+
+class _ContextCorrupter:
+    """Applies ``ContextNoise`` to a context given as token ids (``bar [ts] [key]`` then position
+    groups ``pos_k [sub_x] ([staff_s] p_n d_x|grace [tie] [arp] [orn_*])...``, no pedal). Every
+    output token is in the vocabulary; empty position groups are removed, as in
+    ``segment.prompt_from_output``, so corrupted contexts look like real model output."""
+
+    def __init__(self, vocab: Vocab, cfg: ContextNoise):
+        self.cfg, self.itos, self.stoi = cfg, vocab.itos, vocab.stoi
+        counts = vocab.counts or {}
+
+        def common(prefix, n):
+            toks = [t for t in vocab.itos if t.startswith(prefix)]
+            return sorted(toks, key=lambda t: -counts.get(t, 0))[:n]
+        self.ts_choices = common("ts_", 8)       # 4/4 6/8 3/4 2/4 12/8 2/2 3/8 4/2 on our data
+        self.dur_choices = common("d_", 12)
+        self.max_pos = max(int(t[4:]) for t in vocab.itos if t.startswith("pos_"))
+
+    def _pick(self, rng, choices, avoid):
+        c = [x for x in choices if x != avoid]
+        return c[int(rng.integers(len(c)))] if c else avoid
+
+    def __call__(self, ids: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+        for _ in range(4):  # retry the rare draw that leaves the context unchanged
+            out = self._corrupt(ids, rng)
+            if not np.array_equal(out, ids):
+                return out
+        return out
+
+    def _bar_positions(self, head: list[str]) -> int:
+        """Highest whole-quarter position inside the bar (from the context's time signature)."""
+        ts = next((t[3:] for t in head if t.startswith("ts_")), "4/4")
+        try:
+            n, d = (int(x) for x in ts.split("/"))
+            return max(0, min(self.max_pos, math.ceil(n * 4 / d) - 1))
+        except (ValueError, ZeroDivisionError):
+            return 3
+
+    def _corrupt(self, ids: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+        c = self.cfg
+        toks = [self.itos[i] for i in ids]
+        k = next((j for j, t in enumerate(toks) if t.startswith("pos_")), len(toks))
+        head, groups = toks[:k], []
+        for t in toks[k:]:
+            if t.startswith("pos_") or not groups:
+                groups.append([])
+            groups[-1].append(t)
+        ops = [op for op, p in (("ts", c.ts), ("shift", c.shift), ("drop_leading", c.drop_leading),
+                                ("drop_notes", c.drop_notes), ("durations", c.durations),
+                                ("staff", c.staff)) if rng.random() < p]
+        if not ops:
+            ops = ["shift"]
+        # positions stay inside the (true) bar, or within the fragment's own range for the few
+        # scores whose bars hold more than their time signature (cadenzas)
+        top = max([self._bar_positions(head)] + [int(t[4:]) for t in toks[k:] if t.startswith("pos_")])
+        if "ts" in ops:
+            head = [self._pick(rng, self.ts_choices, t) if t.startswith("ts_") else t for t in head]
+        if "drop_leading" in ops and len(groups) >= 2:
+            groups = groups[int(rng.integers(1, len(groups) // 2 + 1)):]
+        if "shift" in ops:
+            pos = [int(t[4:]) for g in groups for t in g if t.startswith("pos_")]
+            d = int(rng.choice([-2, -1, 1, 2]))
+            if pos and (min(pos) + d < 0 or max(pos) + d > top):
+                d = -d  # the other direction, so the shift is not clipped away
+            groups = [[f"pos_{min(max(int(t[4:]) + d, 0), top)}" if t.startswith("pos_") else t
+                       for t in g] for g in groups]
+        if "drop_notes" in ops:
+            kept = []
+            for g in groups:
+                out, skip = [], False
+                for t in g:
+                    if t.startswith("p_"):
+                        skip = rng.random() < c.note_p
+                    elif not t.startswith(_NOTE_ATTR):
+                        skip = False
+                    if not skip:
+                        out.append(t)
+                kept.append(out)
+            groups = kept
+        if "durations" in ops:
+            groups = [[self._pick(rng, self.dur_choices, t) if t.startswith("d_") and rng.random() < c.note_p
+                       else t for t in g] for g in groups]
+        if "staff" in ops:
+            flip = {"staff_0": "staff_1", "staff_1": "staff_0"}
+            groups = [[flip[t] if t in flip and rng.random() < 0.5 else t for t in g] for g in groups]
+        body = [t for g in groups if any(x.startswith("p_") for x in g) for t in g]
+        return np.asarray([self.stoi[t] for t in head + body], dtype=ids.dtype)
+
+
 class ScoreSegmentDataset(Dataset):
     def __init__(self, split_dir: str, vocab_path: str, noise: NoiseModel | None = None,
                  seed: int = 0, ornament_oversample: float = 3.0, augment: AugmentConfig | None = None,
-                 use_prompt: bool = True, prompt_dropout: float = 0.1, feature_stats: str | None = "auto"):
+                 use_prompt: bool = True, prompt_dropout: float = 0.1, feature_stats: str | None = "auto",
+                 context_noise: ContextNoise | None = None):
         """``prompt_dropout``: chance (when training, i.e. with noise or augmentation) of hiding the
         prompt, so the model also works without context (first window of a piece, or after a bad
         window). ``feature_stats``: JSON from ``compute_feature_stats`` (written by build_dataset.py
-        next to vocab.json; "auto" = use it if present, None = leave features unscaled)."""
+        next to vocab.json; "auto" = use it if present, None = leave features unscaled).
+        ``context_noise``: corrupt the prompt of this fraction of training windows (see
+        ``ContextNoise``); like prompt dropout, only when training."""
         self.store = SegmentStore(split_dir)
         self.vocab = Vocab.load(vocab_path)
         self.noise = noise
@@ -133,6 +245,8 @@ class ScoreSegmentDataset(Dataset):
         self.seed = seed
         self.epoch = 0
         self.use_prompt, self.prompt_dropout = use_prompt, prompt_dropout
+        self.context_noise = context_noise if context_noise and context_noise.prob > 0 else None
+        self._ctx = _ContextCorrupter(self.vocab, context_noise) if self.context_noise else None
         if feature_stats == "auto":
             auto = Path(vocab_path).with_name("feature_stats.json")
             feature_stats = str(auto) if auto.exists() else None
@@ -194,8 +308,14 @@ class ScoreSegmentDataset(Dataset):
         # synthetic noise only on clean performances: real transcriptions are noisy already
         if self.noise is not None and self.store.meta[i].get("source", "clean") == "clean":
             notes, pedal = self.noise(notes, pedal, rng)
-        if (self.noise is not None or self.augment is not None) and rng.random() < self.prompt_dropout:
+        training = self.noise is not None or self.augment is not None
+        if training and rng.random() < self.prompt_dropout:
             prompt = prompt[:0]
+        if training and self._ctx is not None and len(prompt):
+            # separate stream: with context noise off, every other random draw is unchanged
+            crng = np.random.default_rng((self.seed, self.epoch, i, 7))
+            if crng.random() < self.context_noise.prob:
+                prompt = self._ctx(prompt, crng)
         min_end = self.store.meta[i].get("carry_min_sec")
         notes = drop_released_carried(notes, None if min_end is None else min_end * tempo)
         head = np.concatenate([[self.bos], prompt, [self.sep]]) if len(prompt) else np.array([self.bos])
@@ -243,11 +363,13 @@ class MixedTrainDataset(Dataset):
 
     def __init__(self, clean_dir: str, real_dir: str, vocab_path: str, noise: NoiseModel | None,
                  augment: AugmentConfig | None = None, real_fraction: float = 0.3, seed: int = 0,
-                 ornament_oversample: float = 3.0):
+                 ornament_oversample: float = 3.0, context_noise: ContextNoise | None = None):
         self.synthetic = ScoreSegmentDataset(clean_dir, vocab_path, noise=noise, augment=augment,
-                                             seed=seed, ornament_oversample=ornament_oversample)
+                                             seed=seed, ornament_oversample=ornament_oversample,
+                                             context_noise=context_noise)
         self.real = ScoreSegmentDataset(real_dir, vocab_path, noise=None, augment=augment,
-                                        seed=seed + 1, ornament_oversample=ornament_oversample)
+                                        seed=seed + 1, ornament_oversample=ornament_oversample,
+                                        context_noise=context_noise)
         self.vocab = self.synthetic.vocab
         self.real_fraction = real_fraction
         self.n_syn = len(self.synthetic)

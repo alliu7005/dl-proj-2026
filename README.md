@@ -496,6 +496,15 @@ from the training prompts (the old test compared them by meaning, not token by t
 positions are now dropped; `tests/test_scoreformer.py` checks all 3,631 val/test prompts are
 identical token for token.
 
+**Context noise** (`--context-noise P`, `src.dataset.ContextNoise`): in chained evaluation every
+model scored below decoding each window with no context at all (Score2Seq, clean: onset F1 0.14
+chained vs 0.19 without context), because training only ever shows the correct context. With
+`--context-noise 0.5`, half of the training windows that have a context get it corrupted with the
+mistakes a model's own previous output makes: a wrong time signature, all positions shifted by
+1-2 quarter notes, the first positions missing (bar line placed late), deleted notes, wrong
+durations, flipped staff. Targets and note inputs are never changed, and with the flag off the data
+is identical to before (`python -m tests.test_context_noise`).
+
 ## Demo: audio in, score out
 
 A small web app runs the whole system on one recording: Transkun V2 transcribes the audio, the

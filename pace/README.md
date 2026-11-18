@@ -74,6 +74,23 @@ lowercase (`sinfo -o "%G" | sort -u` lists them): `h100`, `h200`, `rtx_pro_6000_
 often the shortest queue), `a100`, `l40s`. Avoid `v100` (no bf16, the scripts fall back to slower
 fp32) and `mi210` / `r9700` (AMD GPUs, the CUDA build of torch can't use them).
 
+## 4b. Post-milestone experiments
+
+```bash
+bash pace/overnight.sh          # 1 short CPU check + 4 GPU runs (Blackwell); GPU=h100 bash ... for another type
+```
+
+| run | what it tests | compare with |
+|---|---|---|
+| `sf_small` | time-based encoder at equal size (9.7M vs 10.2M), same recipe | `s2s` |
+| `s2s_ctx` | training with corrupted context (`--context-noise 0.5`) | `s2s` |
+| `sf_small_ctx` | both | `sf_small`, `s2s_ctx` |
+| `sf_base_reg` | 45M model: dropout 0.2, weight decay 0.1, lr 2e-4, 6 epochs | `sf_base` |
+
+`sf_base` overfit: its mean validation loss bottomed out at epoch 3-5 of 20 (0.275) and rose to
+0.317. Context noise targets the other milestone finding: in chained evaluation every model scored
+below decoding with no context at all, because training only ever showed it correct context.
+
 ## 5. Bring results back
 
 ```bash
