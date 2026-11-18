@@ -555,6 +555,69 @@ estimates guarded decoding offline from saved chained / none predictions for sev
 (conservatively: it cannot show the better contexts that follow a replaced window).
 `tests/test_decoding.py` checks the logic with a stand-in model.
 
+### Post-milestone results
+
+All runs trained with the same loop on the same PACE data (ASAP + PERiScoPe), each evaluated with
+`best.pt` on the 59 ASAP test performances (clean MIDI, and with the fixed synthetic noise draw) and
+on the PERiScoPe test transcriptions, with the per-window output cap; `pace/reevaluate.sh`.
+
+**Guarded decoding** beats chained decoding on note, onset and bar F1 for all 8 models on all 3 test
+sets (24 / 24), and beats decoding without context on onset F1 in 23 / 24 and bar F1 in 21 / 24:
+the model's own context now helps instead of hurting. It replaces 8-22% of windows (more on noisy
+input), more than the strictly degenerate ones: it works as a per-window choice between the two
+outputs, guided by agreement with the input notes.
+
+| s2s (10M) | note F1 | onset F1 | onset-shift F1 | duration acc | staff acc | bar F1 |
+|---|---|---|---|---|---|---|
+| clean, oracle (upper bound) | 0.901 | 0.559 | 0.615 | 0.870 | 0.937 | 0.896 |
+| clean, chained | 0.884 | 0.139 | 0.326 | 0.578 | 0.761 | 0.429 |
+| clean, none | 0.896 | 0.190 | 0.391 | 0.663 | 0.826 | 0.519 |
+| clean, **guarded** | **0.904** | 0.189 | **0.399** | **0.683** | **0.836** | 0.504 |
+| PERiScoPe, chained | 0.903 | 0.201 | 0.403 | 0.704 | 0.842 | 0.446 |
+| PERiScoPe, none | 0.922 | 0.225 | 0.426 | 0.718 | 0.843 | 0.501 |
+| PERiScoPe, **guarded** | **0.930** | **0.229** | **0.438** | **0.735** | **0.845** | **0.503** |
+
+**All models, guarded** (note F1 / onset F1 / bar F1):
+
+| run | params | clean | synthetic | PERiScoPe |
+|---|---|---|---|---|
+| s2s | 10M | 0.904 / 0.189 / 0.504 | 0.891 / 0.182 / **0.531** | 0.930 / **0.229** / **0.503** |
+| s2s_ctx (`--context-noise 0.5`) | 10M | **0.907 / 0.199 / 0.533** | **0.891 / 0.189** / 0.507 | **0.931 / 0.229** / 0.502 |
+| sf_small (6 decoder layers) | 9.7M | 0.897 / 0.179 / 0.463 | 0.878 / 0.156 / 0.451 | 0.925 / 0.212 / 0.478 |
+| sf_small_ctx | 9.7M | 0.902 / 0.162 / 0.453 | 0.882 / 0.146 / 0.448 | 0.928 / 0.221 / 0.491 |
+| sf_base | 44.6M | 0.869 / 0.163 / 0.468 | 0.849 / 0.149 / 0.431 | 0.912 / 0.208 / 0.493 |
+| sf_base_reg (dropout 0.2, wd 0.1, lr 2e-4, 6 ep) | 44.6M | 0.901 / 0.153 / 0.424 | 0.886 / 0.143 / 0.420 | 0.929 / 0.196 / 0.437 |
+| sf_base_e6 (original settings, 6 ep) | 44.6M | 0.884 / 0.194 / 0.480 | 0.862 / 0.172 / 0.452 | 0.917 / 0.219 / 0.519 |
+| sf_base_reg20 (regularized, 20 ep) | 44.6M | 0.899 / 0.161 / 0.437 | 0.882 / 0.137 / 0.424 | 0.925 / 0.191 / 0.420 |
+
+**Validation loss** (mean over ASAP and PERiScoPe validation sets):
+
+| run | best (epoch) | last (epoch) |
+|---|---|---|
+| s2s | 0.2781 (16) | 0.2796 (19) |
+| sf_small | 0.2659 (9) | 0.2726 (19) |
+| sf_base | 0.2754 (2) | 0.3172 (19) |
+| sf_base_e6 | 0.2742 (2) | 0.2834 (5) |
+| sf_base_reg | 0.2414 (4) | 0.2424 (5) |
+| sf_base_reg20 | 0.2408 (5) | 0.2616 (19) |
+
+What this shows:
+- **Regularization, not the shorter schedule, fixed most of the 45M model's overfitting.** With the
+  original settings, 6 epochs reach the same best loss as 20 (0.274 vs 0.275). Dropout 0.2, weight
+  decay 0.1 and learning rate 2e-4 bring it to 0.241 and halve the later climb (+0.021 over 14
+  epochs instead of +0.042 over 17), but the loss still rises after epoch 5. Early stopping, now
+  the default, keeps exactly that checkpoint (sf_base_reg20 predates it and trained all 20 epochs).
+- **H1 is not supported at equal size.** sf_small (9.7M) has a lower validation loss than s2s
+  (10.2M), but s2s decodes better in guarded mode on every test set. The Scoreformer variants match
+  Score2Seq when given the correct context (sf_base_reg has the best PERiScoPe oracle onset F1,
+  0.587) but fall behind without it (bar F1 0.41-0.45 with no context vs 0.52 for s2s): they lean
+  harder on the context to locate the bar.
+- **Context noise is mixed:** s2s_ctx is the best model on clean input, about equal to s2s on real
+  transcriptions, and it hurt sf_small on clean and synthetic input.
+- **The remaining gap is bar alignment.** Guarded onset F1 (~0.2) is far below oracle (~0.56), but
+  onset-shift F1 (~0.4) is twice onset F1: many windows get the rhythm right and place it at the
+  wrong point in the bar.
+
 ## Demo: audio in, score out
 
 A small web app runs the whole system on one recording: Transkun V2 transcribes the audio, the
