@@ -505,6 +505,15 @@ mistakes a model's own previous output makes: a wrong time signature, all positi
 durations, flipped staff. Targets and note inputs are never changed, and with the flag off the data
 is identical to before (`python -m tests.test_context_noise`).
 
+**Guarded chained decoding** (`evaluate_pieces.py --modes guarded`): `scripts/analyze_chained.py`
+showed the chained losses come from cascades. One degenerate window (no notes, or a loop far longer
+than its target) wrecks the next window's context, and pitch F1 after such a window drops to
+0.12-0.40 (degenerate windows on synthetic input: 0.6% for s2s, 21% for s2s_ctx, 57% for sf_base).
+Guarded mode also decodes every window without context and keeps that output when it agrees better
+with the window's input pitches (known at inference) by more than `--guard-margin`; the kept output
+becomes the next window's history. `scripts/simulate_guard.py` estimates it offline from saved
+chained/none predictions to choose the margin.
+
 ## Demo: audio in, score out
 
 A small web app runs the whole system on one recording: Transkun V2 transcribes the audio, the

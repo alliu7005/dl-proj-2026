@@ -3,6 +3,7 @@
     python scripts/evaluate_pieces.py --run sf_base                     # all conditions, all modes
     python scripts/evaluate_pieces.py --run sf_base --modes chained --conditions periscope --musicxml 5
     python scripts/evaluate_pieces.py --run base --limit-perfs 10       # Michael's run (scripts/train.py)
+    python scripts/evaluate_pieces.py --run s2s --modes guarded          # adds a mode to existing results
 
 Prompt modes (the decoder's context before each window):
   oracle   the ground-truth score just before the window (= scripts/evaluate.py and the training
@@ -12,13 +13,19 @@ Prompt modes (the decoder's context before each window):
            Errors (a wrong time signature, a missed bar line) carry into the next windows.
            This is the number to report as the system's performance.
   none     no prompt at all (each window decoded on its own).
+  guarded  chained, with a guard against cascades: every window is also decoded without a prompt,
+           and the no-prompt output replaces the chained one when it agrees clearly better
+           (by more than --guard-margin pitch F1) with the window's INPUT notes, which are known at
+           inference. The kept output is also the next window's history, so one degenerate window
+           (no notes, or a loop) no longer derails the windows after it.
 All modes score every window against its ground-truth target with src/eval/metrics.py, so the
 numbers are comparable with each other and with scripts/run_baselines.py. A window whose
 predecessor was dropped by preprocessing starts without a prompt in chained mode.
 
 Conditions (as in scripts/evaluate.py): clean, synthetic, real, real_kong, periscope.
 
-Outputs in outputs/runs/<run>/:
+Outputs in outputs/runs/<run>/ (modes already in these files from an earlier run are kept, so
+``--modes guarded`` adds to a full evaluation instead of replacing it):
   eval_pieces_<ckpt>.json                      metrics[condition][mode]
   pred_pieces_<ckpt>_<condition>.jsonl         per window and mode: performance, win, mode, pred tokens
   musicxml/<condition>/<performance>_{pred,true}.musicxml   (--musicxml N: first N pieces, chained mode)
@@ -29,7 +36,7 @@ import argparse
 import json
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +71,16 @@ def stitch(history: list[str], window: list[str]) -> list[str]:
         if first is not None and window[first] == "ped_on":
             window = window[:first] + window[first + 1:]
     return history + window
+
+
+def input_agreement(notes: torch.Tensor, tokens: list[str]) -> float:
+    """Pitch F1 between a window's input notes (feature 0 = MIDI pitch, unscaled) and the pitches
+    of a decoded output. Computable at inference; a degenerate output (no notes, a loop) scores low."""
+    a = Counter(int(round(float(x))) for x in notes[:, 0].tolist())
+    b = Counter(int(t[2:]) for t in tokens if t.startswith("p_"))
+    tp = sum((a & b).values())
+    n = sum(a.values()) + sum(b.values())
+    return 2 * tp / n if n else 1.0
 
 
 def write_xml(tokens: list[str], path: Path) -> str:
@@ -112,6 +129,8 @@ def main():
     ap.add_argument("--conditions", default="clean,synthetic,real,real_kong,periscope")
     ap.add_argument("--limit-perfs", type=int, default=0, help="performances per condition (0 = all)")
     ap.add_argument("--musicxml", type=int, default=0, help="write MusicXML for the first N pieces (chained)")
+    ap.add_argument("--guard-margin", type=float, default=0.05,
+                    help="guarded mode: use the no-prompt output if its input agreement is higher by more than this")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--normal-priority", action="store_true")
@@ -168,9 +187,10 @@ def main():
             out = dec([items[i] for i in windows], [dec.prefix([]) for _ in windows])
             preds.update({("none", i): o for i, o in zip(windows, out)})
             print(f"{cond}: none done", flush=True)
-        pieces = {}
-        if "chained" in modes:
+        pieces, fallback = {}, {}
+        for cmode in [m for m in ("chained", "guarded") if m in modes]:
             history = {p: [] for p in names}
+            n_fb = 0
             for j in range(max(len(perfs[p]) for p in names)):
                 step = [(p, perfs[p][j]) for p in names if j < len(perfs[p])]
                 prefixes = []
@@ -180,12 +200,29 @@ def main():
                                   and ds.store.meta[prev]["s_hi"] == ds.store.meta[i].get("s_lo"))
                     prefixes.append(dec.prefix(prompt_from_output(history[p]) if contiguous else []))
                 out = dec([items[i] for _, i in step], prefixes)
+                if cmode == "guarded":  # no-prompt outputs: reuse "none" mode's if it was decoded
+                    alone = [preds.get(("none", i)) for _, i in step]
+                    todo = [k for k, a in enumerate(alone) if a is None]
+                    if todo:
+                        for k, o in zip(todo, dec([items[step[k][1]] for k in todo],
+                                                  [dec.prefix([]) for _ in todo])):
+                            alone[k] = o
+                    for k, (_, i) in enumerate(step):
+                        x = items[i]["notes"]
+                        if input_agreement(x, alone[k]) > input_agreement(x, out[k]) + args.guard_margin:
+                            out[k] = alone[k]
+                            n_fb += 1
                 for (p, i), o in zip(step, out):
-                    preds[("chained", i)] = o
+                    preds[(cmode, i)] = o
                     history[p] = stitch(history[p], o)
-                print(f"{cond}: chained window {j + 1}", end="\r", flush=True)
-            pieces = history
-            print(f"{cond}: chained done                ", flush=True)
+                print(f"{cond}: {cmode} window {j + 1}", end="\r", flush=True)
+            if cmode == "guarded":
+                fallback[cond] = n_fb / len(windows)
+                print(f"{cond}: guarded done, {fallback[cond]:.1%} of windows fell back to no prompt", flush=True)
+            else:
+                print(f"{cond}: chained done                ", flush=True)
+            if cmode == "chained" or not pieces:
+                pieces = history  # MusicXML from chained mode (guarded if chained was not run)
 
         res = {}
         for mode in modes:
@@ -195,10 +232,17 @@ def main():
                 if cond == "real" and ds.store.meta[i].get("maestro_split") != "train":
                     acc_unseen.add(gt[i], preds[(mode, i)])
             res[mode] = acc.result()
+            if mode == "guarded":
+                res[mode]["fallback_rate"] = fallback.get(cond, 0.0)
             if cond == "real":
                 results.setdefault("real_unseen_audio", {})[mode] = acc_unseen.result()
         results[cond] = res
-        with open(run / f"pred_pieces_{ck_name}_{cond}.jsonl", "w") as f:
+        pred_file = run / f"pred_pieces_{ck_name}_{cond}.jsonl"
+        kept = []  # predictions of other modes from an earlier run of this script
+        if pred_file.exists():
+            kept = [line for line in open(pred_file) if json.loads(line)["mode"] not in modes]
+        with open(pred_file, "w") as f:
+            f.writelines(kept)
             for (mode, i), toks in preds.items():
                 m = ds.store.meta[i]
                 f.write(json.dumps({"performance": m["performance"], "win": m["win"], "mode": mode,
@@ -214,6 +258,11 @@ def main():
                       f"true {write_xml(true, d / f'{slug}_true.musicxml')}", flush=True)
 
     out = run / f"eval_pieces_{ck_name}.json"
+    if out.exists():  # keep modes / conditions evaluated earlier
+        old = json.load(open(out))
+        for c, r in results.items():
+            old.setdefault(c, {}).update(r)
+        results = old
     json.dump(results, open(out, "w"), indent=1)
     cols = [(c, m) for c in results for m in results[c]]
     print("\n" + f"{'metric':16s}" + "".join(f"{c + '/' + m:>22s}" for c, m in cols))
