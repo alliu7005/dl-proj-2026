@@ -17,7 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.evaluate_pieces import SPLITS  # noqa: E402
+from scripts.evaluate_pieces import SPLITS, join_dash_values  # noqa: E402
 from src.decoding import input_agreement  # noqa: E402
 from src.dataset import ScoreSegmentDataset  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
@@ -34,7 +34,7 @@ def main():
     ap.add_argument("--margins", default="-0.1,-0.05,-0.02,0,0.02,0.05,0.1,0.2",
                     help="negative margins favour the no-context output (it wins unless clearly worse)")
     ap.add_argument("--ckpt", default="best")
-    args = ap.parse_args()
+    args = ap.parse_args(join_dash_values(sys.argv[1:], flags=("--margins",)))
     margins = [float(m) for m in args.margins.split(",")]
     vocab_path = str(D / "vocab.json")
     nm = NoiseModel.from_json("configs/noise_stats.json")

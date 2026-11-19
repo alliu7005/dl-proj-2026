@@ -122,6 +122,21 @@ class Decoder:
         return out
 
 
+def join_dash_values(argv: list[str], flags=("--extra-margins",)) -> list[str]:
+    """``--extra-margins -0.05,-0.02`` -> ``--extra-margins=-0.05,-0.02``. Before Python 3.13,
+    argparse reads a value that starts with "-" and is not a single number as another option
+    ("expected one argument"); the joined form works on every version."""
+    out, k = [], 0
+    while k < len(argv):
+        if argv[k] in flags and k + 1 < len(argv) and argv[k + 1].startswith("-"):
+            out.append(f"{argv[k]}={argv[k + 1]}")
+            k += 2
+        else:
+            out.append(argv[k])
+            k += 1
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
@@ -138,7 +153,7 @@ def main():
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--normal-priority", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(join_dash_values(sys.argv[1:]))
     if not args.normal_priority:
         lower_priority()
     device = pick_device(args.device)
