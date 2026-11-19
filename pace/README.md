@@ -21,20 +21,15 @@ bash pace/setup.sh          # conda env in scratch (~10 min), ASAP clones
 
 ## 2. Data
 
-**Option A: copy Michael's finished `data/processed` (recommended).** His build includes the
-real-transcription splits (`train_transcribed`, `val_transcribed`, `test_transcribed`, ...), which
-need the MAESTRO audio and a Transkun run to rebuild. From his machine:
-
-```bash
-scp -r data/processed <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/data/
-```
-
-**Option B: build it on PACE** (ASAP + PERiScoPe, no real-transcription splits; the training script
-skips those):
+**Build it on PACE** (ASAP + PERiScoPe):
 
 ```bash
 sbatch pace/data.sbatch     # CPU job, ~1 h: PianoCoRe download, build_dataset, integrity checks
 ```
+
+Then the real ASAP transcriptions (section 4e): `bash pace/real_asap.sh`. Copying another build
+of `data/processed` from someone else's machine is not recommended: a build made from different
+data can have a different vocabulary, which no existing checkpoint can read.
 
 If the job log says the compute node has no internet, run
 `python scripts/fetch_pianocore_meta.py && python scripts/fetch_pianocore.py` on the login node
@@ -99,7 +94,7 @@ runs the `guarded` mode, so new `pace/train.sbatch` jobs need no extra flags.
 ## 4c. Re-evaluate and test the regularization
 
 ```bash
-bash pace/reevaluate.sh         # re-evaluate the six comparison runs: oracle, chained, none, guarded
+bash pace/reevaluate.sh         # re-evaluate every finished run in all modes (oracle, chained, none, guarded, meter)
 sbatch -J simguard -c 4 --mem=16G -t 0:45:00 -o slurm-simguard-%j.out --wrap="source pace/common.sh; python scripts/simulate_guard.py"
 ```
 
@@ -124,11 +119,11 @@ answers the question either way.
 ## 4d. Bar alignment: context notes, auxiliary metrical head, meter consistency
 
 ```bash
-bash pace/bar_alignment.sh       # labels + tests on CPU, then 4 GPU runs (Blackwell); GPU=h100 bash ... for another type
+bash pace/bar_alignment.sh       # labels + tests on CPU, then 5 GPU runs (Blackwell); GPU=h100 bash ... for another type
 ```
 
 A CPU job first builds the metrical labels for this data build (`scripts/build_metrical.py`, a few
-minutes) and runs the new tests on it; the four training jobs only start if that passes. Every run
+minutes) and runs the new tests on it; the five training jobs only start if that passes. Every run
 trains with early stopping and is then evaluated in all five modes (oracle, chained, none, guarded,
 meter).
 
@@ -138,12 +133,41 @@ meter).
 | `s2s_a` | auxiliary metrical head (downbeat + beat phase of every note) | `s2s` |
 | `s2s_ca` | both | `s2s_c`, `s2s_a` |
 | `s2s_m_ca` | both, 25.9M parameters, dropout 0.2, weight decay 0.1, lr 2e-4 | `s2s_ca` |
+| `sf_base_reg_ca` | both, on the regularized 45M Scoreformer (best with the true context, behind without it: bar F1 0.42 vs 0.52 with no context) | `sf_base_reg`, `s2s_ca` |
 
-The existing runs get the new `meter` mode without retraining (only that mode is decoded and merged
-into their results):
+Every finished run gets the new `meter` mode without retraining (only that mode is decoded and merged
+into its results), so all of them can be compared in every mode:
 
 ```bash
-ARGS="--modes meter" bash pace/reevaluate.sh s2s s2s_ctx sf_base_reg
+ARGS="--modes meter" bash pace/reevaluate.sh
+```
+
+## 4e. Real transcriptions of the ASAP performances
+
+```bash
+bash pace/real_asap.sh           # one GPU job, ~2-4 h; waits until queued training jobs have started
+```
+
+Some ASAP performances also exist as audio in MAESTRO. `pace/real_asap.sbatch` downloads only that
+audio (range requests, not the 108 GB archive), transcribes it with Transkun V2, and pairs each
+transcription with its ASAP score using the same windows, targets and vocabulary as the clean
+splits (`scripts/build_transcribed.py`), so every existing checkpoint can use it:
+
+| split | performances | what for |
+|---|---|---|
+| `test_transcribed` | 24 (21 with audio Transkun was trained on) | the "real" test condition, on the same windows as the baselines' real-transcription numbers; `real_unseen_audio` reports the 3 unseen ones |
+| `train_transcribed` | 85, audio Transkun never trained on | real errors paired with ASAP scores, mixed into training |
+| `val_transcribed` | 22, same rule | an extra validation set |
+
+This adds about 1% to the real-transcription training data (PERiScoPe has 6,714 performances); its
+main value is the real test condition comparable with the baselines. Training runs that start
+after it exists mix `train_transcribed` in and validate on `val_transcribed` too (each run's
+`config.json` records its data under `"data"`), which is why the script waits until every queued
+or running training job has started: a batch already in the queue keeps training on the same data.
+When every job has finished, add the real condition to every run:
+
+```bash
+ARGS="--conditions real" bash pace/reevaluate.sh
 ```
 
 ## 5. Bring results back

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Re-evaluate finished runs with the current decoding (run on the login node from the repo root):
-#   bash pace/reevaluate.sh                          # the six post-milestone comparison runs
+#   bash pace/reevaluate.sh                          # every finished run (smoke tests excluded)
 #   bash pace/reevaluate.sh s2s sf_base_reg          # specific runs
 #   GPU=h100 bash pace/reevaluate.sh                 # another GPU type
 #   ARGS="--modes meter" bash pace/reevaluate.sh s2s # extra evaluate_pieces.py arguments, e.g. add
@@ -13,7 +13,13 @@ set -euo pipefail
 GPU=${GPU:-rtx_pro_6000_blackwell}
 ARGS=${ARGS:-}
 RUNS=("$@")
-[ ${#RUNS[@]} -eq 0 ] && RUNS=(s2s s2s_ctx sf_small sf_small_ctx sf_base sf_base_reg)
+if [ ${#RUNS[@]} -eq 0 ]; then  # every run with a best.pt, except smoke tests
+  for f in outputs/runs/*/best.pt; do
+    [ -f "$f" ] || continue
+    r=$(basename "$(dirname "$f")")
+    case "$r" in smoke*) ;; *) RUNS+=("$r") ;; esac
+  done
+fi
 for r in "${RUNS[@]}"; do
   if [ ! -f "outputs/runs/$r/best.pt" ]; then
     echo "  skip $r: outputs/runs/$r/best.pt not found"

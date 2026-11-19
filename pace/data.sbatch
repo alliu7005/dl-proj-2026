@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build data/processed on a CPU node: PianoCoRe/PERiScoPe download + ASAP/PERiScoPe windows + checks.
 #   sbatch pace/data.sbatch
-# Not needed if you copied a finished data/processed from Michael (see pace/README.md).
+# The real ASAP transcriptions are built afterwards by pace/real_asap.sbatch (see pace/README.md).
 #SBATCH -J pianoscore-data
 #SBATCH -c 8
 #SBATCH --mem=32G

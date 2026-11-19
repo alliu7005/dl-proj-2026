@@ -798,6 +798,11 @@ about 10× higher.
   agreement drops from 0.962 (clean) to 0.955 (Transkun) / 0.948 (Kong) on train; on val from
   0.957 to 0.952 / 0.945.
 - **`test_transcribed`:** see the caveat below.
+- **Building them on PACE:** `bash pace/real_asap.sh` runs the whole chain in one GPU job
+  (`pace/real_asap.sbatch`: fetch the MAESTRO audio of these performances, Transkun V2,
+  `build_transcribed.py`, metrical labels, `tests/test_integrity.py`). The splits reuse the
+  existing vocabulary and the clean splits' targets, so existing checkpoints work on them
+  unchanged.
 
 ### Caveat: test_transcribed
 

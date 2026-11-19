@@ -316,8 +316,16 @@ def main():
         print(f"resumed {run} at step {step} (epoch {epoch}, phase {phase})", flush=True)
     elif (run / "last.pt").exists():
         raise SystemExit(f"{run} already has a checkpoint: use --resume, or a different --name")
+    # which data this run trained on: runs started before / after the real-transcription splits
+    # were built (pace/real_asap.sbatch) are not trained on the same data
+    data = {"train_windows": len(train), "train_transcribed": bool(real_ok and not args.no_noise),
+            "val_transcribed": has_split("val_transcribed"),
+            "train_periscope": any(m.get("dataset") == "pianocore" for m in
+                                   (train.synthetic if hasattr(train, "synthetic") else train).store.meta)}
+    if ck is not None and (run / "config.json").exists():  # a resumed run keeps its original record
+        data = json.loads((run / "config.json").read_text()).get("data", data)
     json.dump({"args": vars(args), "arch": args.arch, "model": cfg, "params": n_params,
-               "steps_per_epoch": steps_per_epoch, "total_steps": total_steps},
+               "steps_per_epoch": steps_per_epoch, "total_steps": total_steps, "data": data},
               open(run / "config.json", "w"), indent=1)
     print(f"{args.arch}: {n_params / 1e6:.1f}M parameters on {device} | {len(train)} training windows, "
           f"{steps_per_epoch} steps/epoch, {total_steps} steps total | Ctrl+C saves and stops", flush=True)

@@ -16,6 +16,9 @@
 #   s2s_ca     both                                                           s2s_c, s2s_a
 #   s2s_m_ca   both, at 25.9M parameters with the regularization that fixed   s2s_ca
 #              the 45M model's overfitting (dropout 0.2, wd 0.1, lr 2e-4)
+#   sf_base_reg_ca  both, on the regularized 45M Scoreformer: the best model    sf_base_reg, s2s_ca
+#              given the true context, which falls behind without it (bar F1
+#              0.42 vs 0.52 with no context); these fixes target that gap
 set -euo pipefail
 GPU=${GPU:-rtx_pro_6000_blackwell}
 G="--gres=gpu:${GPU}:1"
@@ -35,4 +38,5 @@ submit s2s_c    "--arch score2seq $CTX"
 submit s2s_a    "--arch score2seq --aux-metrical"
 submit s2s_ca   "--arch score2seq $CTX --aux-metrical"
 submit s2s_m_ca "--arch score2seq --d-model 384 --enc-layers 6 --dec-layers 6 --dropout 0.2 --weight-decay 0.1 --lr 2e-4 $CTX --aux-metrical"
+submit sf_base_reg_ca "--size base --dropout 0.2 --weight-decay 0.1 --lr 2e-4 $CTX --aux-metrical"
 echo "watch: squeue -u \$USER     logs: slurm-barprep-<job>.out, slurm-scoreformer-<job>.out"
