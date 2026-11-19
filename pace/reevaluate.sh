@@ -2,7 +2,8 @@
 # Re-evaluate finished runs with the current decoding (run on the login node from the repo root):
 #   bash pace/reevaluate.sh                          # every finished run (smoke tests excluded)
 #   bash pace/reevaluate.sh s2s sf_base_reg          # specific runs
-#   GPU=h100 bash pace/reevaluate.sh                 # another GPU type
+#   GPUS=gpu-h100 bash pace/reevaluate.sh            # other GPU types (default: any of H100 /
+#                                                    # H200 / RTX Pro Blackwell; "a|b" for several)
 #   ARGS="--modes meter" bash pace/reevaluate.sh s2s # extra evaluate_pieces.py arguments, e.g. add
 #                                                    # one mode (merged into the existing results)
 #   TIME=8:00:00 ARGS=... bash pace/reevaluate.sh    # longer jobs (default: evaluate.sbatch's 4 h)
@@ -11,7 +12,8 @@
 # and meter modes, so oracle / chained / none / guarded / meter are re-run together and every number in a comparison
 # comes from the same code. One GPU job per run (pace/evaluate.sbatch), ~1-2 h each.
 set -euo pipefail
-GPU=${GPU:-rtx_pro_6000_blackwell}
+GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}  # node features: whichever of these GPUs frees up first
+G=(--gres=gpu:1 "--constraint=$GPUS")
 ARGS=${ARGS:-}
 TIME=${TIME:-}
 RUNS=("$@")
@@ -35,7 +37,7 @@ for r in "${RUNS[@]}"; do
   fi
   # NAME / ARGS travel as environment variables (--export=ALL): the --export=ALL,ARGS=... form
   # splits on commas, which would break arguments like --modes guarded,meter
-  id=$(NAME="$r" ARGS="$ARGS" sbatch --parsable --gres=gpu:${GPU}:1 ${TIME:+-t $TIME} -J "eval_$r" --export=ALL pace/evaluate.sbatch)
+  id=$(NAME="$r" ARGS="$ARGS" sbatch --parsable "${G[@]}" ${TIME:+-t $TIME} -J "eval_$r" --export=ALL pace/evaluate.sbatch)
   echo "  $r: job $id${ARGS:+  ($ARGS)}"
 done
 echo "watch: squeue -u \$USER     logs: slurm-eval_<run>-<job>.out"

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Submit the bar-alignment experiments (run on the login node from the repo root):
-#   bash pace/bar_alignment.sh                  # Blackwell GPUs (default)
-#   GPU=h100 bash pace/bar_alignment.sh         # another GPU type
+#   bash pace/bar_alignment.sh                  # any of H100 / H200 / RTX Pro Blackwell (default)
+#   GPUS=gpu-h100 bash pace/bar_alignment.sh    # other GPU types (node features, "a|b" for several)
 #
 # The realistic rhythm scores trail the oracle ones (onset F1 ~0.2 vs ~0.56) mostly because the bar
 # phase is wrong: onset-shift F1 is twice onset F1. Three fixes, tested on Score2Seq (the best
@@ -20,8 +20,8 @@
 #              given the true context, which falls behind without it (bar F1
 #              0.42 vs 0.52 with no context); these fixes target that gap
 set -euo pipefail
-GPU=${GPU:-rtx_pro_6000_blackwell}
-G="--gres=gpu:${GPU}:1"
+GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}  # node features: whichever of these GPUs frees up first
+G=(--gres=gpu:1 "--constraint=$GPUS")
 
 prep=$(sbatch --parsable -J barprep -c 8 --mem=32G -t 1:00:00 -o slurm-barprep-%j.out --wrap="source pace/common.sh; \
 python scripts/build_metrical.py --workers 8 && python -m tests.test_metrical && python -m tests.test_context_notes \
@@ -32,7 +32,7 @@ echo "labels + tests: job $prep"
 # form splits on commas, which would break arguments like --modes guarded,meter.
 submit() {  # name, args
   local id
-  id=$(NAME="$1" ARGS="$2" sbatch --parsable $G --dependency=afterok:$prep --export=ALL pace/train.sbatch)
+  id=$(NAME="$1" ARGS="$2" sbatch --parsable "${G[@]}" --dependency=afterok:$prep --export=ALL pace/train.sbatch)
   echo "  $1: job $id  ($2)"
 }
 CTX="--context-before 64 --context-after 32"

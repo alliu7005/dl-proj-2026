@@ -38,7 +38,7 @@ If the job log says the compute node has no internet, run
 ## 3. Smoke run (GPU, ~30–45 min)
 
 ```bash
-sbatch --gres=gpu:h100:1 pace/smoke.sbatch
+sbatch pace/smoke.sbatch
 squeue -u $USER                     # job status
 tail -f slurm-pianoscore-smoke-*.out
 ```
@@ -66,15 +66,20 @@ NAME=s2s ARGS="--arch score2seq" sbatch --export=ALL pace/train.sbatch   # Micha
 MusicXML for 5 pieces). A run that hits the 8 h limit is resumed by submitting the same command
 again (it picks up `outputs/runs/<NAME>/last.pt`).
 
-Pick the GPU at submit time, e.g. `sbatch --gres=gpu:h100:1 pace/train.sbatch`. Names are
-lowercase (`sinfo -o "%G" | sort -u` lists them): `h100`, `h200`, `rtx_pro_6000_blackwell` (16 cards,
-often the shortest queue), `a100`, `l40s`. Avoid `v100` (no bf16, the scripts fall back to slower
-fp32) and `mi210` / `r9700` (AMD GPUs, the CUDA build of torch can't use them).
+**Which GPU.** Every GPU job (the `.sbatch` files and the submit scripts) asks for one GPU of any
+of these types, whichever frees up first: `--constraint="gpu-h100|gpu-h200|gpu-rtxpro-blackwell"`
+(node features; `sinfo -h -o "%G | %f" | sort -u` lists them, and `sinfo -h -o "%G %t %D" | grep -i gpu`
+shows how many nodes of each are idle / mixed / allocated). Asking for one exact type left jobs
+waiting for Blackwell cards while H100 / H200 nodes had free GPUs. Left out on purpose: `gpu-v100`
+and `gpu-rtx6000` (no bf16: slower fp32), `gpu-mi210` / `gpu-r9700` (AMD: the CUDA build of torch
+can't use them); `gpu-a100` / `gpu-l40s` / `gpu-a40` work at about half the speed, which can push a
+45M training plus its evaluation past the 8 h limit. To choose: `GPUS=gpu-h100 bash pace/...sh`, or
+`sbatch --constraint=gpu-a100 ...` (several: `"gpu-h100|gpu-a100"`).
 
 ## 4b. Post-milestone experiments
 
 ```bash
-bash pace/overnight.sh          # 1 short CPU check + 4 GPU runs (Blackwell); GPU=h100 bash ... for another type
+bash pace/overnight.sh          # 1 short CPU check + 4 GPU runs (H100 / H200 / Blackwell)
 ```
 
 | run | what it tests | compare with |
@@ -109,8 +114,8 @@ learning rate and run length at once, and stopped one epoch after its best, too 
 whether its validation loss would climb):
 
 ```bash
-NAME=sf_base_e6 ARGS="--size base --epochs 6" sbatch --gres=gpu:rtx_pro_6000_blackwell:1 --export=ALL pace/train.sbatch
-NAME=sf_base_reg20 ARGS="--size base --dropout 0.2 --weight-decay 0.1 --lr 2e-4 --epochs 20" sbatch --gres=gpu:rtx_pro_6000_blackwell:1 --export=ALL pace/train.sbatch
+NAME=sf_base_e6 ARGS="--size base --epochs 6" sbatch --export=ALL pace/train.sbatch
+NAME=sf_base_reg20 ARGS="--size base --dropout 0.2 --weight-decay 0.1 --lr 2e-4 --epochs 20" sbatch --export=ALL pace/train.sbatch
 ```
 
 `sf_base_e6` (original settings, 6 epochs) vs `sf_base_reg`: is the gain just the shorter schedule?
@@ -121,7 +126,7 @@ answers the question either way.
 ## 4d. Bar alignment: context notes, auxiliary metrical head, meter consistency
 
 ```bash
-bash pace/bar_alignment.sh       # labels + tests on CPU, then 5 GPU runs (Blackwell); GPU=h100 bash ... for another type
+bash pace/bar_alignment.sh       # labels + tests on CPU, then 5 GPU runs (H100 / H200 / Blackwell)
 ```
 
 A CPU job first builds the metrical labels for this data build (`scripts/build_metrical.py`, a few

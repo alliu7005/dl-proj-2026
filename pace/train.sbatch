@@ -6,10 +6,14 @@
 #   NAME=s2s ARGS="--arch score2seq" sbatch --export=ALL pace/train.sbatch  # Michael's model, same loop
 # (NAME / ARGS as environment variables: --export=ALL,ARGS=... would split ARGS at its commas)
 # Resubmitting the same NAME resumes from outputs/runs/NAME/last.pt (e.g. after the time limit).
-# PACE ICE limits: 8 h walltime and 16 GPU hours per job. Any GPU works (bf16 needs A100/H100/L40S
-# or newer for full speed); to ask for one type, see `sinfo -o "%P %G"` and e.g. --gres=gpu:h100:1 (lowercase; also h200, rtx_pro_6000_blackwell, a100). Avoid v100 (no bf16) and mi210/r9700 (AMD).
+# PACE ICE limits: 8 h walltime and 16 GPU hours per job.
 #SBATCH -J scoreformer
+# GPU: any of H100 / H200 / RTX Pro Blackwell, whichever frees up first (node features; see
+# `sinfo -h -o "%G | %f" | sort -u`). Not V100 / RTX 6000 (no bf16), not MI210 / R9700 (AMD:
+# the CUDA build of torch can't use them); A100 / L40S work but at about half the speed. Override:
+#   sbatch --constraint=gpu-a100 ...   (one type)   or   --constraint="gpu-h100|gpu-a100" ...
 #SBATCH --gres=gpu:1
+#SBATCH --constraint=gpu-h100|gpu-h200|gpu-rtxpro-blackwell
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 8:00:00
