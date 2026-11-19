@@ -58,11 +58,22 @@ def test_missing_rules():
     assert missing(res, conds, names, margins, yes) == {"periscope": names}       # a condition never run
     assert missing(res, conds, names, margins, lambda c: c != "periscope") == {}   # its data does not exist
     # results from before eval_version / limit_perfs were recorded: version 1, all performances
+    # exactly as the evaluator wrote them then: the unseen-audio subset had no guard_margin either
     legacy = json.loads(json.dumps(res))
-    for c in legacy.values():
+    for cname, c in legacy.items():
         for r in c.values():
             del r["eval_version"], r["limit_perfs"]
+            if cname == "real_unseen_audio":
+                r.pop("guard_margin", None)
     assert missing(legacy, ["clean", "real"], names, margins, yes) == {}
+    # a margin sweep's file (guarded / meter at several margins, no oracle / none / chained)
+    sweep = {c: {n: r for n, r in legacy[c].items() if n.split("@")[0] in ("guarded", "meter")}
+             for c in legacy}
+    assert missing(sweep, ["real"], names, margins, yes) == {"real": ["oracle", "none", "chained"]}
+    # a recorded unseen-audio margin is still compared
+    bad = json.loads(json.dumps(res))
+    bad["real_unseen_audio"]["meter"]["guard_margin"] = 0.05
+    assert missing(bad, ["real"], names, margins, yes) == {"real": ["meter"]}
     # another guard margin, no recorded margin, a --limit-perfs subset, an older evaluation version
     other = json.loads(json.dumps(res))
     other["clean"]["guarded"]["guard_margin"] = 0.05

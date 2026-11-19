@@ -152,9 +152,16 @@ def missing(results, conditions, names, margins, available, limit_perfs=0):
             continue
         have = results.get(cond, {})
         need = [n for n in names if not present(have.get(n), margins.get(n), limit_perfs)]
-        if cond == "real":  # its unseen-audio subset is written by the same decoding
+        if cond == "real":  # its unseen-audio subset is written by the same decoding, at the same
+            # time as the real result whose margin was just checked; before this module it was
+            # written without a guard_margin, so only a recorded one is compared
             sub = results.get("real_unseen_audio", {})
-            need += [n for n in names if n not in need and not present(sub.get(n), margins.get(n), limit_perfs)]
+
+            def sub_ok(n):
+                r = sub.get(n)
+                return present(r, None, limit_perfs) and (
+                    margins.get(n) is None or "guard_margin" not in r or present(r, margins[n], limit_perfs))
+            need += [n for n in names if n not in need and not sub_ok(n)]
             need = [n for n in names if n in need]  # keep the decoding order
         if need:
             out[cond] = need
