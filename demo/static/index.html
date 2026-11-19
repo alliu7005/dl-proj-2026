@@ -109,6 +109,7 @@
       <span>Context between windows</span>
       <div class="seg">
         <label title="The model's own previous output, but a window that clearly disagrees with its notes is redone without context, so one bad window cannot derail the rest"><input type="radio" name="mode" value="guarded" checked><span>Guarded</span></label>
+        <label title="Guarded, and time signatures kept consistent along the piece: a window whose meter disagrees with its neighbours is redone with theirs"><input type="radio" name="mode" value="meter"><span>Guarded + meter</span></label>
         <label title="The model's own previous output, unguarded"><input type="radio" name="mode" value="chained"><span>Previous output</span></label>
         <label title="Every window is decoded on its own"><input type="radio" name="mode" value="none"><span>None</span></label>
       </div>
@@ -257,9 +258,14 @@ function showResult(id, job) {
   ];
   if (s.transcribe_s != null) items.push([fmtTime(s.transcribe_s), 'transcription']);
   items.push([fmtTime(s.score_s || 0), 'score model']);
-  if (s.mode === 'guarded') {
+  const word = (n, one, many) => (n === 1 ? one : many);
+  if (s.mode === 'guarded' || s.mode === 'meter') {
     const n = s.guard_fallbacks ?? 0;
-    items.push([n, `${n === 1 ? 'window' : 'windows'} redone without context`]);
+    items.push([n, `${word(n, 'window', 'windows')} redone without context`]);
+  }
+  if (s.mode === 'meter') {
+    const n = s.meter_fixes ?? 0;
+    items.push([n, `${word(n, 'time signature', 'time signatures')} made consistent`]);
   }
   $('#stats').innerHTML = items.map(([v, l]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
 

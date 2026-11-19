@@ -10,6 +10,9 @@ per-window output budget. Modes:
   guarded  (default) each window's context is the model's own previous output, but a window whose
            output clearly disagrees with its input notes (a degenerate window) is replaced by the
            window decoded without context, so one bad window cannot derail the rest of the piece
+  meter    guarded, plus consistent time signatures: a window whose time signature disagrees with
+           a clear majority of its neighbours is decoded again with that one forced, and the piece
+           re-decoded from there (decoding.decode_pieces_meter)
   chained  the model's own previous output as context, unguarded
   none     every window decoded on its own
 """
@@ -24,8 +27,8 @@ from typing import Callable
 import numpy as np
 import torch
 
-from .dataset import note_features
-from .decoding import decode_pieces, max_new_tokens
+from .dataset import assemble_notes, note_features
+from .decoding import decode_pieces, decode_pieces_meter, max_new_tokens
 from .preprocessing.performance import OFFSET, ONSET, load_performance
 from .preprocessing.segment import SegmentConfig, cut_windows
 from .preprocessing.vocab import BOS, EOS, SEP, Vocab
@@ -33,7 +36,7 @@ from .scoreformer import load_model
 
 AUDIO_EXT = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".aiff", ".aif"}
 MIDI_EXT = {".mid", ".midi"}
-MODES = ("guarded", "chained", "none")
+MODES = ("guarded", "meter", "chained", "none")
 GUARD_MARGIN = 0.05  # scripts/evaluate_pieces.py --guard-margin default
 CARRY_MIN_SEC = 0.125  # training uses 1/4 quarter note past the cut; ~0.125 s at 120 bpm
 
@@ -45,11 +48,15 @@ def _noop(stage: str, frac: float, msg: str):
 
 
 def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
-                        search: float | None = None) -> list[dict]:
+                        search: float | None = None, context_before: int = 0,
+                        context_after: int = 0) -> list[dict]:
     """Cut a performance (no score) into model inputs, mirroring segment.segment_windows at eval
     time: cut points at the midpoint of the largest onset gap near every ``size`` notes, onsets
     relative to the cut, notes struck before the cut but still held past it carried over with a
-    negative onset, pedal intervals clipped to the window. Returns raw [N,4] notes and pedal."""
+    negative onset, pedal intervals clipped to the window. Returns raw [N,4] notes and pedal.
+    With ``context_before`` / ``context_after``, each window also gets that many of the performed
+    notes just before / after it ("before" / "after", same time frame; the carried-over notes are
+    not repeated), as src/dataset.py gives the model during training."""
     if search is None:
         search = SegmentConfig().cut_search
     on = notes[:, ONSET].astype(np.float64)
@@ -63,8 +70,19 @@ def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
         sel = np.concatenate([notes[carried], notes[a:b]])
         w = np.stack([sel[:, 0], sel[:, ONSET] - t0, sel[:, OFFSET] - sel[:, ONSET], sel[:, 3]], axis=1)
         w[: len(carried), 1] = np.minimum(w[: len(carried), 1], -1e-3)
-        ped = pedal[(pedal[:, 1] > t0) & (pedal[:, 0] < t1)] - t0 if len(pedal) else pedal.reshape(-1, 2)
+        lo, hi = t0, t1
+        before = after = np.zeros((0, 4), np.float32)
+        if context_before and a:
+            prev = np.setdiff1d(np.arange(a), carried)[-context_before:]
+            before = np.stack([notes[prev, 0], on[prev] - t0, off[prev] - on[prev], notes[prev, 3]], axis=1)
+            lo = float(on[prev].min()) if len(prev) else t0
+        if context_after and b < len(on):
+            nxt = np.arange(b, min(len(on), b + context_after))
+            after = np.stack([notes[nxt, 0], on[nxt] - t0, off[nxt] - on[nxt], notes[nxt, 3]], axis=1)
+            hi = max(t1, float(off[nxt].max()))
+        ped = pedal[(pedal[:, 1] > lo) & (pedal[:, 0] < hi)] - t0 if len(pedal) else pedal.reshape(-1, 2)
         out.append({"notes": w.astype(np.float32), "pedal": np.asarray(ped, np.float32).reshape(-1, 2),
+                    "before": np.asarray(before, np.float32), "after": np.asarray(after, np.float32),
                     "t0": t0, "t1": t1, "n": int(b - a), "carried": int(len(carried))})
     return out
 
@@ -127,43 +145,60 @@ class ScorePipeline:
         return midi_out
 
     def features(self, w: dict) -> torch.Tensor:
-        f = note_features(w["notes"], w["pedal"])
+        """Model input for a window: its notes, plus context notes if the model was trained with them."""
+        if getattr(self.cfg, "n_features", 8) > 8:
+            notes, roles = assemble_notes(w["notes"], w.get("before", np.zeros((0, 4))), w.get("after", np.zeros((0, 4))))
+            f = note_features(notes, w["pedal"], roles)
+        else:
+            f = note_features(w["notes"], w["pedal"])
         cols, mean, std = self.scale
         f[:, cols] = (f[:, cols] - mean) / std
         return torch.from_numpy(f[: self.cfg.max_notes])
 
-    def prefix(self, prompt: list[str]) -> torch.Tensor:
-        if not prompt:
-            return torch.tensor([self.bos])
-        return torch.tensor([self.bos] + self.vocab.encode(prompt, add_special=False) + [self.sep])
+    def prefix(self, prompt: list[str], start: list[str] = ()) -> torch.Tensor:
+        """<bos> [prompt <sep>] [start]: ``start`` = tokens the output is forced to begin with."""
+        head = [self.bos] + (self.vocab.encode(prompt, add_special=False) + [self.sep] if prompt else [])
+        return torch.tensor(head + self.vocab.encode(list(start), add_special=False))
 
     @torch.no_grad()
-    def decode_window(self, feats: torch.Tensor, prefix: torch.Tensor) -> list[str]:
+    def decode_window(self, feats: torch.Tensor, prefix: torch.Tensor, n_notes: int | None = None,
+                      ban_ts: bool = False) -> list[str]:
+        """``n_notes``: the window's own notes (without context notes), for the output budget.
+        ``ban_ts``: generate no time signature (the window's own was forced in the prefix)."""
         notes = feats[None].to(self.device)
         mask = torch.ones(1, len(feats), dtype=torch.bool, device=self.device)
-        max_new = max_new_tokens(len(feats), len(prefix), self.cfg.max_tokens)
+        max_new = max_new_tokens(len(feats) if n_notes is None else n_notes, len(prefix), self.cfg.max_tokens)
+        banned = None
+        if ban_ts:
+            banned = torch.zeros(1, len(self.vocab.itos), dtype=torch.bool)
+            banned[0, [i for i, t in enumerate(self.vocab.itos) if t.startswith("ts_")]] = True
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
-            ids = self.model.generate(notes, mask, [prefix], self.eos, max_new=max_new)[0]
+            ids = self.model.generate(notes, mask, [prefix], self.eos, max_new=max_new, banned=banned)[0]
         ids = ids.tolist() if torch.is_tensor(ids) else list(ids)
         return self.vocab.decode(ids[:max_new])
 
     def decode(self, windows: list[dict], mode: str = "guarded", progress: Progress = _noop,
-               guard_margin: float = GUARD_MARGIN) -> tuple[list[str], int]:
+               guard_margin: float = GUARD_MARGIN) -> tuple[list[str], dict]:
         """Decode a piece window by window (see the module docstring for the modes). Returns the
-        stitched tokens and how many windows guarded mode replaced by their no-context output."""
+        stitched tokens and {"guard_fallbacks": windows replaced by their no-context output,
+        "meter_fixes": windows whose time signature meter mode corrected}."""
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
 
-        def decode(ws, contexts):
-            return [self.decode_window(self.features(w), self.prefix(c)) for w, c in zip(ws, contexts)]
+        def decode(ws, contexts, starts):
+            return [list(s) + self.decode_window(self.features(w), self.prefix(c, s), len(w["notes"]),
+                                                 ban_ts=any(t.startswith("ts_") for t in s))
+                    for w, c, s in zip(ws, contexts, starts)]
 
-        _, history, fallbacks = decode_pieces(
-            {0: windows}, decode,
-            contiguous=(lambda prev, w: mode != "none"),
-            guard_margin=guard_margin if mode == "guarded" else None,
-            pitches=lambda w: w["notes"][:, 0].tolist(),
-            progress=lambda j, total: progress("score", j / total, f"window {j} of {total}"))
-        return history[0], len(fallbacks)
+        kw = dict(contiguous=(lambda prev, w: mode != "none"), pitches=lambda w: w["notes"][:, 0].tolist(),
+                  progress=lambda j, total: progress("score", j / total, f"window {j} of {total}"))
+        forced = {}
+        if mode == "meter":
+            _, history, fallbacks, forced = decode_pieces_meter({0: windows}, decode, guard_margin=guard_margin, **kw)
+        else:
+            _, history, fallbacks = decode_pieces({0: windows}, decode,
+                                                  guard_margin=guard_margin if mode == "guarded" else None, **kw)
+        return history[0], {"guard_fallbacks": len(fallbacks), "meter_fixes": len(forced)}
 
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, mode: str = "guarded",
@@ -186,10 +221,12 @@ class ScorePipeline:
         notes, pedal = load_performance(midi)
         if len(notes) == 0:
             raise ValueError("no notes found (silent recording, or not a piano?)")
-        windows = performance_windows(notes, pedal, self.window_notes)
+        windows = performance_windows(notes, pedal, self.window_notes,
+                                      context_before=int(getattr(self.cfg, "context_before", 0)),
+                                      context_after=int(getattr(self.cfg, "context_after", 0)))
         progress("score", 0.0, f"window 0 of {len(windows)}")
         t = time.perf_counter()
-        tokens, n_fallback = self.decode(windows, mode, progress, guard_margin)
+        tokens, counts = self.decode(windows, mode, progress, guard_margin)
         timing["score_s"] = round(time.perf_counter() - t, 1)
         (out / "tokens.txt").write_text(" ".join(tokens))
         files["tokens"] = out / "tokens.txt"
@@ -212,7 +249,7 @@ class ScorePipeline:
 
         dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())
         res.stats = {**self.info, "mode": mode, "duration_s": round(dur, 1), "notes": int(len(notes)),
-                     "pedal_presses": int(len(pedal)), "windows": len(windows), "guard_fallbacks": n_fallback,
+                     "pedal_presses": int(len(pedal)), "windows": len(windows), **counts,
                      "bars": tokens.count("bar"), "tokens": len(tokens), **timing}
         (out / "result.json").write_text(json.dumps({"stats": res.stats, "errors": res.errors,
                                                      "files": {k: str(v) for k, v in files.items()}}, indent=1))

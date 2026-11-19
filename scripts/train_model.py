@@ -14,6 +14,13 @@ difference between two runs is what you change on the command line. Differences 
   * best.pt = lowest mean validation loss over all available validation sets (ASAP clean,
     PERiScoPe real, ASAP real transcriptions), instead of the small val_real set alone;
   * ``--compile`` (torch.compile) and ``--grad-accum`` for big GPUs / big models;
+  * ``--aux-metrical``: an auxiliary head on the encoder predicts each note's downbeat and beat
+    phase (src/metrical.py), weighted by ``--aux-weight``, so the encoder learns where the bar
+    is; validation logs its downbeat F1 and phase accuracy. Build the labels once per data build
+    with scripts/build_metrical.py (otherwise they are aligned on the fly, more slowly);
+  * ``--context-before`` / ``--context-after``: the encoder also sees that many performed notes
+    before / after each window (src/dataset.py), so it can read the meter around the window;
+    recorded in the checkpoint, which evaluation and the demo follow;
   * early stopping with a cooldown. ``--epochs`` (default 20) is the maximum and the length of the
     cosine learning-rate schedule. When the mean validation loss has not improved for
     ``--patience`` epochs (default 5; 0 = off), training goes back to the best checkpoint (weights
@@ -43,6 +50,7 @@ from scripts.train import (SHOW, TokenBudgetBatches, TruncatingCollate, lower_pr
                            pick_device, store_lengths)
 from src.dataset import AugmentConfig, ContextNoise, MixedTrainDataset, ScoreSegmentDataset  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
+from src.metrical import aux_counts, aux_loss, aux_scores  # noqa: E402
 from src.model import token_loss  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 from src.preprocessing.vocab import EOS  # noqa: E402
@@ -74,7 +82,7 @@ class Evaluator:
     """Fixed validation subsets: teacher-forced loss / token accuracy + greedy-decoding metrics
     (ground-truth prompt, as in scripts/train.py). Sets with no data are left out."""
 
-    def __init__(self, vocab_path, n_loss: int, n_decode: int, coll, seed: int = 0):
+    def __init__(self, vocab_path, n_loss: int, n_decode: int, coll, seed: int = 0, **ctx):
         rng = np.random.default_rng(seed)
         self.coll = coll
         self.sets = {}
@@ -83,14 +91,14 @@ class Evaluator:
             idx = list(idx)
             return sorted(rng.choice(idx, size=min(n, len(idx)), replace=False).tolist())
 
-        val = ScoreSegmentDataset(str(D / "val"), vocab_path)
+        val = ScoreSegmentDataset(str(D / "val"), vocab_path, **ctx)
         self.vocab = val.vocab
         for name, ds_name in (("val_asap", "asap"), ("val_periscope", "pianocore")):
             idx = [i for i, m in enumerate(val.store.meta) if m.get("dataset", "asap") == ds_name]
             if idx:
                 self.sets[name] = (val, sample(idx, n_loss), sample(idx, n_decode))
         if has_split("val_transcribed"):
-            real = ScoreSegmentDataset(str(D / "val_transcribed"), vocab_path)
+            real = ScoreSegmentDataset(str(D / "val_transcribed"), vocab_path, **ctx)
             self.sets["val_real"] = (real, sample(range(len(real)), n_loss), sample(range(len(real)), n_decode))
         print("validation sets:", {k: len(v[1]) for k, v in self.sets.items()}, flush=True)
 
@@ -100,11 +108,15 @@ class Evaluator:
         res, eos = {}, self.vocab.stoi[EOS]
         for name, (ds, loss_idx, dec_idx) in self.sets.items():
             tot, n, correct, count = 0.0, 0, 0, 0
+            aux_c = {}
             for k in range(0, len(loss_idx), batch_size):
                 chunk = loss_idx[k:k + batch_size]
                 b = {kk: v.to(device) for kk, v in self.coll([ds[i] for i in chunk]).items()}
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-                    logits = model(b["notes"], b["note_mask"], b["target"][:, :-1])
+                    logits, aux = model(b["notes"], b["note_mask"], b["target"][:, :-1], return_aux=True)
+                if aux is not None and "downbeat" in b:
+                    for kk, v in aux_counts(aux, b["downbeat"], b["phase"]).items():
+                        aux_c[kk] = aux_c.get(kk, 0) + v
                 # unweighted CE for model selection (comparable across --ornament-weight settings)
                 tot += token_loss(logits, b["target"], b["loss_mask"]).item() * len(chunk)
                 n += len(chunk)
@@ -113,6 +125,8 @@ class Evaluator:
                 count += m.sum().item()
             res[f"{name}_loss"] = tot / max(n, 1)
             res[f"{name}_tok_acc"] = correct / max(count, 1)
+            if aux_c:
+                res.update({f"{name}_{kk}": v for kk, v in aux_scores(aux_c).items()})
             acc = Accumulator()
             for k in range(0, len(dec_idx), batch_size):
                 items = [ds[i] for i in dec_idx[k:k + batch_size]]
@@ -159,6 +173,13 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=2048)
     ap.add_argument("--no-noise", action="store_true", help="clean inputs only (no synthetic noise, no real transcriptions)")
     ap.add_argument("--noise", default="configs/noise_stats.json")
+    ap.add_argument("--aux-metrical", action="store_true",
+                    help="auxiliary head predicting each note's downbeat / beat phase (src/metrical.py)")
+    ap.add_argument("--aux-weight", type=float, default=0.5, help="weight of the auxiliary loss")
+    ap.add_argument("--context-before", type=int, default=0,
+                    help="performed notes before each window the encoder also sees (0 = none)")
+    ap.add_argument("--context-after", type=int, default=0,
+                    help="performed notes after each window the encoder also sees (0 = none)")
     ap.add_argument("--context-noise", type=float, default=0.0,
                     help="fraction of training windows whose context (prompt) is corrupted with the kind of "
                          "errors a model's own previous output contains (src.dataset.ContextNoise); 0 = off")
@@ -189,8 +210,18 @@ def main():
     # ---- data (same recipe as scripts/train.py)
     real_ok = has_split("train_transcribed")
     ctx = ContextNoise(prob=args.context_noise) if args.context_noise > 0 else None
+    # context notes: a resumed run keeps the inputs it was started with (config.json)
+    notes_ctx = {"context_before": args.context_before, "context_after": args.context_after}
+    aux_on = args.aux_metrical
+    if args.resume and (run / "config.json").exists():
+        started = json.loads((run / "config.json").read_text()).get("model", {})
+        notes_ctx = {k: int(started.get(k, 0)) for k in notes_ctx}
+        aux_on = bool(started.get("aux_metrical", False))
+    n_ctx = notes_ctx["context_before"] + notes_ctx["context_after"]
+    notes_ctx_m = {**notes_ctx, "metrical": aux_on}  # dataset arguments
     if args.no_noise:
-        train = ScoreSegmentDataset(str(D / "train"), vocab_path, augment=AugmentConfig(), context_noise=ctx)
+        train = ScoreSegmentDataset(str(D / "train"), vocab_path, augment=AugmentConfig(), context_noise=ctx,
+                                    **notes_ctx_m)
         clean_idx = [i for i, m in enumerate(train.store.meta) if m.get("source", "clean") == "clean"]
         w = np.zeros(len(train))
         w[clean_idx] = train.weights[clean_idx]
@@ -200,7 +231,7 @@ def main():
     elif real_ok:
         nm = NoiseModel.from_json(args.noise)
         train = MixedTrainDataset(str(D / "train"), str(D / "train_transcribed"), vocab_path, noise=nm,
-                                  augment=AugmentConfig(), real_fraction=0.0, context_noise=ctx)
+                                  augment=AugmentConfig(), real_fraction=0.0, context_noise=ctx, **notes_ctx_m)
         train.real_fraction = len(train.real) / len(train)  # natural proportion
         sampler = train.sampler()
         a, b = store_lengths(train.synthetic.store, args.max_notes, args.max_tokens)
@@ -209,10 +240,11 @@ def main():
     else:
         print("note: no data/processed/train_transcribed, training on `train` only", flush=True)
         train = ScoreSegmentDataset(str(D / "train"), vocab_path, noise=NoiseModel.from_json(args.noise),
-                                    augment=AugmentConfig(), context_noise=ctx)
+                                    augment=AugmentConfig(), context_noise=ctx, **notes_ctx_m)
         sampler = train.sampler()
         tok_len, note_len = store_lengths(train.store, args.max_notes, args.max_tokens)
     vocab = train.vocab
+    note_len = np.minimum(note_len + n_ctx, args.max_notes)  # batch budget includes the context notes
     coll = TruncatingCollate(args.max_notes, args.max_tokens)
     batches = TokenBudgetBatches(sampler, tok_len, note_len, args.batch_tokens, args.batch_notes, seed=args.seed)
     dl = torch.utils.data.DataLoader(train, batch_sampler=batches, collate_fn=coll, num_workers=args.workers,
@@ -239,6 +271,11 @@ def main():
     for k in ("d_model", "enc_layers", "dec_layers"):
         if getattr(args, k) is not None:
             cfg[k] = getattr(args, k)
+    if n_ctx:
+        from src.dataset import N_FEATURES_CONTEXT
+        cfg.update(n_features=N_FEATURES_CONTEXT, **notes_ctx)
+    if aux_on:
+        cfg["aux_metrical"] = True
     if args.arch == "score2seq":
         cfg.update(ff=4 * cfg["d_model"], n_heads=max(4, cfg["d_model"] // 32))
     elif args.d_model is not None:
@@ -285,11 +322,12 @@ def main():
     print(f"{args.arch}: {n_params / 1e6:.1f}M parameters on {device} | {len(train)} training windows, "
           f"{steps_per_epoch} steps/epoch, {total_steps} steps total | Ctrl+C saves and stops", flush=True)
 
-    evaluator = Evaluator(vocab_path, args.eval_loss_windows, args.eval_decode_windows, coll)
+    evaluator = Evaluator(vocab_path, args.eval_loss_windows, args.eval_decode_windows, coll, **notes_ctx_m)
 
     def save(path):
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": epoch,
                     "best": best, "best_step": best_step, "phase": phase, "cool": cool,
+                    "stopped_early": stopped_early,
                     "arch": args.arch, "config": cfg}, path)
 
     log_path = run / "log.csv"
@@ -297,7 +335,7 @@ def main():
     t0 = t_int = time.time()
     tok_int, wait_int, run_loss, n_loss, micro = 0, 0.0, 0.0, 0, 0
     patience_steps = max(1, int(args.patience * steps_per_epoch)) if args.patience > 0 else 0
-    stopped_early = phase != "train" and step < total_steps
+    stopped_early = bool(ck.get("stopped_early", phase == "cooldown")) if ck is not None else False
 
     def end_of_training():
         """After an eval: move train -> cooldown / done, or cooldown -> done."""
@@ -336,8 +374,10 @@ def main():
                 wait_int += time.time() - t_wait
                 b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-                    logits = fwd(b["notes"], b["note_mask"], b["target"][:, :-1])
+                    logits, aux = fwd(b["notes"], b["note_mask"], b["target"][:, :-1], return_aux=True)
                 loss = token_loss(logits, b["target"], b["loss_mask"], weights, args.label_smoothing)
+                if aux is not None:
+                    loss = loss + args.aux_weight * aux_loss(aux, b["downbeat"], b["phase"])
                 (loss / args.grad_accum).backward()
                 run_loss += loss.item()
                 n_loss += 1

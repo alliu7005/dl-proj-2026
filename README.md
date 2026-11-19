@@ -456,11 +456,14 @@ the same `forward` / `generate` interface, so both are trained and scored by the
 ```bash
 python scripts/train_model.py --name sf_base                      # base size, ~45M parameters
 python scripts/train_model.py --name sf_base --resume             # continue after Ctrl+C / time limit
-python scripts/evaluate_pieces.py --run sf_base --musicxml 5      # test sets, 4 context modes
+python scripts/evaluate_pieces.py --run sf_base --musicxml 5      # test sets, 5 context modes
+python scripts/build_metrical.py                                  # labels for --aux-metrical (once)
 python -m tests.test_scoreformer                                  # model + chained-prompt checks
-python -m tests.test_decoding                                     # chained / guarded decoding logic
+python -m tests.test_decoding                                     # chained / guarded / meter decoding
 python -m tests.test_pipeline                                     # demo pipeline end to end
 python -m tests.test_training_stop                                # LR schedule, early stop, cooldown
+python -m tests.test_context_notes                                # context notes, exact neighbours
+python -m tests.test_metrical                                     # metrical labels and the aux head
 sbatch pace/train.sbatch                                          # train + evaluate on a PACE GPU
 ```
 
@@ -494,7 +497,35 @@ helps. The phase (`train` / `cooldown` / `done`) is stored in every checkpoint: 
 mid-cooldown resumes the cooldown, and resubmitting a finished run trains nothing.
 `tests/test_training_stop.py` checks the schedule values and runs real short trainings for every
 path (stop + cooldown at the predicted steps, resume after finishing, resume mid-cooldown,
-`--cooldown 0`, `--patience 0`).
+`--cooldown 0`, `--patience 0`, context notes + auxiliary head kept on resume).
+
+**Bar alignment.** The realistic scores trail the oracle ones mostly in rhythm (guarded onset F1
+~0.2 vs ~0.56), and onset-shift F1 is about twice onset F1: windows often get the rhythm right but
+place it at the wrong point in the bar. A window sees ~128 notes, a few bars, and has to work out
+the meter and where the bar starts on its own. Three fixes, each optional and recorded in the
+checkpoint (so evaluation and the demo follow it automatically):
+
+- **Context notes** (`--context-before N --context-after M`): the encoder also sees the N performed
+  notes before the window and the M after it, flagged by two extra input features (10 instead of
+  8), so it can read the rhythm and meter around the window. The target is unchanged: the model
+  still writes only the window's notes. The notes come from a pool of every stored window of the
+  same performance in absolute time (no data rebuild), get the same augmentation as the window and
+  their own synthetic noise, and are assembled by one function (`dataset.assemble_notes`) for
+  training and for the inference pipeline. With both set to 0 the data is identical to before.
+- **Auxiliary metrical head** (`--aux-metrical`, `--aux-weight 0.5`): a linear head on the
+  encoder predicts, for every performed note of the window, whether it starts a bar and its
+  position within the beat (on the beat, an eighth, a triplet, a sixteenth, finer), so the encoder
+  has to learn the bar phase from the timing. Labels (`src/metrical.py`) come from aligning each
+  window's performed notes to its score: a rank-based first time map that follows any rubato, then
+  order-preserving per-pitch matching and two refits through the matches. On performances rendered
+  from real windows' scores (drifting tempo, chord asynchrony, 3% dropped and 3% extra notes) the
+  labels are 99% correct and cover 97% of the notes; on the real data they cover 88% (test) and
+  91% (train) of performed notes (the rest are mostly ornaments and grace notes the score writes
+  differently). `scripts/build_metrical.py` precomputes them into `<split>/metrical.npy` once per
+  data build (45 s on 6 cores here); validation logs the head's downbeat F1 and phase accuracy. The
+  head is used only in training; decoding never touches it.
+- **Meter consistency** (decoding mode `meter`, below): fixes isolated windows whose time signature
+  disagrees with the rest of the piece.
 
 **Evaluation** (`scripts/evaluate_pieces.py`), works for checkpoints of either script:
 
@@ -504,14 +535,15 @@ path (stop + cooldown at the predicted steps, resume after finishing, resume mid
 | `chained` | the model's **own** output so far, window by window through each piece | what a real recording gets, unguarded |
 | `none` | nothing | robustness check |
 | `guarded` | chained, with degenerate windows redone without context (below) | **the system's real performance** (the demo's default) |
+| `meter` | guarded, plus consistent time signatures along each piece (below) | guarded, with the meter fixed |
 
-All four score each window against its ground truth with `src/eval/metrics.py`, so they compare
+All five score each window against its ground truth with `src/eval/metrics.py`, so they compare
 directly with the baselines. `--musicxml N` writes the stitched prediction and ground truth of the
 first N pieces as MusicXML (for figures and for MUSTER / MV2H). Running the script with a subset of
 `--modes` adds those modes to an earlier evaluation's files instead of replacing them.
 
-Chained and guarded decoding live in `src/decoding.py` (`decode_pieces`), which the demo pipeline
-uses too, so the demo and the evaluation run identical decoding. Each window's output is capped at
+Chained, guarded and meter decoding live in `src/decoding.py`, which the demo pipeline uses too, so
+the demo and the evaluation run identical decoding. Each window's output is capped at
 8 tokens per input note + 64 (`decoding.max_new_tokens`): real targets average 3.4 tokens per note
 and the longest train / val / test target is 80% of the cap, so it never truncates a real output;
 it only keeps a looping window from running on to the model's 2,048-token limit.
@@ -554,6 +586,20 @@ so one bad window can no longer take the rest of the piece down with it. `script
 estimates guarded decoding offline from saved chained / none predictions for several margins
 (conservatively: it cannot show the better contexts that follow a replaced window).
 `tests/test_decoding.py` checks the logic with a stand-in model.
+
+**Meter consistency** (`--modes meter`, on by default). A wrong time signature mis-sizes every bar
+of its window, so every later position shifts. Every window opens with `[bar] ts_X`, so after a
+guarded pass the time signatures along a piece can be read off and checked. `smooth_meters` works on
+runs of windows with equal time signatures: a run of at most 2 windows with the same time signature
+on both sides takes it (`A A B A A`, `A B B A A A`); at the start or end of a piece a short run takes
+its neighbour's only if that run is at least twice as long (`B A A`); a genuine change of meter
+(`A A A B B B`) has no short run between equal ones and is kept. Each corrected window is decoded
+again with the new time signature forced as its first token(s), and generating any other time
+signature in that window is blocked (`generate(banned=...)`: without the block a real model writes
+its own `ts_4/4` right after a forced `ts_3/4`). The whole piece is then decoded again from there,
+so the windows after a corrected one see the corrected context. Meter mode reuses guarded mode's
+outputs as its first pass and costs nothing when no window needs fixing; the evaluation reports the
+share of windows corrected (`meter_fix_rate`) and `ts_acc`.
 
 ### Post-milestone results
 
@@ -789,14 +835,18 @@ src/eval/metrics.py              shared window-level metrics
 src/model.py                     Score2Seq: first small encoder-decoder transformer
 src/scoreformer.py               Scoreformer: main model (time-rotary encoder), checkpoint loading
 src/dataset.py     PyTorch Dataset / sampler / collate, context noise (ContextNoise)
-src/decoding.py                  chained / guarded decoding of whole pieces (evaluation and demo)
+src/decoding.py                  chained / guarded / meter decoding of whole pieces (evaluation and demo)
+src/metrical.py                  per-note downbeat / beat-phase labels (alignment) and the aux loss
+scripts/build_metrical.py        precompute the metrical labels of every split (once per data build)
 src/pipeline.py                  audio / MIDI -> windows -> chained decoding -> MusicXML
 demo/app.py, demo/static/        web demo (FastAPI + one HTML page); scripts/audio_to_score.py: CLI
 scripts/train_model.py           train either model; scripts/evaluate_pieces.py: oracle/chained/none
 pace/train.sbatch                PACE GPU job: train + evaluate
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded decoding with a stand-in model
-tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget
+tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
+tests/test_context_notes.py      context notes: exact neighbours, unchanged window notes, both models
+tests/test_metrical.py           metrical labels: synthetic precision / recall, coverage, the aux head
 tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes
 scripts/analyze_chained.py       why chained decoding loses notes (from saved predictions)

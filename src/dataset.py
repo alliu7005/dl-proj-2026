@@ -8,9 +8,22 @@
         ds.set_epoch(epoch)   # new noise each epoch (with num_workers>0 use persistent_workers=False)
 
 Each item:
-    notes       float32 [N, 8]  per-note features (see ``note_features``), sorted by onset
+    notes       float32 [N, F]  per-note features (see ``note_features``), sorted by onset; F = 8, or
+                                10 with context notes
     target      int64   [T]     <bos> [prompt <sep>] score tokens <eos>
     prompt_len  int             tokens before the first one to predict (<bos> + prompt + <sep>)
+    roles       int8    [N]     per note: 0 in the window, 1 carried over into it, 2 context before,
+                                3 context after (``ROLE_*``)
+    downbeat, phase  int8 [N]   with ``metrical=True``: each note's metrical labels for the auxiliary
+                                target (src/metrical.py), -1 where unknown (context, carried, ...)
+
+Context notes (``context_before`` / ``context_after`` > 0): the encoder also sees up to that many
+performed notes just before and just after the window, flagged by two extra features, so it can
+read the rhythm and meter around the window instead of guessing where the bar starts from ~128
+notes alone. The target is unchanged: the model writes the window's notes only. The notes come from
+a pool of every stored window of the same performance in absolute time (no data rebuild needed),
+get the same augmentation as the window and their own synthetic noise, and are assembled by
+``assemble_notes`` exactly as src/pipeline.py does at inference.
 
 The prompt is the score just before the window (see segment.segment_windows); at inference it is
 the tail of the previous window's output, from its last ``bar`` token (pedal tokens removed).
@@ -31,16 +44,20 @@ from .preprocessing.noise import NoiseModel
 from .preprocessing.store import SegmentStore
 from .preprocessing.vocab import BOS, EOS, ORNAMENT_PREFIXES, SEP, Vocab
 
-N_FEATURES = 8
+N_FEATURES = 8           # without context notes
+N_FEATURES_CONTEXT = 10  # with context notes: + "context before", "context after" flags
 SCALED = [1, 2, 3, 4]  # onset, inter-onset gap, log duration, velocity: standardized with train stats
-FEATURE_NAMES = ["pitch", "onset", "ioi", "log_dur", "velocity", "ped_at_onset", "ped_at_offset", "carried"]
+FEATURE_NAMES = ["pitch", "onset", "ioi", "log_dur", "velocity", "ped_at_onset", "ped_at_offset", "carried",
+                 "context_before", "context_after"]
+ROLE_WINDOW, ROLE_CARRIED, ROLE_BEFORE, ROLE_AFTER = 0, 1, 2, 3
 
 
-def note_features(notes: np.ndarray, pedal: np.ndarray) -> np.ndarray:
-    """[N,4] (pitch, onset, dur, vel) -> [N,8]:
+def note_features(notes: np.ndarray, pedal: np.ndarray, roles: np.ndarray | None = None) -> np.ndarray:
+    """[N,4] (pitch, onset, dur, vel) -> [N,8], or [N,10] if ``roles`` is given:
     pitch (int, keep as index for an embedding), onset (s), inter-onset delta (s), log duration,
     velocity / 127, sustain-pedal-down at onset (0/1), sustain-pedal-down at offset (0/1),
-    carried over (0/1: struck before the segment and still held into it; onset < 0)."""
+    carried over (0/1: struck before the segment and still held into it), and with roles: context
+    before / context after (0/1). Without roles, "carried" is onset < 0 (no context notes)."""
     on, dur = notes[:, 1], notes[:, 2]
     delta = np.diff(on, prepend=on[:1]) if len(on) else on
 
@@ -49,8 +66,31 @@ def note_features(notes: np.ndarray, pedal: np.ndarray) -> np.ndarray:
             return np.zeros_like(t)
         return ((t[:, None] >= pedal[None, :, 0]) & (t[:, None] < pedal[None, :, 1])).any(1).astype(np.float32)
 
-    return np.stack([notes[:, 0], on, delta, np.log(np.maximum(dur, 1e-3)), notes[:, 3] / 127.0,
-                     ped_at(on), ped_at(on + dur), (on < 0).astype(np.float32)], axis=1).astype(np.float32)
+    cols = [notes[:, 0], on, delta, np.log(np.maximum(dur, 1e-3)), notes[:, 3] / 127.0, ped_at(on), ped_at(on + dur)]
+    if roles is None:
+        cols.append((on < 0).astype(np.float32))
+    else:
+        cols += [(roles == r).astype(np.float32) for r in (ROLE_CARRIED, ROLE_BEFORE, ROLE_AFTER)]
+    return np.stack(cols, axis=1).astype(np.float32)
+
+
+def assembly(window: np.ndarray, before: np.ndarray, after: np.ndarray):
+    """``assemble_notes`` plus the permutation it applied to [window, before, after] (concatenated),
+    so per-note arrays can follow the notes."""
+    parts = [window, before, after]
+    roles = np.concatenate([np.where(window[:, 1] < 0, ROLE_CARRIED, ROLE_WINDOW),
+                            np.full(len(before), ROLE_BEFORE), np.full(len(after), ROLE_AFTER)]).astype(np.int8)
+    notes = np.concatenate([np.asarray(x, np.float32).reshape(-1, 4) for x in parts])
+    order = np.lexsort((notes[:, 0], notes[:, 1]))
+    return notes[order], roles[order], order
+
+
+def assemble_notes(window: np.ndarray, before: np.ndarray, after: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Window notes (carried-over ones have onset < 0) plus context notes, all [K,4] in the
+    window's time frame -> (notes sorted by onset then pitch, roles). Shared by the Dataset and the
+    inference pipeline so both build identical inputs."""
+    notes, roles, _ = assembly(window, before, after)
+    return notes, roles
 
 
 def compute_feature_stats(split_dir: str, out_path: str, n: int = 5000, seed: int = 0) -> dict:
@@ -70,13 +110,18 @@ def compute_feature_stats(split_dir: str, out_path: str, n: int = 5000, seed: in
     return stats
 
 
+def released_mask(notes: np.ndarray, min_end: float | None) -> np.ndarray:
+    """Which notes ``drop_released_carried`` keeps."""
+    if min_end is None or not len(notes):
+        return np.ones(len(notes), bool)
+    return (notes[:, 1] >= 0) | (notes[:, 1] + notes[:, 2] >= min_end)
+
+
 def drop_released_carried(notes: np.ndarray, min_end: float | None) -> np.ndarray:
     """Carried-over candidates (onset < 0) are kept only if the key is still down at ``min_end``
     (segment seconds). Applied after noise, so pedal lengthening in the noise model can turn a
     pedal-sustained note into a carried one, as in real transcriptions."""
-    if min_end is None or not len(notes):
-        return notes
-    return notes[(notes[:, 1] >= 0) | (notes[:, 1] + notes[:, 2] >= min_end)]
+    return notes[released_mask(notes, min_end)]
 
 
 @dataclass
@@ -230,13 +275,17 @@ class ScoreSegmentDataset(Dataset):
     def __init__(self, split_dir: str, vocab_path: str, noise: NoiseModel | None = None,
                  seed: int = 0, ornament_oversample: float = 3.0, augment: AugmentConfig | None = None,
                  use_prompt: bool = True, prompt_dropout: float = 0.1, feature_stats: str | None = "auto",
-                 context_noise: ContextNoise | None = None):
+                 context_noise: ContextNoise | None = None, context_before: int = 0, context_after: int = 0,
+                 metrical: bool = False):
         """``prompt_dropout``: chance (when training, i.e. with noise or augmentation) of hiding the
         prompt, so the model also works without context (first window of a piece, or after a bad
         window). ``feature_stats``: JSON from ``compute_feature_stats`` (written by build_dataset.py
         next to vocab.json; "auto" = use it if present, None = leave features unscaled).
         ``context_noise``: corrupt the prompt of this fraction of training windows (see
-        ``ContextNoise``); like prompt dropout, only when training."""
+        ``ContextNoise``); like prompt dropout, only when training. ``context_before`` /
+        ``context_after``: context notes the encoder also sees (module docstring); 0 = none.
+        ``metrical``: add per-note metrical labels (src/metrical.py), read from the split's
+        metrical.npy if scripts/build_metrical.py made it, else aligned on the fly."""
         self.store = SegmentStore(split_dir)
         self.vocab = Vocab.load(vocab_path)
         self.noise = noise
@@ -247,6 +296,16 @@ class ScoreSegmentDataset(Dataset):
         self.use_prompt, self.prompt_dropout = use_prompt, prompt_dropout
         self.context_noise = context_noise if context_noise and context_noise.prob > 0 else None
         self._ctx = _ContextCorrupter(self.vocab, context_noise) if self.context_noise else None
+        self.context_before, self.context_after = int(context_before), int(context_after)
+        self.with_context = self.context_before > 0 or self.context_after > 0
+        self._pools: dict = {}  # performance -> (notes, keys, pedal) in absolute time, built lazily
+        self._by_perf = None
+        self.metrical = bool(metrical)
+        self._mfile = None
+        self._mcache: dict = {}
+        if self.metrical:
+            from .metrical import load_split_labels
+            self._mfile = load_split_labels(split_dir, len(self.store.notes))
         if feature_stats == "auto":
             auto = Path(vocab_path).with_name("feature_stats.json")
             feature_stats = str(auto) if auto.exists() else None
@@ -266,6 +325,71 @@ class ScoreSegmentDataset(Dataset):
     def set_epoch(self, epoch: int):
         """Call each epoch so the injected noise differs between epochs but stays reproducible."""
         self.epoch = epoch
+
+    @staticmethod
+    def _keys(pitch: np.ndarray, abs_on: np.ndarray) -> np.ndarray:
+        """One integer per performed note: pitch and absolute onset in milliseconds."""
+        return pitch.astype(np.int64) * 10_000_000_000 + np.round(abs_on * 1000).astype(np.int64)
+
+    def _pool(self, perf: str):
+        """All notes and pedal intervals of one performance, in absolute seconds, from every stored
+        window of it (windows overlap during training, so notes are de-duplicated)."""
+        if perf not in self._pools:
+            if self._by_perf is None:
+                self._by_perf = {}
+                for j, m in enumerate(self.store.meta):
+                    self._by_perf.setdefault(m["performance"], []).append(j)
+            notes, peds = [], []
+            for j in self._by_perf[perf]:
+                n, p, _ = self.store.get(j)
+                t0 = float(self.store.meta[j]["perf_t0"])
+                a = n.astype(np.float64).copy()
+                a[:, 1] += t0
+                notes.append(a)
+                if len(p):
+                    peds.append(p.astype(np.float64) + t0)
+            a = np.concatenate(notes)
+            keys = self._keys(a[:, 0], a[:, 1])
+            keys, first = np.unique(keys, return_index=True)
+            a = a[first]
+            order = np.argsort(a[:, 1], kind="stable")
+            ped = np.concatenate(peds) if peds else np.zeros((0, 2))
+            if len(ped):
+                _, pf = np.unique(np.round(ped * 1000).astype(np.int64), axis=0, return_index=True)
+                ped = ped[np.sort(pf)]
+            self._pools[perf] = (a[order], keys[order], ped)
+        return self._pools[perf]
+
+    def _context(self, i: int, window: np.ndarray):
+        """(before [<=context_before, 4], after [<=context_after, 4], pedal [K,2]) for window ``i``,
+        in its time frame (seconds from perf_t0); notes of the window itself are left out."""
+        m = self.store.meta[i]
+        t0 = float(m["perf_t0"])
+        pool, keys, ped = self._pool(m["performance"])
+        own = self._keys(window[:, 0], window[:, 1].astype(np.float64) + t0)
+        free = ~np.isin(keys, own)
+        before = pool[free & (pool[:, 1] < t0)]
+        before = before[-self.context_before:] if self.context_before else before[:0]  # ([-0:] = all)
+        after = pool[free & (pool[:, 1] >= t0)][:self.context_after]
+        lo = float(before[:, 1].min()) if len(before) else t0
+        hi = t0 + float(m["window_sec"])
+        if len(after):
+            hi = max(hi, float((after[:, 1] + after[:, 2]).max()))
+        ped = ped[(ped[:, 1] > lo) & (ped[:, 0] < hi)] if len(ped) else ped
+        shift = np.array([0, t0, 0, 0])
+        return ((before - shift).astype(np.float32), (after - shift).astype(np.float32),
+                (ped - t0).astype(np.float32).reshape(-1, 2))
+
+    def _metrical(self, i: int, notes: np.ndarray, tokens: np.ndarray) -> np.ndarray:
+        """[n, 2] (downbeat, phase) for the stored notes of window ``i``."""
+        if self._mfile is not None:
+            a0, a1 = self.store.index[i, 0], self.store.index[i, 1]
+            return np.array(self._mfile[a0:a1])
+        if i not in self._mcache:
+            from .metrical import align
+            d, ph = align(notes[:, 1], notes[:, 0], self.vocab.decode(tokens.tolist()))
+            self._mcache[i] = np.stack([d, ph], axis=1)
+        return self._mcache[i]
 
     def sampler(self) -> WeightedRandomSampler:
         """Oversamples segments containing grace notes / arpeggios / ornaments."""
@@ -303,11 +427,29 @@ class ScoreSegmentDataset(Dataset):
         prompt = self.store.get_prompt(i) if self.use_prompt else np.zeros(0, dtype=np.int64)
         rng = np.random.default_rng((self.seed, self.epoch, i))
         tempo = 1.0
+        lab = self._metrical(i, notes, tokens) if self.metrical else None  # rows follow the window notes
+        if self.with_context:
+            before, after, cped = self._context(i, notes)
+            nb, nw, npw = len(before), len(notes), len(pedal)
+            notes = np.concatenate([before, notes, after])  # augmented together: same key and tempo
+            pedal = np.concatenate([pedal.reshape(-1, 2), cped])
         if self.augment is not None:
             notes, pedal, tokens, prompt, tempo = self._augment(notes, pedal, tokens, prompt, rng)
+        if self.with_context:
+            before, notes, after = notes[:nb], notes[nb:nb + nw], notes[nb + nw:]
+            pedal, cped = pedal[:npw], pedal[npw:]
         # synthetic noise only on clean performances: real transcriptions are noisy already
-        if self.noise is not None and self.store.meta[i].get("source", "clean") == "clean":
+        clean = self.store.meta[i].get("source", "clean") == "clean"
+        if self.noise is not None and clean:
+            ref = notes
             notes, pedal = self.noise(notes, pedal, rng)
+            if lab is not None:  # noise moved, dropped and added notes: carry the labels across
+                from .metrical import transfer
+                lab = np.stack(transfer((lab[:, 0], lab[:, 1]), ref, notes), axis=1)
+            if self.with_context:  # context notes come from the same transcriber: noise them too
+                nrng = np.random.default_rng((self.seed, self.epoch, i, 11))
+                before = self.noise(before, cped, nrng)[0] if len(before) else before
+                after = self.noise(after, cped, nrng)[0] if len(after) else after
         training = self.noise is not None or self.augment is not None
         if training and rng.random() < self.prompt_dropout:
             prompt = prompt[:0]
@@ -317,15 +459,31 @@ class ScoreSegmentDataset(Dataset):
             if crng.random() < self.context_noise.prob:
                 prompt = self._ctx(prompt, crng)
         min_end = self.store.meta[i].get("carry_min_sec")
-        notes = drop_released_carried(notes, None if min_end is None else min_end * tempo)
+        keep = released_mask(notes, None if min_end is None else min_end * tempo)
+        notes = notes[keep]
+        if lab is not None:
+            lab = lab[keep]
         head = np.concatenate([[self.bos], prompt, [self.sep]]) if len(prompt) else np.array([self.bos])
         target = np.concatenate([head, tokens, [self.eos]])
-        feats = note_features(notes, pedal)
+        if self.with_context:
+            nb_, na_ = len(before), len(after)
+            notes, roles, order = assembly(notes, before, after)
+            feats = note_features(notes, np.concatenate([pedal.reshape(-1, 2), cped]), roles)
+            if lab is not None:
+                lab = np.concatenate([lab, np.full((nb_ + na_, 2), -1, np.int8)])[order]
+        else:
+            roles = np.where(notes[:, 1] < 0, ROLE_CARRIED, ROLE_WINDOW).astype(np.int8)
+            feats = note_features(notes, pedal)
         if self.scale is not None:
             cols, mean, std = self.scale
             feats[:, cols] = (feats[:, cols] - mean) / std
-        return {"notes": torch.from_numpy(feats),
+        item = {"notes": torch.from_numpy(feats), "roles": torch.from_numpy(roles),
                 "target": torch.from_numpy(target), "prompt_len": len(head)}
+        if lab is not None:
+            lab = np.where((roles <= ROLE_CARRIED)[:, None] & (notes[:, 1] >= 0)[:, None], lab, -1)
+            item["downbeat"] = torch.from_numpy(lab[:, 0].astype(np.int64))
+            item["phase"] = torch.from_numpy(lab[:, 1].astype(np.int64))
+        return item
 
 
 def collate(batch, pad_id: int = 0):
@@ -337,7 +495,7 @@ def collate(batch, pad_id: int = 0):
     B = len(batch)
     n = max(len(b["notes"]) for b in batch)
     t = max(len(b["target"]) for b in batch)
-    notes = torch.zeros(B, n, N_FEATURES)
+    notes = torch.zeros(B, n, batch[0]["notes"].shape[1])
     mask = torch.zeros(B, n, dtype=torch.bool)
     target = torch.full((B, t), pad_id, dtype=torch.long)
     loss_mask = torch.zeros(B, t, dtype=torch.bool)
@@ -346,7 +504,14 @@ def collate(batch, pad_id: int = 0):
         mask[k, : len(b["notes"])] = True
         target[k, : len(b["target"])] = b["target"]
         loss_mask[k, b["prompt_len"]: len(b["target"])] = True
-    return {"notes": notes, "note_mask": mask, "target": target, "loss_mask": loss_mask}
+    out = {"notes": notes, "note_mask": mask, "target": target, "loss_mask": loss_mask}
+    for key in ("downbeat", "phase"):  # metrical labels, padded with -1 (ignored)
+        if key in batch[0]:
+            lab = torch.full((B, n), -1, dtype=torch.long)
+            for k, b in enumerate(batch):
+                lab[k, : len(b[key])] = b[key]
+            out[key] = lab
+    return out
 
 
 class MixedTrainDataset(Dataset):
@@ -363,13 +528,14 @@ class MixedTrainDataset(Dataset):
 
     def __init__(self, clean_dir: str, real_dir: str, vocab_path: str, noise: NoiseModel | None,
                  augment: AugmentConfig | None = None, real_fraction: float = 0.3, seed: int = 0,
-                 ornament_oversample: float = 3.0, context_noise: ContextNoise | None = None):
+                 ornament_oversample: float = 3.0, context_noise: ContextNoise | None = None,
+                 context_before: int = 0, context_after: int = 0, metrical: bool = False):
+        ctx = dict(context_noise=context_noise, context_before=context_before, context_after=context_after,
+                   metrical=metrical)
         self.synthetic = ScoreSegmentDataset(clean_dir, vocab_path, noise=noise, augment=augment,
-                                             seed=seed, ornament_oversample=ornament_oversample,
-                                             context_noise=context_noise)
+                                             seed=seed, ornament_oversample=ornament_oversample, **ctx)
         self.real = ScoreSegmentDataset(real_dir, vocab_path, noise=None, augment=augment,
-                                        seed=seed + 1, ornament_oversample=ornament_oversample,
-                                        context_noise=context_noise)
+                                        seed=seed + 1, ornament_oversample=ornament_oversample, **ctx)
         self.vocab = self.synthetic.vocab
         self.real_fraction = real_fraction
         self.n_syn = len(self.synthetic)

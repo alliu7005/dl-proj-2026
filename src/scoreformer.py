@@ -57,6 +57,10 @@ class ScoreformerConfig:
     time_max_period: float = 60.0
     n_time_bins: int = 64
     n_vel_bins: int = 32
+    n_features: int = 8           # per-note input features: 8, or 10 with context notes (dataset.py)
+    context_before: int = 0       # context notes the Dataset / pipeline add before each window
+    context_after: int = 0        # ... and after it (0 = none)
+    aux_metrical: bool = False    # auxiliary head: each note's downbeat / beat phase (src/metrical.py)
 
     def to_dict(self):
         return asdict(self)
@@ -186,7 +190,8 @@ class NoteEmbedding(nn.Module):
         self.dur = nn.Embedding(c.n_time_bins, d)
         self.vel = nn.Embedding(c.n_vel_bins, d)
         self.cont = nn.Linear(4, d)                           # standardized onset, ioi, log dur, vel
-        self.flags = nn.Linear(3, d)                          # pedal at onset / release, carried over
+        self.flags = nn.Linear(c.n_features - 5, d)           # pedal at onset / release, carried over
+                                                              # (+ context before / after)
         self.norm = nn.LayerNorm(d)
         self.drop = nn.Dropout(c.dropout)
         self.n_time, self.n_vel = c.n_time_bins, c.n_vel_bins
@@ -201,7 +206,7 @@ class NoteEmbedding(nn.Module):
              + self.ioi(log_bin(ioi, 0.005, 4.0, self.n_time))
              + self.dur(log_bin(dur, 0.01, 10.0, self.n_time))
              + self.vel((vel * self.n_vel).long().clamp(0, self.n_vel - 1))
-             + self.cont(x[..., 1:5]) + self.flags(x[..., 5:8]))
+             + self.cont(x[..., 1:5]) + self.flags(x[..., 5:]))
         h = h * mask[..., None]
         return self.drop(self.norm(h)), torch.where(mask, onset, torch.zeros_like(onset))
 
@@ -227,6 +232,8 @@ class Scoreformer(nn.Module):
         self.out_norm = nn.LayerNorm(c.d_model)
         self.head = nn.Linear(c.d_model, c.vocab_size, bias=False)
         self.head.weight = self.tok.weight  # tied embeddings
+        # training-only auxiliary head on the encoder: 1 downbeat logit + metrical.N_PHASE phase logits
+        self.aux = nn.Linear(c.d_model, 1 + 5) if c.aux_metrical else None
         # rotary frequencies: encoder = onset seconds (periods time_min..time_max, geometric),
         # decoder = token index (the usual base 10000)
         periods = torch.logspace(math.log10(c.time_min_period), math.log10(c.time_max_period), dh // 2)
@@ -257,7 +264,9 @@ class Scoreformer(nn.Module):
         return self.enc_norm(h), mask
 
     # ---- training
-    def forward(self, notes, note_mask, dec_in):
+    def forward(self, notes, note_mask, dec_in, return_aux: bool = False):
+        """Token logits [B,T,V]; with ``return_aux`` also the auxiliary metrical logits [B,N,6]
+        (None without the head)."""
         memory, mm = self.encode(notes, note_mask)
         T = dec_in.shape[1]
         pos = torch.arange(T, device=dec_in.device)[None].expand(dec_in.shape[0], T)
@@ -265,15 +274,22 @@ class Scoreformer(nn.Module):
         cos, sin = rope_angles(pos, self.tok_freq)
         for layer in self.dec:
             h, _ = layer(h, cos, sin, layer.cross.memory_kv(memory), mm)
-        return self.head(self.out_norm(h))
+        logits = self.head(self.out_norm(h))
+        if return_aux:
+            return logits, (self.aux(memory) if self.aux is not None else None)
+        return logits
 
     # ---- inference
     @torch.no_grad()
-    def generate(self, notes, note_mask, prefix: list[torch.Tensor], eos_id: int, max_new: int = 1200):
+    def generate(self, notes, note_mask, prefix: list[torch.Tensor], eos_id: int, max_new: int = 1200,
+                 banned: torch.Tensor | None = None):
         """Greedy decoding with a KV cache. ``prefix[b]`` = <bos> [prompt <sep>] for item b.
         Prefixes are left-padded; padded positions are masked as keys and rotary positions count
-        real tokens only. Returns, per item, the generated ids after the prefix (without <eos>)."""
+        real tokens only. ``banned``: optional bool [B, vocab] of tokens row b may not generate
+        (e.g. a second time signature after a forced one). Returns, per item, the generated ids
+        after the prefix (without <eos>)."""
         B, dev = len(prefix), notes.device
+        ban = banned.to(dev) if banned is not None else None
         memory, mm = self.encode(notes, note_mask)
         mem_kv = [layer.cross.memory_kv(memory) for layer in self.dec]
         Lp = max(len(p) for p in prefix)
@@ -298,6 +314,8 @@ class Scoreformer(nn.Module):
         cur = pos[:, -1]
         n_out = 0
         for step in range(max_new):
+            if ban is not None:
+                logits = logits.masked_fill(ban, float("-inf"))
             nxt = torch.where(done, torch.zeros_like(done, dtype=torch.long), logits.argmax(-1))
             out[:, step] = nxt
             n_out = step + 1

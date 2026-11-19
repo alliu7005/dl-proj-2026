@@ -121,6 +121,31 @@ sbatch --gres=gpu:rtx_pro_6000_blackwell:1 --export=ALL,NAME=sf_base_reg20,ARGS=
 `sf_base`'s climbed? With early stopping it ends 5 epochs after its best plus the cooldown, which
 answers the question either way.
 
+## 4d. Bar alignment: context notes, auxiliary metrical head, meter consistency
+
+```bash
+bash pace/bar_alignment.sh       # labels + tests on CPU, then 4 GPU runs (Blackwell); GPU=h100 bash ... for another type
+```
+
+A CPU job first builds the metrical labels for this data build (`scripts/build_metrical.py`, a few
+minutes) and runs the new tests on it; the four training jobs only start if that passes. Every run
+trains with early stopping and is then evaluated in all five modes (oracle, chained, none, guarded,
+meter).
+
+| run | what it adds to s2s | compare with |
+|---|---|---|
+| `s2s_c` | 64 context notes before / 32 after each window | `s2s` |
+| `s2s_a` | auxiliary metrical head (downbeat + beat phase of every note) | `s2s` |
+| `s2s_ca` | both | `s2s_c`, `s2s_a` |
+| `s2s_m_ca` | both, 25.9M parameters, dropout 0.2, weight decay 0.1, lr 2e-4 | `s2s_ca` |
+
+The existing runs get the new `meter` mode without retraining (only that mode is decoded and merged
+into their results):
+
+```bash
+ARGS="--modes meter" bash pace/reevaluate.sh s2s s2s_ctx sf_base_reg
+```
+
 ## 5. Bring results back
 
 ```bash

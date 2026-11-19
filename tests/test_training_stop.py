@@ -12,6 +12,7 @@ early stopping is guaranteed to fire at a known step:
   resume (cool)   a checkpoint saved mid-cooldown finishes the cooldown, then stops
   --cooldown 0    an early stop ends training at once
   --patience 0    no early stopping: runs to --max-steps
+  context + aux   context notes and the auxiliary metrical head are recorded and kept on resume
 """
 from __future__ import annotations
 
@@ -123,6 +124,37 @@ def test_no_cooldown_and_no_patience():
         out = train(name, "--patience", "0", "--max-steps", "12")
         assert "early stop" not in out and done_step(out) == 12, out
         assert ckpt(name)["phase"] == "done"
+    finally:
+        shutil.rmtree(RUNS / name, ignore_errors=True)
+
+
+def test_context_and_aux_training():
+    """A short real run with context notes and the auxiliary metrical head: the checkpoint records
+    both, validation logs the head's scores, and a resume without the flags keeps the run's inputs."""
+    import csv
+    import json
+    name = fresh("_test_ctxaux")
+    try:
+        extra = ["--lr", "1e-3", "--patience", "0", "--max-steps", "6", "--context-before", "16",
+                 "--context-after", "8", "--aux-metrical"]
+        train(name, *extra)
+        cfg = json.loads((RUNS / name / "config.json").read_text())["model"]
+        assert cfg["n_features"] == 10 and cfg["context_before"] == 16 and cfg["context_after"] == 8
+        assert cfg["aux_metrical"] is True
+        rows = list(csv.DictReader(open(RUNS / name / "log.csv")))
+        assert "val_asap_downbeat_f1" in rows[-1] and "val_asap_phase_acc" in rows[-1]
+        ck = ckpt(name)
+        assert any(k.startswith("aux.") for k in ck["model"])
+        # resume mid-run with no context / aux flags at all: the run keeps what it was started with
+        # (its data would not even fit the model otherwise: 10 input features, auxiliary labels)
+        ck["phase"], ck["step"] = "train", 3
+        torch.save(ck, RUNS / name / "last.pt")
+        out = train(name, "--lr", "1e-3", "--patience", "0", "--max-steps", "6", resume=True)
+        assert done_step(out) == 6 and "early stop" not in out, out
+        cfg2 = ckpt(name)["config"]
+        assert cfg2["context_before"] == 16 and cfg2["aux_metrical"] is True
+        out = train(name, "--lr", "1e-3", "--patience", "0", "--max-steps", "6", resume=True)
+        assert "already finished" in out and "early stop" not in out, out  # a finished run is not "early"
     finally:
         shutil.rmtree(RUNS / name, ignore_errors=True)
 

@@ -38,6 +38,10 @@ class ModelConfig:
     max_tokens: int = 2048       # decoder positions (prompt + target)
     max_notes: int = 1024        # encoder positions (inputs are truncated to this)
     n_fourier: int = 16          # onset Fourier features
+    n_features: int = 8          # per-note input features: 8, or 10 with context notes (dataset.py)
+    context_before: int = 0      # context notes the Dataset / pipeline add before each window
+    context_after: int = 0       # ... and after it (0 = none)
+    aux_metrical: bool = False   # auxiliary head: each note's downbeat / beat phase (src/metrical.py)
 
     def to_dict(self):
         return asdict(self)
@@ -56,7 +60,7 @@ class NoteEncoder(nn.Module):
     def __init__(self, c: ModelConfig):
         super().__init__()
         self.pitch = nn.Embedding(90, c.d_model, padding_idx=0)       # 0 = padding, 1..88 = keys
-        self.cont = nn.Linear(7, c.d_model)
+        self.cont = nn.Linear(c.n_features - 1, c.d_model)  # every feature but the pitch
         self.freqs = nn.Parameter(torch.logspace(-1, 1.5, c.n_fourier) * math.pi, requires_grad=False)
         self.fourier = nn.Linear(2 * c.n_fourier, c.d_model)
         self.register_buffer("pos", _sinusoid(c.max_notes, c.d_model), persistent=False)
@@ -68,7 +72,7 @@ class NoteEncoder(nn.Module):
         self.out_norm = nn.LayerNorm(c.d_model)
 
     def forward(self, x, mask):
-        """x [B,N,8], mask [B,N] True = real note -> memory [B,N,D]."""
+        """x [B,N,n_features], mask [B,N] True = real note -> memory [B,N,D]."""
         n = x.shape[1]
         pitch = torch.where(mask, (x[..., 0] - 20).clamp(1, 89), torch.zeros_like(x[..., 0])).long()
         ang = x[..., 1:2] * self.freqs
@@ -139,6 +143,8 @@ class Score2Seq(nn.Module):
         self.out_norm = nn.LayerNorm(c.d_model)
         self.head = nn.Linear(c.d_model, c.vocab_size, bias=False)
         self.head.weight = self.tok.weight  # tied embeddings
+        # training-only auxiliary head on the encoder: 1 downbeat logit + metrical.N_PHASE phase logits
+        self.aux = nn.Linear(c.d_model, 1 + 5) if c.aux_metrical else None
         # small init: nn.Embedding's default N(0, 1) makes the tied output logits huge
         for emb in (self.tok, self.tok_pos, self.encoder.pitch):
             nn.init.normal_(emb.weight, std=0.02)
@@ -150,22 +156,29 @@ class Score2Seq(nn.Module):
     def _mem_mask(note_mask):
         return note_mask[:, None, None, :]  # [B,1,1,N] True = attend
 
-    def forward(self, notes, note_mask, dec_in):
+    def forward(self, notes, note_mask, dec_in, return_aux: bool = False):
+        """Token logits [B,T,V]; with ``return_aux`` also the auxiliary metrical logits [B,N,6]
+        (None without the head)."""
         memory = self.encoder(notes, note_mask)
         mm = self._mem_mask(note_mask)
         t = dec_in.shape[1]
         h = self.drop(self.tok(dec_in) + self.tok_pos(torch.arange(t, device=dec_in.device)))
         for layer in self.layers:
             h, _ = layer(h, layer.cross_kv(memory), mm)
-        return self.head(self.out_norm(h))
+        logits = self.head(self.out_norm(h))
+        if return_aux:
+            return logits, (self.aux(memory) if self.aux is not None else None)
+        return logits
 
     @torch.no_grad()
-    def generate(self, notes, note_mask, prefix: list[torch.Tensor], eos_id: int, max_new: int = 1200):
+    def generate(self, notes, note_mask, prefix: list[torch.Tensor], eos_id: int, max_new: int = 1200,
+                 banned: torch.Tensor | None = None):
         """Greedy decoding with a KV cache. ``prefix[b]`` = <bos> [prompt <sep>] for item b.
         Prefixes are LEFT-padded so every row's next token sits at the same column; padded
         positions are masked out as keys and position ids count real tokens only.
         Returns, per item, the generated token ids after the prefix (without <eos>)."""
         B, dev = len(prefix), notes.device
+        ban = banned.to(dev) if banned is not None else None  # bool [B, vocab]: never generate
         memory = self.encoder(notes, note_mask)
         mm = self._mem_mask(note_mask)
         mem_kv = [layer.cross_kv(memory) for layer in self.layers]
@@ -192,6 +205,8 @@ class Score2Seq(nn.Module):
         n_out = 0
         cur_pos = pos[:, -1]
         for step in range(max_new):
+            if ban is not None:
+                logits = logits.masked_fill(ban, float("-inf"))
             nxt = logits.argmax(-1)
             nxt = torch.where(done, torch.zeros_like(nxt), nxt)
             out[:, step] = nxt

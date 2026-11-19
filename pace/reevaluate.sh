@@ -3,12 +3,15 @@
 #   bash pace/reevaluate.sh                          # the six post-milestone comparison runs
 #   bash pace/reevaluate.sh s2s sf_base_reg          # specific runs
 #   GPU=h100 bash pace/reevaluate.sh                 # another GPU type
+#   ARGS="--modes meter" bash pace/reevaluate.sh s2s # extra evaluate_pieces.py arguments, e.g. add
+#                                                    # one mode (merged into the existing results)
 #
 # Why: decoding now caps each window's output (src/decoding.py max_new_tokens) and adds the guarded
-# mode, so oracle / chained / none / guarded are re-run together and every number in a comparison
+# and meter modes, so oracle / chained / none / guarded / meter are re-run together and every number in a comparison
 # comes from the same code. One GPU job per run (pace/evaluate.sbatch), ~1-2 h each.
 set -euo pipefail
 GPU=${GPU:-rtx_pro_6000_blackwell}
+ARGS=${ARGS:-}
 RUNS=("$@")
 [ ${#RUNS[@]} -eq 0 ] && RUNS=(s2s s2s_ctx sf_small sf_small_ctx sf_base sf_base_reg)
 for r in "${RUNS[@]}"; do
@@ -22,7 +25,7 @@ for r in "${RUNS[@]}"; do
     echo "  skip $r: already being evaluated (job $busy)"
     continue
   fi
-  id=$(sbatch --parsable --gres=gpu:${GPU}:1 -J "eval_$r" --export=ALL,NAME="$r" pace/evaluate.sbatch)
-  echo "  $r: job $id"
+  id=$(sbatch --parsable --gres=gpu:${GPU}:1 -J "eval_$r" --export=ALL,NAME="$r",ARGS="$ARGS" pace/evaluate.sbatch)
+  echo "  $r: job $id${ARGS:+  ($ARGS)}"
 done
 echo "watch: squeue -u \$USER     logs: slurm-eval_<run>-<job>.out"

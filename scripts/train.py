@@ -63,7 +63,9 @@ class TruncatingCollate:
     def __call__(self, batch):
         for b in batch:
             if len(b["notes"]) > self.max_notes:
-                b["notes"] = b["notes"][:self.max_notes]
+                for key in ("notes", "roles", "downbeat", "phase"):  # per-note arrays stay aligned
+                    if key in b:
+                        b[key] = b[key][:self.max_notes]
             if len(b["target"]) > self.max_tokens:
                 b["target"] = b["target"][:self.max_tokens]
         return collate(batch)

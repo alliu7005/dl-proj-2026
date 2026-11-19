@@ -1,4 +1,4 @@
-"""Evaluate a checkpoint (Scoreformer or Score2Seq) on the test sets, with four context modes.
+"""Evaluate a checkpoint (Scoreformer or Score2Seq) on the test sets, with five context modes.
 
     python scripts/evaluate_pieces.py --run sf_base                     # all conditions, all modes
     python scripts/evaluate_pieces.py --run sf_base --modes chained --conditions periscope --musicxml 5
@@ -18,7 +18,10 @@ Prompt modes (the decoder's context before each window):
            (by more than --guard-margin pitch F1) with the window's INPUT notes, which are known at
            inference. The kept output is also the next window's history, so one degenerate window
            (no notes, or a loop) no longer derails the windows after it.
-Chained and guarded decoding are src/decoding.py.decode_pieces, the same code the demo runs.
+  meter    guarded, then time signatures made consistent along each piece: a window whose time
+           signature disagrees with a clear majority of its neighbours is decoded again with that
+           one forced, and the piece re-decoded from there (src/decoding.py decode_pieces_meter).
+Chained, guarded and meter decoding are src/decoding.py, the same code the demo runs.
 All modes score every window against its ground-truth target with src/eval/metrics.py, so the
 numbers are comparable with each other and with scripts/run_baselines.py. A window whose
 predecessor was dropped by preprocessing starts without a prompt in chained mode.
@@ -29,8 +32,8 @@ Outputs in outputs/runs/<run>/ (modes already in these files from an earlier run
 ``--modes guarded`` adds to a full evaluation instead of replacing it):
   eval_pieces_<ckpt>.json                      metrics[condition][mode]
   pred_pieces_<ckpt>_<condition>.jsonl         per window and mode: performance, win, mode, pred tokens
-  musicxml/<condition>/<performance>_{pred,true}.musicxml   (--musicxml N: first N pieces, guarded mode
-                                               if it is run, else chained)
+  musicxml/<condition>/<performance>_{pred,true}.musicxml   (--musicxml N: first N pieces, from the
+                                               best mode run: meter, else guarded, else chained)
 """
 from __future__ import annotations
 
@@ -46,8 +49,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import SHOW, TruncatingCollate, lower_priority, pick_device  # noqa: E402
-from src.dataset import ScoreSegmentDataset  # noqa: E402
-from src.decoding import decode_pieces, input_agreement, max_new_tokens, pedal_down, stitch  # noqa: E402,F401
+from src.dataset import ROLE_CARRIED, ScoreSegmentDataset  # noqa: E402
+from src.decoding import (decode_pieces, decode_pieces_meter, input_agreement, max_new_tokens,  # noqa: E402,F401
+                          pedal_down, stitch)
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 from src.preprocessing.vocab import BOS, EOS, SEP  # noqa: E402
@@ -56,6 +60,12 @@ from src.scoreformer import load_model  # noqa: E402
 D = Path("data/processed")
 SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed",
           "real_kong": "test_transcribed_kong", "periscope": "test_periscope"}
+
+
+def window_notes(item: dict) -> torch.Tensor:
+    """The window's own notes (in the window or carried into it), without context notes."""
+    x = item["notes"]
+    return x[item["roles"] <= ROLE_CARRIED] if "roles" in item else x
 
 
 def write_xml(tokens: list[str], path: Path) -> str:
@@ -73,14 +83,17 @@ class Decoder:
         self.model, self.vocab, self.coll = model, vocab, coll
         self.device, self.amp, self.bs, self.max_new = device, amp, batch_size, max_new
         self.bos, self.sep, self.eos = vocab.stoi[BOS], vocab.stoi[SEP], vocab.stoi[EOS]
+        self.ts_ids = torch.tensor([i for i, t in enumerate(vocab.itos) if t.startswith("ts_")])
 
-    def prefix(self, prompt_tokens: list[str]) -> torch.Tensor:
-        if not prompt_tokens:
-            return torch.tensor([self.bos])
-        return torch.tensor([self.bos] + self.vocab.encode(prompt_tokens, add_special=False) + [self.sep])
+    def prefix(self, prompt_tokens: list[str], start: list[str] = ()) -> torch.Tensor:
+        """<bos> [prompt <sep>] [start]: ``start`` = tokens the output is forced to begin with."""
+        head = [self.bos] + (self.vocab.encode(prompt_tokens, add_special=False) + [self.sep] if prompt_tokens else [])
+        return torch.tensor(head + self.vocab.encode(list(start), add_special=False))
 
     @torch.no_grad()
-    def __call__(self, items: list[dict], prefixes: list[torch.Tensor]) -> list[list[str]]:
+    def __call__(self, items: list[dict], prefixes: list[torch.Tensor], ban_ts: list[bool] | None = None
+                 ) -> list[list[str]]:
+        """``ban_ts[k]``: item k may not generate a time signature (its own was forced)."""
         out = []
         order = sorted(range(len(items)), key=lambda k: len(items[k]["notes"]))  # less padding
         res = [None] * len(items)
@@ -90,11 +103,17 @@ class Decoder:
             # per-window output budgets (the same as the demo's); greedy decoding is independent per
             # window, so decoding to the batch's largest budget and cutting each output to its own
             # equals decoding each window with its own budget
-            caps = [max_new_tokens(min(len(items[i]["notes"]), self.coll.max_notes), len(prefixes[i]),
+            caps = [max_new_tokens(min(len(window_notes(items[i])), self.coll.max_notes), len(prefixes[i]),
                                    self.max_new) for i in idx]
+            banned = None
+            if ban_ts is not None and any(ban_ts[i] for i in idx):
+                banned = torch.zeros(len(idx), len(self.vocab.itos), dtype=torch.bool)
+                for r, i in enumerate(idx):
+                    if ban_ts[i]:
+                        banned[r, self.ts_ids] = True
             with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
                 preds = self.model.generate(b["notes"].to(self.device), b["note_mask"].to(self.device),
-                                            [prefixes[i] for i in idx], self.eos, max_new=max(caps))
+                                            [prefixes[i] for i in idx], self.eos, max_new=max(caps), banned=banned)
             for i, p, cap in zip(idx, preds, caps):
                 res[i] = self.vocab.decode(list(p)[:cap])
         out.extend(res)
@@ -105,7 +124,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
     ap.add_argument("--ckpt", default="best.pt")
-    ap.add_argument("--modes", default="oracle,chained,none,guarded")
+    ap.add_argument("--modes", default="oracle,chained,none,guarded,meter")
     ap.add_argument("--conditions", default="clean,synthetic,real,real_kong,periscope")
     ap.add_argument("--limit-perfs", type=int, default=0, help="performances per condition (0 = all)")
     ap.add_argument("--musicxml", type=int, default=0, help="write MusicXML for the first N pieces (chained)")
@@ -124,6 +143,8 @@ def main():
     run = Path("outputs/runs") / args.run
     model = load_model(run / args.ckpt, device)
     cfg = model.cfg
+    # context notes the model was trained with (src/dataset.py); 0 for older checkpoints
+    ctx = {k: int(getattr(cfg, k, 0)) for k in ("context_before", "context_after")}
     coll = TruncatingCollate(cfg.max_notes, cfg.max_tokens)
     vocab_path = str(D / "vocab.json")
     modes = args.modes.split(",")
@@ -138,9 +159,9 @@ def main():
             print(f"skip {cond}: {D / split} missing")
             continue
         if cond == "synthetic":  # fixed noise draw (seeded per window), no prompt dropout
-            ds = ScoreSegmentDataset(str(D / split), vocab_path, noise=nm, seed=12345, prompt_dropout=0.0)
+            ds = ScoreSegmentDataset(str(D / split), vocab_path, noise=nm, seed=12345, prompt_dropout=0.0, **ctx)
         else:
-            ds = ScoreSegmentDataset(str(D / split), vocab_path)
+            ds = ScoreSegmentDataset(str(D / split), vocab_path, **ctx)
         if len(ds) == 0:
             print(f"skip {cond}: {split} is empty")
             continue
@@ -173,26 +194,37 @@ def main():
         def contiguous(prev, i):  # the window starts where the previous one ended (none was dropped)
             return meta[prev].get("s_hi") is not None and meta[prev]["s_hi"] == meta[i].get("s_lo")
 
-        def decode(ws, contexts):
-            return dec([items[i] for i in ws], [dec.prefix(c) for c in contexts])
+        def decode(ws, contexts, starts):
+            # a forced time signature must also stay the window's only one: ban generating another
+            ban = [any(t.startswith("ts_") for t in s) for s in starts]
+            out = dec([items[i] for i in ws], [dec.prefix(c, s) for c, s in zip(contexts, starts)], ban)
+            return [list(s) + o for s, o in zip(starts, out)]  # forced starts are part of the output
 
-        for cmode in [m for m in ("chained", "guarded") if m in modes]:
-            guarded = cmode == "guarded"
-            outs, history, fbs = decode_pieces(
-                {p: perfs[p] for p in names}, decode, contiguous=contiguous,
-                guard_margin=args.guard_margin if guarded else None,
-                pitches=lambda i: items[i]["notes"][:, 0].tolist(),
-                alone={(p, j): preds[("none", i)] for p in names for j, i in enumerate(perfs[p])
-                       if ("none", i) in preds} if guarded else None,
-                progress=lambda j, n: print(f"{cond}: {cmode} window {j}/{n}", end="\r", flush=True))
-            preds.update({(cmode, perfs[p][j]): o for (p, j), o in outs.items()})
-            if guarded:
-                fallback[cond] = len(fbs) / len(windows)
-                print(f"{cond}: guarded done, {fallback[cond]:.1%} of windows fell back to no prompt   ", flush=True)
+        by_piece = {p: perfs[p] for p in names}
+        alone = {(p, j): preds[("none", i)] for p in names for j, i in enumerate(perfs[p]) if ("none", i) in preds}
+        common = dict(contiguous=contiguous, pitches=lambda i: window_notes(items[i])[:, 0].tolist())
+        guarded_pass, forced = None, {}
+        for cmode in [m for m in ("chained", "guarded", "meter") if m in modes]:
+            show = lambda j, n, cm=cmode: print(f"{cond}: {cm} window {j}/{n}", end="\r", flush=True)
+            if cmode == "chained":
+                outs, history, fbs = decode_pieces(by_piece, decode, progress=show, **common)
+            elif cmode == "guarded":
+                outs, history, fbs = guarded_pass = decode_pieces(
+                    by_piece, decode, guard_margin=args.guard_margin, alone=alone, progress=show, **common)
             else:
-                print(f"{cond}: chained done                ", flush=True)
-            if guarded or "guarded" not in modes:
-                pieces = history  # MusicXML from guarded mode (the system's), else chained
+                outs, history, fbs, forced = decode_pieces_meter(
+                    by_piece, decode, guard_margin=args.guard_margin, alone=alone, first_pass=guarded_pass,
+                    progress=show, **common)
+            preds.update({(cmode, perfs[p][j]): o for (p, j), o in outs.items()})
+            if cmode != "chained":
+                fallback[(cond, cmode)] = len(fbs) / len(windows)
+            extra = {"chained": "", "guarded": f", {len(fbs) / len(windows):.1%} of windows fell back to no prompt",
+                     "meter": f", time signature corrected in {len(forced) / len(windows):.1%} of windows"}[cmode]
+            print(f"{cond}: {cmode} done{extra}                ", flush=True)
+            # MusicXML from the system's best mode: meter, else guarded, else chained
+            if cmode == "meter" or (cmode == "guarded" and "meter" not in modes) or \
+                    (cmode == "chained" and not {"guarded", "meter"} & set(modes)):
+                pieces = history
 
         res = {}
         for mode in modes:
@@ -202,8 +234,10 @@ def main():
                 if cond == "real" and ds.store.meta[i].get("maestro_split") != "train":
                     acc_unseen.add(gt[i], preds[(mode, i)])
             res[mode] = acc.result()
-            if mode == "guarded":
-                res[mode]["fallback_rate"] = fallback.get(cond, 0.0)
+            if mode in ("guarded", "meter"):
+                res[mode]["fallback_rate"] = fallback.get((cond, mode), 0.0)
+            if mode == "meter":
+                res[mode]["meter_fix_rate"] = len(forced) / len(windows)
             if cond == "real":
                 results.setdefault("real_unseen_audio", {})[mode] = acc_unseen.result()
         results[cond] = res
