@@ -30,7 +30,9 @@ difference between two runs is what you change on the command line. Differences 
     The phase (train / cooldown / done) is saved in every checkpoint, so a resubmitted job picks up
     a cooldown where it was and a finished run exits at once.
 
-Outputs in outputs/runs/<name>/: config.json, log.csv (one row per eval), last.pt, best.pt.
+Outputs in outputs/runs/<name>/: config.json, log.csv (one row per eval), last.pt, best.pt, and
+status.json (phase, step, best: the same state as last.pt, readable without torch; written from
+the start, so tools can tell a finished run from one still training).
 """
 from __future__ import annotations
 
@@ -38,6 +40,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -333,10 +336,24 @@ def main():
     evaluator = Evaluator(vocab_path, args.eval_loss_windows, args.eval_decode_windows, coll, **notes_ctx_m)
 
     def save(path):
+        # atomic: a job killed mid-save (PACE's time limit) keeps the previous complete checkpoint
+        # instead of a truncated file that the resubmitted job cannot load
+        tmp = path.with_name(path.name + ".tmp")
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": epoch,
                     "best": best, "best_step": best_step, "phase": phase, "cool": cool,
                     "stopped_early": stopped_early,
-                    "arch": args.arch, "config": cfg}, path)
+                    "arch": args.arch, "config": cfg}, tmp)
+        os.replace(tmp, path)
+        if path.name == "last.pt":
+            write_status()
+
+    def write_status():
+        """status.json: the training phase, readable without torch (pace/reevaluate.sh and
+        src/eval/plan.py leave a run alone until it says "done"). Written atomically."""
+        tmp = run / "status.json.tmp"
+        tmp.write_text(json.dumps({"phase": phase, "step": step, "total_steps": total_steps, "epoch": epoch,
+                                   "best": best, "best_step": best_step, "stopped_early": stopped_early}))
+        os.replace(tmp, run / "status.json")
 
     log_path = run / "log.csv"
     model.train()
@@ -344,6 +361,7 @@ def main():
     tok_int, wait_int, run_loss, n_loss, micro = 0, 0.0, 0.0, 0, 0
     patience_steps = max(1, int(args.patience * steps_per_epoch)) if args.patience > 0 else 0
     stopped_early = bool(ck.get("stopped_early", phase == "cooldown")) if ck is not None else False
+    write_status()  # from the start: a run in training has a best.pt long before it is finished
 
     def end_of_training():
         """After an eval: move train -> cooldown / done, or cooldown -> done."""

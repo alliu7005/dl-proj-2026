@@ -17,10 +17,10 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.evaluate_pieces import SPLITS, join_dash_values  # noqa: E402
 from src.decoding import input_agreement  # noqa: E402
 from src.dataset import ScoreSegmentDataset  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
+from src.eval.plan import SPLITS, join_dash_values  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 
 D = Path("data/processed")

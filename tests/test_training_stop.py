@@ -75,6 +75,11 @@ def ckpt(name, which="last.pt"):
     return torch.load(RUNS / name / which, map_location="cpu", weights_only=False)
 
 
+def status(name):
+    import json
+    return json.loads((RUNS / name / "status.json").read_text())
+
+
 def fresh(name):
     shutil.rmtree(RUNS / name, ignore_errors=True)
     return name
@@ -95,6 +100,9 @@ def test_early_stop_cooldown_and_resume():
         ck = ckpt(name)
         assert ck["phase"] == "done" and ck["step"] == stop + cool and ck["best_step"] == best
         assert ck["cool"] == {"start": stop, "steps": cool, "lr0": 0.0}
+        st = status(name)  # the same state, readable without torch (pace/reevaluate.sh)
+        assert st["phase"] == "done" and st["step"] == stop + cool and st["best_step"] == best, st
+        assert st["stopped_early"] is True and st["best"] == ck["best"], st
 
         out = train(name, "--patience", "0.001", "--cooldown", "0.001", resume=True)
         assert "already finished" in out and done_step(out) == stop + cool, out     # nothing trained
@@ -124,6 +132,37 @@ def test_no_cooldown_and_no_patience():
         out = train(name, "--patience", "0", "--max-steps", "12")
         assert "early stop" not in out and done_step(out) == 12, out
         assert ckpt(name)["phase"] == "done"
+    finally:
+        shutil.rmtree(RUNS / name, ignore_errors=True)
+
+
+def test_status_while_training():
+    """status.json exists from the start and says "train" until the run is finished: a job killed
+    mid-run (time limit) leaves a best.pt, but src/eval/plan.py must not treat the run as finished.
+    The kill also lands at a random point, possibly mid-save: checkpoints are written atomically,
+    so the resubmitted run still loads (a truncated last.pt used to make the resume crash)."""
+    import time
+    from src.eval.plan import training_state
+    name = fresh("_test_status")
+    cmd = [sys.executable, "scripts/train_model.py", "--name", name, *BASE, "--patience", "0",
+           "--max-steps", "100000"]
+    p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        t0 = time.time()
+        while not (RUNS / name / "last.pt").exists():  # the first eval has saved its checkpoints
+            assert p.poll() is None and time.time() - t0 < 600, "training exited or never evaluated"
+            time.sleep(0.2)
+        st = status(name)
+        assert st["phase"] == "train" and st["total_steps"] == 100000, st
+        assert training_state(RUNS / name) == "train"
+    finally:
+        p.kill()
+        p.wait()
+    try:
+        assert training_state(RUNS / name) == "train"  # killed: still unfinished
+        assert ckpt(name)["step"] >= 3 and ckpt(name, "best.pt")["step"] >= 3  # complete, loadable
+        out = train(name, "--patience", "0", "--max-steps", "6", resume=True)
+        assert done_step(out) >= 6 and training_state(RUNS / name) == "done", out
     finally:
         shutil.rmtree(RUNS / name, ignore_errors=True)
 

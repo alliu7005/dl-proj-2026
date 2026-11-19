@@ -101,13 +101,29 @@ runs the `guarded` mode, so new `pace/train.sbatch` jobs need no extra flags.
 ## 4c. Re-evaluate and test the regularization
 
 ```bash
-bash pace/reevaluate.sh         # re-evaluate every finished run in all modes (oracle, chained, none, guarded, meter)
+bash pace/reevaluate.sh         # every finished run: whatever it lacks of all modes on all test sets
 sbatch -J simguard -c 4 --mem=16G -t 0:45:00 -o slurm-simguard-%j.out --wrap="source pace/common.sh; python scripts/simulate_guard.py"
 ```
 
 `reevaluate.sh` submits one `pace/evaluate.sbatch` job per run (evaluation only, merged into the
-run's existing results). Re-running all modes together matters: decoding now caps each window's
-output length, so chained and guarded must come from the same code to be compared.
+run's existing results), and only for what the run is missing: `python3 -m src.eval.plan` (standard
+library, runs on the login node) compares the requested conditions and modes with the run's
+`eval_pieces_best.json`. A result counts only if it has the same guard margin, all performances and
+the current `EVAL_VERSION` (`src/eval/plan.py`; bumped whenever decoding changes, which makes every
+older result missing, so all modes of a comparison always come from the same code). It skips:
+
+| skipped | why |
+|---|---|
+| `nothing missing` | every requested result exists (`FORCE=1` recomputes anyway) |
+| `training not finished (phase ...)` | `status.json` says `train` / `cooldown`: its `best.pt` is not final (not even with `FORCE=1`) |
+| `already being evaluated (job ...)` | an `eval_<run>` job is queued: two would rewrite the same files |
+
+Each submitted job gets `--only-missing` and prints `to compute: ...` at the top of its log. To check
+what a run lacks without submitting anything:
+
+```bash
+python3 -m src.eval.plan --run s2s --conditions real
+```
 
 Two runs separate the causes of `sf_base_reg`'s improvement (it changed dropout, weight decay,
 learning rate and run length at once, and stopped one epoch after its best, too early to show
@@ -171,7 +187,8 @@ main value is the real test condition comparable with the baselines. Training ru
 after it exists mix `train_transcribed` in and validate on `val_transcribed` too (each run's
 `config.json` records its data under `"data"`), which is why the script waits until every queued
 or running training job has started: a batch already in the queue keeps training on the same data.
-When every job has finished, add the real condition to every run:
+When every job has finished, add the real condition to every run that does not have it yet
+(evaluations that ran after the split existed already include it, and are skipped):
 
 ```bash
 ARGS="--conditions real" bash pace/reevaluate.sh

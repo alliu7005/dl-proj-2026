@@ -25,7 +25,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable, Hashable, Iterable, Sequence, TypeVar
 
-from .preprocessing.segment import prompt_from_output
+from .eval.plan import DEFAULT_GUARD_MARGIN  # noqa: F401  (defined with the evaluation's settings,
+from .preprocessing.segment import prompt_from_output  # readable on the PACE login node without torch)
 
 W = TypeVar("W")  # a window, in whatever form the caller uses (dataset index, dict of arrays, ...)
 # (windows, contexts, starts) -> outputs. A context of [] = none. starts[k] = tokens the output of
@@ -52,11 +53,8 @@ def stitch(history: list[str], window: list[str]) -> list[str]:
 
 
 TOKENS_PER_NOTE, EXTRA_TOKENS = 8, 64
-# guarded mode keeps the no-context output when its input agreement beats the chained output's by
-# more than this. scripts/simulate_guard.py on all six post-milestone models: 0 beats 0.02 / 0.05 /
-# 0.1 / 0.2 on note, onset, duration and bar F1 in nearly every model and condition (s2s clean:
-# onset F1 0.170 at 0 vs 0.148 at 0.05). Ties keep the chained output.
-DEFAULT_GUARD_MARGIN = 0.0
+# DEFAULT_GUARD_MARGIN (imported above from src/eval/plan.py, with why it is 0): guarded mode keeps
+# the no-context output when its input agreement beats the chained output's by more than this
 
 
 def max_new_tokens(n_notes: int, prefix_len: int, max_tokens: int) -> int:

@@ -439,6 +439,10 @@ python scripts/evaluate.py --run base           # test sets, same metrics/window
   greedy decoding of a few windows from `val` (ASAP), `val` (PERiScoPe) and `val_transcribed`,
   scored with the baseline metrics. Logged to `outputs/runs/<name>/log.csv`.
 - **Checkpoints:** `last.pt` at every eval and on Ctrl+C; `best.pt` has the best `val_real` loss.
+  Both are written to a temporary file and renamed, so a job killed mid-save (a time limit) keeps the
+  previous complete checkpoint and the resubmitted job resumes. `status.json` holds the training
+  phase (`train` / `cooldown` / `done`), step and best loss from the first step on, readable without
+  torch: `pace/reevaluate.sh` leaves a run alone until it says `done`.
 
 **Clean-input baseline** (Beyer & Dai-style, for H1): `--no-noise` trains on clean ASAP windows
 only, with augmentation but no synthetic noise and no real transcriptions.
@@ -464,6 +468,8 @@ python -m tests.test_pipeline                                     # demo pipelin
 python -m tests.test_training_stop                                # LR schedule, early stop, cooldown
 python -m tests.test_context_notes                                # context notes, exact neighbours
 python -m tests.test_metrical                                     # metrical labels and the aux head
+python -m tests.test_eval_plan                                    # what an evaluation still has to compute
+python -m tests.test_reevaluate                                   # pace/reevaluate.sh submissions (bash)
 sbatch pace/train.sbatch                                          # train + evaluate on a PACE GPU
 ```
 
@@ -861,13 +867,16 @@ scripts/build_metrical.py        precompute the metrical labels of every split (
 src/pipeline.py                  audio / MIDI -> windows -> chained decoding -> MusicXML
 demo/app.py, demo/static/        web demo (FastAPI + one HTML page); scripts/audio_to_score.py: CLI
 scripts/train_model.py           train either model; scripts/evaluate_pieces.py: oracle/chained/none
+src/eval/plan.py                 evaluation options and mode names; what a run's results still lack
 pace/train.sbatch                PACE GPU job: train + evaluate
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded decoding with a stand-in model
 tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
 tests/test_context_notes.py      context notes: exact neighbours, unchanged window notes, both models
 tests/test_metrical.py           metrical labels: synthetic precision / recall, coverage, the aux head
-tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume
+tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume, status.json, atomic saves
+tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --only-missing end to end
+tests/test_reevaluate.py         pace/reevaluate.sh: what it submits / skips (stand-in squeue / sbatch)
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes
 scripts/analyze_chained.py       why chained decoding loses notes (from saved predictions)
 scripts/simulate_guard.py        guarded decoding estimated offline, per guard margin

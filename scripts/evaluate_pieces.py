@@ -6,6 +6,7 @@
     python scripts/evaluate_pieces.py --run s2s --modes guarded          # adds a mode to existing results
     python scripts/evaluate_pieces.py --run s2s --modes guarded --extra-margins -0.05,-0.02,0.05
                                                   # + modes guarded@-0.05 ... with other guard margins
+    python scripts/evaluate_pieces.py --run s2s --only-missing           # only results not computed yet
 
 Prompt modes (the decoder's context before each window):
   oracle   the ground-truth score just before the window (= scripts/evaluate.py and the training
@@ -29,10 +30,14 @@ numbers are comparable with each other and with scripts/run_baselines.py. A wind
 predecessor was dropped by preprocessing starts without a prompt in chained mode.
 
 Conditions (as in scripts/evaluate.py): clean, synthetic, real, real_kong, periscope.
+Options, mode names and conditions are defined in src/eval/plan.py. ``--only-missing`` computes
+only the condition / mode results the run does not have yet with the same margin, all performances
+and the current src/eval/plan.py EVAL_VERSION (what pace/reevaluate.sh submits).
 
 Outputs in outputs/runs/<run>/ (modes already in these files from an earlier run are kept, so
 ``--modes guarded`` adds to a full evaluation instead of replacing it):
-  eval_pieces_<ckpt>.json                      metrics[condition][mode]
+  eval_pieces_<ckpt>.json                      metrics[condition][mode], each stamped with how it was
+                                               computed (eval_version, limit_perfs, guard_margin)
   pred_pieces_<ckpt>_<condition>.jsonl         per window and mode: performance, win, mode, pred tokens
   musicxml/<condition>/<performance>_{pred,true}.musicxml   (--musicxml N: first N pieces, from the
                                                best mode run: meter, else guarded, else chained)
@@ -52,18 +57,16 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import SHOW, TruncatingCollate, lower_priority, pick_device  # noqa: E402
 from src.dataset import ROLE_CARRIED, ScoreSegmentDataset  # noqa: E402
-from src.decoding import (DEFAULT_GUARD_MARGIN, decode_pieces, decode_pieces_meter,  # noqa: E402,F401
-                          input_agreement, max_new_tokens, pedal_down, stitch)
+from src.decoding import (decode_pieces, decode_pieces_meter, input_agreement,  # noqa: E402,F401
+                          max_new_tokens, pedal_down, stitch)
 from src.eval.metrics import Accumulator  # noqa: E402
+from src.eval.plan import (SPLITS, decode_passes, extra_margins, join_dash_values,  # noqa: E402,F401
+                           load_results, missing, parse_args, split_available, stamp)
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 from src.preprocessing.vocab import BOS, EOS, SEP  # noqa: E402
 from src.scoreformer import load_model  # noqa: E402
 
 D = Path("data/processed")
-SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed",
-          "real_kong": "test_transcribed_kong", "periscope": "test_periscope"}
-
-
 def window_notes(item: dict) -> torch.Tensor:
     """The window's own notes (in the window or carried into it), without context notes."""
     x = item["notes"]
@@ -122,66 +125,35 @@ class Decoder:
         return out
 
 
-def join_dash_values(argv: list[str], flags=("--extra-margins",)) -> list[str]:
-    """``--extra-margins -0.05,-0.02`` -> ``--extra-margins=-0.05,-0.02``. Before Python 3.13,
-    argparse reads a value that starts with "-" and is not a single number as another option
-    ("expected one argument"); the joined form works on every version."""
-    out, k = [], 0
-    while k < len(argv):
-        if argv[k] in flags and k + 1 < len(argv) and argv[k + 1].startswith("-"):
-            out.append(f"{argv[k]}={argv[k + 1]}")
-            k += 2
-        else:
-            out.append(argv[k])
-            k += 1
-    return out
-
-
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--run", required=True)
-    ap.add_argument("--ckpt", default="best.pt")
-    ap.add_argument("--modes", default="oracle,chained,none,guarded,meter")
-    ap.add_argument("--conditions", default="clean,synthetic,real,real_kong,periscope")
-    ap.add_argument("--limit-perfs", type=int, default=0, help="performances per condition (0 = all)")
-    ap.add_argument("--musicxml", type=int, default=0, help="write MusicXML for the first N pieces (chained)")
-    ap.add_argument("--guard-margin", type=float, default=DEFAULT_GUARD_MARGIN,
-                    help="guarded / meter: use the no-prompt output if its input agreement is higher by more than this")
-    ap.add_argument("--extra-margins", default="",
-                    help="comma-separated guard margins to evaluate as well; each adds modes guarded@<m> "
-                         "(and meter@<m> if meter is run), so margins can be compared in one job")
-    ap.add_argument("--batch-size", type=int, default=32)
-    ap.add_argument("--device", default="auto")
-    ap.add_argument("--normal-priority", action="store_true")
-    args = ap.parse_args(join_dash_values(sys.argv[1:]))
+    # options, mode names and test sets: src/eval/plan.py (shared with pace/reevaluate.sh)
+    args = parse_args(sys.argv[1:])
     if not args.normal_priority:
         lower_priority()
     device = pick_device(args.device)
     amp = device.type == "cuda" and torch.cuda.is_bf16_supported()
     if device.type == "cuda" and not amp:
         print("note: this GPU has no bf16 support (e.g. V100), running in fp32: slower, ask for A100/H100")
-    run = Path("outputs/runs") / args.run
+    run = Path(args.runs_dir) / args.run
+    D = Path(args.data_dir)
+    modes = args.modes.split(",")
+    # decoding passes: (mode name, kind, guard margin); --extra-margins adds guarded@m / meter@m
+    requested = decode_passes(modes, args.guard_margin, extra_margins(args.extra_margins))
+    margins = {name: m for name, _, m in requested}
+    requested_names = [m for m in modes if m not in margins] + [n for n, _, _ in requested]
+    todo = None  # --only-missing: {condition: [mode names]} not yet in this run's results
+    if args.only_missing:
+        todo = missing(load_results(run, args.ckpt), args.conditions.split(","), requested_names,
+                       {n: m for n, m in margins.items() if n != "chained"}, split_available(D), args.limit_perfs)
+        print("to compute: " + ("; ".join(f"{c} {','.join(n)}" for c, n in todo.items()) or "nothing"), flush=True)
+        if not todo:
+            return
     model = load_model(run / args.ckpt, device)
     cfg = model.cfg
     # context notes the model was trained with (src/dataset.py); 0 for older checkpoints
     ctx = {k: int(getattr(cfg, k, 0)) for k in ("context_before", "context_after")}
     coll = TruncatingCollate(cfg.max_notes, cfg.max_tokens)
     vocab_path = str(D / "vocab.json")
-    modes = args.modes.split(",")
-    # decoding passes: (mode name, kind, guard margin); --extra-margins adds guarded@m / meter@m
-    extras = [float(m) for m in args.extra_margins.split(",") if m.strip()]
-    margins = {}
-    decode_modes = []
-    for kind in ("chained", "guarded", "meter"):
-        if kind not in modes:
-            continue
-        for k, m in enumerate([args.guard_margin] + [m for m in extras if m != args.guard_margin]):
-            if kind == "chained" and k:
-                break
-            name = kind if k == 0 else f"{kind}@{m:g}"
-            decode_modes.append((name, kind, m))
-            margins[name] = m
-    all_modes = [m for m in modes if m not in ("chained", "guarded", "meter")] + [n for n, _, _ in decode_modes]
     nm = NoiseModel.from_json("configs/noise_stats.json")
     nm.cfg.clean_prob = 0.0
     ck_name = Path(args.ckpt).stem
@@ -192,6 +164,11 @@ def main():
         if not (D / split / "index.npy").exists():
             print(f"skip {cond}: {D / split} missing")
             continue
+        if todo is not None and cond not in todo:
+            print(f"skip {cond}: every requested mode is already in the results", flush=True)
+            continue
+        all_modes = requested_names if todo is None else todo[cond]  # the results computed here
+        decode_modes = [p for p in requested if p[0] in all_modes]
         if cond == "synthetic":  # fixed noise draw (seeded per window), no prompt dropout
             ds = ScoreSegmentDataset(str(D / split), vocab_path, noise=nm, seed=12345, prompt_dropout=0.0, **ctx)
         else:
@@ -214,11 +191,11 @@ def main():
         gt = {i: vocab.decode(items[i]["target"][items[i]["prompt_len"]:-1].tolist()) for i in windows}
         preds = {}  # (mode, window) -> tokens
 
-        if "oracle" in modes:
+        if "oracle" in all_modes:
             out = dec([items[i] for i in windows], [items[i]["target"][:items[i]["prompt_len"]] for i in windows])
             preds.update({("oracle", i): o for i, o in zip(windows, out)})
             print(f"{cond}: oracle done ({len(windows)} windows)", flush=True)
-        if "none" in modes:
+        if "none" in all_modes:
             out = dec([items[i] for i in windows], [dec.prefix([]) for _ in windows])
             preds.update({("none", i): o for i, o in zip(windows, out)})
             print(f"{cond}: none done", flush=True)
@@ -256,9 +233,9 @@ def main():
                      "meter": f", time signature corrected in {len(forced.get(name, {})) / len(windows):.1%} "
                               f"of windows"}[kind]
             print(f"{cond}: {name} done{extra}                ", flush=True)
-            # MusicXML from the system's best mode: meter, else guarded, else chained
-            if name == "meter" or (name == "guarded" and "meter" not in modes) or \
-                    (name == "chained" and not {"guarded", "meter"} & set(modes)):
+            # MusicXML from the system's best mode run here: meter, else guarded, else chained
+            if name == "meter" or (name == "guarded" and "meter" not in all_modes) or \
+                    (name == "chained" and not {"guarded", "meter"} & set(all_modes)):
                 pieces = history
 
         res = {}
@@ -268,14 +245,16 @@ def main():
                 acc.add(gt[i], preds[(mode, i)])
                 if cond == "real" and ds.store.meta[i].get("maestro_split") != "train":
                     acc_unseen.add(gt[i], preds[(mode, i)])
-            res[mode] = acc.result()
-            if mode.split("@")[0] in ("guarded", "meter"):
+            guarded = mode.split("@")[0] in ("guarded", "meter")
+            # how it was computed (src/eval/plan.py: --only-missing / pace/reevaluate.sh compare it)
+            res[mode] = stamp(acc.result(), margins[mode] if guarded else None, args.limit_perfs)
+            if guarded:
                 res[mode]["fallback_rate"] = fallback.get((cond, mode), 0.0)
-                res[mode]["guard_margin"] = margins[mode]
             if mode.split("@")[0] == "meter":
                 res[mode]["meter_fix_rate"] = len(forced.get(mode, {})) / len(windows)
             if cond == "real":
-                results.setdefault("real_unseen_audio", {})[mode] = acc_unseen.result()
+                results.setdefault("real_unseen_audio", {})[mode] = stamp(
+                    acc_unseen.result(), margins[mode] if guarded else None, args.limit_perfs)
         results[cond] = res
         pred_file = run / f"pred_pieces_{ck_name}_{cond}.jsonl"
         kept = []  # predictions of other modes from an earlier run of this script
