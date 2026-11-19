@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 from .dataset import assemble_notes, note_features
-from .decoding import decode_pieces, decode_pieces_meter, max_new_tokens
+from .decoding import DEFAULT_GUARD_MARGIN, decode_pieces, decode_pieces_meter, max_new_tokens
 from .preprocessing.performance import OFFSET, ONSET, load_performance
 from .preprocessing.segment import SegmentConfig, cut_windows
 from .preprocessing.vocab import BOS, EOS, SEP, Vocab
@@ -37,7 +37,7 @@ from .scoreformer import load_model
 AUDIO_EXT = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".aiff", ".aif"}
 MIDI_EXT = {".mid", ".midi"}
 MODES = ("guarded", "meter", "chained", "none")
-GUARD_MARGIN = 0.05  # scripts/evaluate_pieces.py --guard-margin default
+GUARD_MARGIN = DEFAULT_GUARD_MARGIN  # the same default as scripts/evaluate_pieces.py
 CARRY_MIN_SEC = 0.125  # training uses 1/4 quarter note past the cut; ~0.125 s at 120 bpm
 
 Progress = Callable[[str, float, str], None]  # (stage, fraction 0..1, message)

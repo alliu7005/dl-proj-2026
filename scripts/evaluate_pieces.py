@@ -4,6 +4,8 @@
     python scripts/evaluate_pieces.py --run sf_base --modes chained --conditions periscope --musicxml 5
     python scripts/evaluate_pieces.py --run base --limit-perfs 10       # Michael's run (scripts/train.py)
     python scripts/evaluate_pieces.py --run s2s --modes guarded          # adds a mode to existing results
+    python scripts/evaluate_pieces.py --run s2s --modes guarded --extra-margins -0.05,-0.02,0.05
+                                                  # + modes guarded@-0.05 ... with other guard margins
 
 Prompt modes (the decoder's context before each window):
   oracle   the ground-truth score just before the window (= scripts/evaluate.py and the training
@@ -50,8 +52,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import SHOW, TruncatingCollate, lower_priority, pick_device  # noqa: E402
 from src.dataset import ROLE_CARRIED, ScoreSegmentDataset  # noqa: E402
-from src.decoding import (decode_pieces, decode_pieces_meter, input_agreement, max_new_tokens,  # noqa: E402,F401
-                          pedal_down, stitch)
+from src.decoding import (DEFAULT_GUARD_MARGIN, decode_pieces, decode_pieces_meter,  # noqa: E402,F401
+                          input_agreement, max_new_tokens, pedal_down, stitch)
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 from src.preprocessing.vocab import BOS, EOS, SEP  # noqa: E402
@@ -128,8 +130,11 @@ def main():
     ap.add_argument("--conditions", default="clean,synthetic,real,real_kong,periscope")
     ap.add_argument("--limit-perfs", type=int, default=0, help="performances per condition (0 = all)")
     ap.add_argument("--musicxml", type=int, default=0, help="write MusicXML for the first N pieces (chained)")
-    ap.add_argument("--guard-margin", type=float, default=0.05,
-                    help="guarded mode: use the no-prompt output if its input agreement is higher by more than this")
+    ap.add_argument("--guard-margin", type=float, default=DEFAULT_GUARD_MARGIN,
+                    help="guarded / meter: use the no-prompt output if its input agreement is higher by more than this")
+    ap.add_argument("--extra-margins", default="",
+                    help="comma-separated guard margins to evaluate as well; each adds modes guarded@<m> "
+                         "(and meter@<m> if meter is run), so margins can be compared in one job")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--normal-priority", action="store_true")
@@ -148,6 +153,20 @@ def main():
     coll = TruncatingCollate(cfg.max_notes, cfg.max_tokens)
     vocab_path = str(D / "vocab.json")
     modes = args.modes.split(",")
+    # decoding passes: (mode name, kind, guard margin); --extra-margins adds guarded@m / meter@m
+    extras = [float(m) for m in args.extra_margins.split(",") if m.strip()]
+    margins = {}
+    decode_modes = []
+    for kind in ("chained", "guarded", "meter"):
+        if kind not in modes:
+            continue
+        for k, m in enumerate([args.guard_margin] + [m for m in extras if m != args.guard_margin]):
+            if kind == "chained" and k:
+                break
+            name = kind if k == 0 else f"{kind}@{m:g}"
+            decode_modes.append((name, kind, m))
+            margins[name] = m
+    all_modes = [m for m in modes if m not in ("chained", "guarded", "meter")] + [n for n, _, _ in decode_modes]
     nm = NoiseModel.from_json("configs/noise_stats.json")
     nm.cfg.clean_prob = 0.0
     ck_name = Path(args.ckpt).stem
@@ -203,48 +222,50 @@ def main():
         by_piece = {p: perfs[p] for p in names}
         alone = {(p, j): preds[("none", i)] for p in names for j, i in enumerate(perfs[p]) if ("none", i) in preds}
         common = dict(contiguous=contiguous, pitches=lambda i: window_notes(items[i])[:, 0].tolist())
-        guarded_pass, forced = None, {}
-        for cmode in [m for m in ("chained", "guarded", "meter") if m in modes]:
-            show = lambda j, n, cm=cmode: print(f"{cond}: {cm} window {j}/{n}", end="\r", flush=True)
-            if cmode == "chained":
+        guarded_pass, forced = {}, {}  # per margin: guarded outputs (meter's first pass); per mode: forced
+        for name, kind, margin in decode_modes:
+            show = lambda j, n, cm=name: print(f"{cond}: {cm} window {j}/{n}", end="\r", flush=True)
+            if kind == "chained":
                 outs, history, fbs = decode_pieces(by_piece, decode, progress=show, **common)
-            elif cmode == "guarded":
-                outs, history, fbs = guarded_pass = decode_pieces(
-                    by_piece, decode, guard_margin=args.guard_margin, alone=alone, progress=show, **common)
+            elif kind == "guarded":
+                outs, history, fbs = guarded_pass[margin] = decode_pieces(
+                    by_piece, decode, guard_margin=margin, alone=alone, progress=show, **common)
             else:
-                outs, history, fbs, forced = decode_pieces_meter(
-                    by_piece, decode, guard_margin=args.guard_margin, alone=alone, first_pass=guarded_pass,
+                outs, history, fbs, forced[name] = decode_pieces_meter(
+                    by_piece, decode, guard_margin=margin, alone=alone, first_pass=guarded_pass.get(margin),
                     progress=show, **common)
-            preds.update({(cmode, perfs[p][j]): o for (p, j), o in outs.items()})
-            if cmode != "chained":
-                fallback[(cond, cmode)] = len(fbs) / len(windows)
+            preds.update({(name, perfs[p][j]): o for (p, j), o in outs.items()})
+            if kind != "chained":
+                fallback[(cond, name)] = len(fbs) / len(windows)
             extra = {"chained": "", "guarded": f", {len(fbs) / len(windows):.1%} of windows fell back to no prompt",
-                     "meter": f", time signature corrected in {len(forced) / len(windows):.1%} of windows"}[cmode]
-            print(f"{cond}: {cmode} done{extra}                ", flush=True)
+                     "meter": f", time signature corrected in {len(forced.get(name, {})) / len(windows):.1%} "
+                              f"of windows"}[kind]
+            print(f"{cond}: {name} done{extra}                ", flush=True)
             # MusicXML from the system's best mode: meter, else guarded, else chained
-            if cmode == "meter" or (cmode == "guarded" and "meter" not in modes) or \
-                    (cmode == "chained" and not {"guarded", "meter"} & set(modes)):
+            if name == "meter" or (name == "guarded" and "meter" not in modes) or \
+                    (name == "chained" and not {"guarded", "meter"} & set(modes)):
                 pieces = history
 
         res = {}
-        for mode in modes:
+        for mode in all_modes:
             acc, acc_unseen = Accumulator(), Accumulator()
             for i in windows:
                 acc.add(gt[i], preds[(mode, i)])
                 if cond == "real" and ds.store.meta[i].get("maestro_split") != "train":
                     acc_unseen.add(gt[i], preds[(mode, i)])
             res[mode] = acc.result()
-            if mode in ("guarded", "meter"):
+            if mode.split("@")[0] in ("guarded", "meter"):
                 res[mode]["fallback_rate"] = fallback.get((cond, mode), 0.0)
-            if mode == "meter":
-                res[mode]["meter_fix_rate"] = len(forced) / len(windows)
+                res[mode]["guard_margin"] = margins[mode]
+            if mode.split("@")[0] == "meter":
+                res[mode]["meter_fix_rate"] = len(forced.get(mode, {})) / len(windows)
             if cond == "real":
                 results.setdefault("real_unseen_audio", {})[mode] = acc_unseen.result()
         results[cond] = res
         pred_file = run / f"pred_pieces_{ck_name}_{cond}.jsonl"
         kept = []  # predictions of other modes from an earlier run of this script
         if pred_file.exists():
-            kept = [line for line in open(pred_file) if json.loads(line)["mode"] not in modes]
+            kept = [line for line in open(pred_file) if json.loads(line)["mode"] not in all_modes]
         with open(pred_file, "w") as f:
             f.writelines(kept)
             for (mode, i), toks in preds.items():

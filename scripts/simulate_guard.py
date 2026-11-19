@@ -31,7 +31,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", default="s2s,s2s_ctx,sf_small,sf_small_ctx,sf_base,sf_base_reg")
     ap.add_argument("--conditions", default="synthetic,clean")
-    ap.add_argument("--margins", default="0,0.02,0.05,0.1,0.2")
+    ap.add_argument("--margins", default="-0.1,-0.05,-0.02,0,0.02,0.05,0.1,0.2",
+                    help="negative margins favour the no-context output (it wins unless clearly worse)")
     ap.add_argument("--ckpt", default="best")
     args = ap.parse_args()
     margins = [float(m) for m in args.margins.split(",")]

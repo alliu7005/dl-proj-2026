@@ -581,11 +581,26 @@ The model cannot see the true score at inference, but it does know the notes it 
 healthy output contains about the same pitches as its input, a degenerate one does not. Guarded mode
 also decodes every window without context and keeps that output when its pitch F1 against the
 window's input notes (`decoding.input_agreement`) beats the chained output's by more than
-`--guard-margin` (default 0.05). The kept output becomes the history the next context is built from,
-so one bad window can no longer take the rest of the piece down with it. `scripts/simulate_guard.py`
-estimates guarded decoding offline from saved chained / none predictions for several margins
-(conservatively: it cannot show the better contexts that follow a replaced window).
+`--guard-margin` (default 0; ties keep the chained output). The kept output becomes the history the
+next context is built from, so one bad window can no longer take the rest of the piece down with it.
 `tests/test_decoding.py` checks the logic with a stand-in model.
+
+**Choosing the margin.** `scripts/simulate_guard.py` estimates guarded decoding offline from saved
+chained / none predictions for a range of margins (conservatively: it cannot show the better
+contexts that follow a replaced window). On all six post-milestone models, a smaller margin was
+better down to 0, on note, onset, duration and bar F1 in nearly every model and condition:
+
+| s2s, clean (offline) | windows replaced | note F1 | onset F1 | duration acc | bar F1 |
+|---|---|---|---|---|---|
+| margin 0.2 | 2% | 0.890 | 0.138 | 0.572 | 0.433 |
+| margin 0.05 (first default) | 16% | 0.900 | 0.148 | 0.594 | 0.457 |
+| margin 0 | 56% | 0.907 | 0.170 | 0.642 | 0.494 |
+
+At margin 0 the no-context output still had the better rhythm on its own (onset F1 0.188), so the
+simulation now also tries negative margins (the no-context output wins unless it agrees clearly
+worse), and the real decoding can compare margins in one job: `--extra-margins -0.05,-0.02` adds
+modes `guarded@-0.05`, `guarded@-0.02` (and `meter@...` if meter is run) next to the default, each
+with its `guard_margin` recorded in the results.
 
 **Meter consistency** (`--modes meter`, on by default). A wrong time signature mis-sizes every bar
 of its window, so every later position shifts. Every window opens with `[bar] ts_X`, so after a

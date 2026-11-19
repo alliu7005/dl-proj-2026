@@ -28,9 +28,11 @@ python scripts/build_metrical.py --workers 8 && python -m tests.test_metrical &&
 && python -m tests.test_decoding")
 echo "labels + tests: job $prep"
 
+# NAME / ARGS travel as environment variables (--export=ALL): sbatch's --export=ALL,NAME=..,ARGS=..
+# form splits on commas, which would break arguments like --modes guarded,meter.
 submit() {  # name, args
   local id
-  id=$(sbatch --parsable $G --dependency=afterok:$prep --export=ALL,NAME="$1",ARGS="$2" pace/train.sbatch)
+  id=$(NAME="$1" ARGS="$2" sbatch --parsable $G --dependency=afterok:$prep --export=ALL pace/train.sbatch)
   echo "  $1: job $id  ($2)"
 }
 CTX="--context-before 64 --context-after 32"

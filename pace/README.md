@@ -56,11 +56,13 @@ build into the env, e.g. `pip install --force-reinstall torch torchaudio --index
 
 ```bash
 sbatch pace/train.sbatch                                                 # sf_base, 20 epochs
-sbatch --export=ALL,NAME=sf_clean,ARGS="--no-noise" pace/train.sbatch    # clean-input ablation
-sbatch --export=ALL,NAME=s2s,ARGS="--arch score2seq" pace/train.sbatch   # Michael's 10M model, same loop
+NAME=sf_clean ARGS="--no-noise" sbatch --export=ALL pace/train.sbatch    # clean-input ablation
+NAME=s2s ARGS="--arch score2seq" sbatch --export=ALL pace/train.sbatch   # Michael's 10M model, same loop
 ```
 
-Each job trains, then runs `scripts/evaluate_pieces.py` (all conditions, oracle/chained/none,
+`NAME` and `ARGS` are passed as environment variables with `--export=ALL` (the
+`--export=ALL,NAME=..,ARGS=..` form splits at commas, which breaks arguments such as
+`--modes guarded,meter`). Each job trains, then runs `scripts/evaluate_pieces.py` (all conditions, oracle/chained/none,
 MusicXML for 5 pieces). A run that hits the 8 h limit is resumed by submitting the same command
 again (it picks up `outputs/runs/<NAME>/last.pt`).
 
@@ -107,8 +109,8 @@ learning rate and run length at once, and stopped one epoch after its best, too 
 whether its validation loss would climb):
 
 ```bash
-sbatch --gres=gpu:rtx_pro_6000_blackwell:1 --export=ALL,NAME=sf_base_e6,ARGS="--size base --epochs 6" pace/train.sbatch
-sbatch --gres=gpu:rtx_pro_6000_blackwell:1 --export=ALL,NAME=sf_base_reg20,ARGS="--size base --dropout 0.2 --weight-decay 0.1 --lr 2e-4 --epochs 20" pace/train.sbatch
+NAME=sf_base_e6 ARGS="--size base --epochs 6" sbatch --gres=gpu:rtx_pro_6000_blackwell:1 --export=ALL pace/train.sbatch
+NAME=sf_base_reg20 ARGS="--size base --dropout 0.2 --weight-decay 0.1 --lr 2e-4 --epochs 20" sbatch --gres=gpu:rtx_pro_6000_blackwell:1 --export=ALL pace/train.sbatch
 ```
 
 `sf_base_e6` (original settings, 6 epochs) vs `sf_base_reg`: is the gain just the shorter schedule?

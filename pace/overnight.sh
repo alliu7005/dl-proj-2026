@@ -19,9 +19,11 @@ test_id=$(sbatch --parsable -J ctxtest -c 4 --mem=16G -t 0:30:00 -o slurm-ctxtes
   --wrap="source pace/common.sh; python -m tests.test_context_noise")
 echo "context-noise check: job $test_id"
 
+# NAME / ARGS travel as environment variables (--export=ALL): sbatch's --export=ALL,NAME=..,ARGS=..
+# form splits on commas, which would break arguments like --modes guarded,meter.
 submit() {  # name, args
   local id
-  id=$(sbatch --parsable $G --dependency=afterok:$test_id --export=ALL,NAME="$1",ARGS="$2" pace/train.sbatch)
+  id=$(NAME="$1" ARGS="$2" sbatch --parsable $G --dependency=afterok:$test_id --export=ALL pace/train.sbatch)
   echo "  $1: job $id  ($2)"
 }
 submit sf_small     "--size small --dec-layers 6"
