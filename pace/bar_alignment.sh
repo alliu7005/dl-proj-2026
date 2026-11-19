@@ -30,15 +30,18 @@ echo "labels + tests: job $prep"
 
 # NAME / ARGS travel as environment variables (--export=ALL): sbatch's --export=ALL,NAME=..,ARGS=..
 # form splits on commas, which would break arguments like --modes guarded,meter.
-submit() {  # name, args
+# Walltime per run: what it needs with a >= 1.5x margin, not the 8 h maximum. PACE caps the walltime
+# x GPUs of a user's running jobs (MaxTRESRunMinsPU gres/gpu=1920, i.e. 32 GPU hours), and shorter
+# jobs also fit the scheduler's gaps sooner. A run that still overruns resumes from last.pt.
+submit() {  # name, walltime, args
   local id
-  id=$(NAME="$1" ARGS="$2" sbatch --parsable "${G[@]}" --dependency=afterok:$prep --export=ALL pace/train.sbatch)
-  echo "  $1: job $id  ($2)"
+  id=$(NAME="$1" ARGS="$3" sbatch --parsable "${G[@]}" -t "$2" --dependency=afterok:$prep --export=ALL pace/train.sbatch)
+  echo "  $1: job $id  ($2; $3)"
 }
 CTX="--context-before 64 --context-after 32"
-submit s2s_c    "--arch score2seq $CTX"
-submit s2s_a    "--arch score2seq --aux-metrical"
-submit s2s_ca   "--arch score2seq $CTX --aux-metrical"
-submit s2s_m_ca "--arch score2seq --d-model 384 --enc-layers 6 --dec-layers 6 --dropout 0.2 --weight-decay 0.1 --lr 2e-4 $CTX --aux-metrical"
-submit sf_base_reg_ca "--size base --dropout 0.2 --weight-decay 0.1 --lr 2e-4 $CTX --aux-metrical"
+submit s2s_c    6:00:00 "--arch score2seq $CTX"
+submit s2s_a    6:00:00 "--arch score2seq --aux-metrical"
+submit s2s_ca   6:00:00 "--arch score2seq $CTX --aux-metrical"
+submit s2s_m_ca 7:00:00 "--arch score2seq --d-model 384 --enc-layers 6 --dec-layers 6 --dropout 0.2 --weight-decay 0.1 --lr 2e-4 $CTX --aux-metrical"
+submit sf_base_reg_ca 8:00:00 "--size base --dropout 0.2 --weight-decay 0.1 --lr 2e-4 $CTX --aux-metrical"
 echo "watch: squeue -u \$USER     logs: slurm-barprep-<job>.out, slurm-scoreformer-<job>.out"

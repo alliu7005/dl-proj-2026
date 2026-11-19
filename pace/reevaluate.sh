@@ -6,7 +6,9 @@
 #                                                    # H200 / RTX Pro Blackwell; "a|b" for several)
 #   ARGS="--modes meter" bash pace/reevaluate.sh s2s # extra evaluate_pieces.py arguments, e.g. add
 #                                                    # one mode (merged into the existing results)
-#   TIME=8:00:00 ARGS=... bash pace/reevaluate.sh    # longer jobs (default: evaluate.sbatch's 4 h)
+#   TIME=8:00:00 ARGS=... bash pace/reevaluate.sh    # walltime (default: 2.5 h for models under 15M
+#                                                    # parameters, else 4 h: what one evaluation needs,
+#                                                    # since PACE caps a user's running walltime x GPUs)
 #
 # Why: decoding now caps each window's output (src/decoding.py max_new_tokens) and adds the guarded
 # and meter modes, so oracle / chained / none / guarded / meter are re-run together and every number in a comparison
@@ -35,9 +37,14 @@ for r in "${RUNS[@]}"; do
     echo "  skip $r: already being evaluated (job $busy)"
     continue
   fi
+  t=$TIME
+  if [ -z "$t" ]; then  # by model size (config.json "params"; unknown -> the larger limit)
+    params=$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("params", 0)))'              "outputs/runs/$r/config.json" 2>/dev/null || echo 0)
+    if [ "$params" -gt 0 ] && [ "$params" -lt 15000000 ]; then t=2:30:00; else t=4:00:00; fi
+  fi
   # NAME / ARGS travel as environment variables (--export=ALL): the --export=ALL,ARGS=... form
   # splits on commas, which would break arguments like --modes guarded,meter
-  id=$(NAME="$r" ARGS="$ARGS" sbatch --parsable "${G[@]}" ${TIME:+-t $TIME} -J "eval_$r" --export=ALL pace/evaluate.sbatch)
-  echo "  $r: job $id${ARGS:+  ($ARGS)}"
+  id=$(NAME="$r" ARGS="$ARGS" sbatch --parsable "${G[@]}" -t "$t" -J "eval_$r" --export=ALL pace/evaluate.sbatch)
+  echo "  $r: job $id  ($t${ARGS:+; $ARGS})"
 done
 echo "watch: squeue -u \$USER     logs: slurm-eval_<run>-<job>.out"
