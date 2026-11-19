@@ -194,7 +194,26 @@ When every job has finished, add the real condition to every run that does not h
 ARGS="--conditions real" bash pace/reevaluate.sh
 ```
 
-## 5. Bring results back
+## 5. Compare the runs and bring results back
+
+```bash
+python3 scripts/compare_runs.py      # every evaluated run -> outputs/compare/ (login node, seconds)
+```
+
+It writes three files to `outputs/compare/` and prints the first:
+
+| file | what |
+|---|---|
+| `summary.md` | the runs (size, context notes, aux head, regularization, best validation loss, epochs, how training ended, whether it trained on real transcriptions), then per test set the system output (meter mode, what the demo runs) and onset / bar F1 in every context mode; best value per column in bold |
+| `margins.md` | the guard-margin sweeps, per run and test set, with chained / none as the two extremes |
+| `results.csv` | every number, one row per run, test set and mode |
+
+Copy the folder to the Windows machine (run in PowerShell from the repo folder) and open the `.md`
+files in VS Code with Ctrl+Shift+V to see the tables rendered:
+
+```powershell
+scp -r <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/outputs/compare ./outputs/
+```
 
 ```bash
 scp -r <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/outputs/runs/sf_base ./outputs/runs/

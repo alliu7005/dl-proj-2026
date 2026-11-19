@@ -470,6 +470,8 @@ python -m tests.test_context_notes                                # context note
 python -m tests.test_metrical                                     # metrical labels and the aux head
 python -m tests.test_eval_plan                                    # what an evaluation still has to compute
 python -m tests.test_reevaluate                                   # pace/reevaluate.sh submissions (bash)
+python -m tests.test_compare_runs                                 # the comparison tables
+python scripts/compare_runs.py                                    # all evaluated runs -> outputs/compare/
 sbatch pace/train.sbatch                                          # train + evaluate on a PACE GPU
 ```
 
@@ -868,6 +870,7 @@ src/pipeline.py                  audio / MIDI -> windows -> chained decoding -> 
 demo/app.py, demo/static/        web demo (FastAPI + one HTML page); scripts/audio_to_score.py: CLI
 scripts/train_model.py           train either model; scripts/evaluate_pieces.py: oracle/chained/none
 src/eval/plan.py                 evaluation options and mode names; what a run's results still lack
+scripts/compare_runs.py          tables of every evaluated run -> outputs/compare/{summary,margins}.md, results.csv
 pace/train.sbatch                PACE GPU job: train + evaluate
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded decoding with a stand-in model
@@ -877,6 +880,7 @@ tests/test_metrical.py           metrical labels: synthetic precision / recall, 
 tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume, status.json, atomic saves
 tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --only-missing end to end
 tests/test_reevaluate.py         pace/reevaluate.sh: what it submits / skips (stand-in squeue / sbatch)
+tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes
 scripts/analyze_chained.py       why chained decoding loses notes (from saved predictions)
 scripts/simulate_guard.py        guarded decoding estimated offline, per guard margin
