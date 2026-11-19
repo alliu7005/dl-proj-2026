@@ -626,77 +626,92 @@ share of windows corrected (`meter_fix_rate`) and `ts_acc`.
 
 ### Post-milestone results
 
-All runs trained with the same loop on the same PACE data (ASAP + PERiScoPe), each evaluated with
-`best.pt` on the 59 ASAP test performances (clean MIDI, and with the fixed synthetic noise draw) and
-on the PERiScoPe test transcriptions, with the per-window output cap; `pace/reevaluate.sh`.
+All runs trained with the same loop on the same PACE data (ASAP + PERiScoPe; none of them on the
+real-transcription split, which was built after they started), each evaluated with `best.pt` on
+four test sets: the 59 ASAP test performances as clean MIDI and with the fixed synthetic noise draw,
+the PERiScoPe test transcriptions, and `real`, 24 ASAP test performances transcribed from their
+MAESTRO audio by Transkun V2 (closest to the demo). Tables: `python3 scripts/compare_runs.py` ->
+`outputs/compare/` (every run, test set, mode and metric; `margins.md` for the margin sweeps).
+Numbers below are **meter mode** unless stated: the system as the demo runs it.
 
-**Guarded decoding** beats chained decoding on note, onset and bar F1 for all 8 models on all 3 test
-sets (24 / 24), and beats decoding without context on onset F1 in 23 / 24 and bar F1 in 21 / 24:
-the model's own context now helps instead of hurting. It replaces 8-22% of windows (more on noisy
-input), more than the strictly degenerate ones: it works as a per-window choice between the two
-outputs, guided by agreement with the input notes.
+**The bar-alignment fixes** (context notes: 64 performed notes before / 32 after each window;
+auxiliary metrical head: per-note downbeat and beat phase, `src/metrical.py`), onset F1 / bar F1:
 
-| s2s (10M) | note F1 | onset F1 | onset-shift F1 | duration acc | staff acc | bar F1 |
+| run | params | best val loss | clean | synthetic | PERiScoPe | real |
 |---|---|---|---|---|---|---|
-| clean, oracle (upper bound) | 0.901 | 0.559 | 0.615 | 0.870 | 0.937 | 0.896 |
-| clean, chained | 0.884 | 0.139 | 0.326 | 0.578 | 0.761 | 0.429 |
-| clean, none | 0.896 | 0.190 | 0.391 | 0.663 | 0.826 | 0.519 |
-| clean, **guarded** | **0.904** | 0.189 | **0.399** | **0.683** | **0.836** | 0.504 |
-| PERiScoPe, chained | 0.903 | 0.201 | 0.403 | 0.704 | 0.842 | 0.446 |
-| PERiScoPe, none | 0.922 | 0.225 | 0.426 | 0.718 | 0.843 | 0.501 |
-| PERiScoPe, **guarded** | **0.930** | **0.229** | **0.438** | **0.735** | **0.845** | **0.503** |
+| s2s | 10.2M | 0.2781 | 0.202 / 0.507 | 0.192 / 0.504 | 0.246 / 0.521 | 0.223 / 0.484 |
+| s2s_c (context notes) | 10.2M | 0.2694 | 0.198 / 0.521 | 0.181 / 0.501 | 0.242 / 0.520 | 0.234 / 0.509 |
+| s2s_a (metrical head) | 10.2M | 0.2800 | 0.211 / 0.501 | 0.201 / 0.480 | 0.354 / **0.660** | 0.257 / 0.567 |
+| s2s_ca (both) | 10.2M | 0.2779 | 0.267 / 0.553 | 0.255 / 0.557 | 0.332 / 0.601 | 0.319 / 0.568 |
+| s2s_m_ca (both, regularized) | 25.9M | 0.2563 | 0.280 / 0.604 | 0.271 / 0.599 | **0.367** / 0.653 | 0.309 / 0.590 |
+| sf_base_reg | 44.6M | 0.2414 | 0.154 / 0.424 | 0.145 / 0.421 | 0.200 / 0.430 | 0.177 / 0.460 |
+| **sf_base_reg_ca** (both) | 44.6M | **0.2384** | **0.296 / 0.615** | **0.272 / 0.608** | 0.359 / 0.643 | **0.323 / 0.616** |
 
-**All models, guarded** (note F1 / onset F1 / bar F1):
-
-| run | params | clean | synthetic | PERiScoPe |
-|---|---|---|---|---|
-| s2s | 10M | 0.904 / 0.189 / 0.504 | 0.891 / 0.182 / **0.531** | 0.930 / **0.229** / **0.503** |
-| s2s_ctx (`--context-noise 0.5`) | 10M | **0.907 / 0.199 / 0.533** | **0.891 / 0.189** / 0.507 | **0.931 / 0.229** / 0.502 |
-| sf_small (6 decoder layers) | 9.7M | 0.897 / 0.179 / 0.463 | 0.878 / 0.156 / 0.451 | 0.925 / 0.212 / 0.478 |
-| sf_small_ctx | 9.7M | 0.902 / 0.162 / 0.453 | 0.882 / 0.146 / 0.448 | 0.928 / 0.221 / 0.491 |
-| sf_base | 44.6M | 0.869 / 0.163 / 0.468 | 0.849 / 0.149 / 0.431 | 0.912 / 0.208 / 0.493 |
-| sf_base_reg (dropout 0.2, wd 0.1, lr 2e-4, 6 ep) | 44.6M | 0.901 / 0.153 / 0.424 | 0.886 / 0.143 / 0.420 | 0.929 / 0.196 / 0.437 |
-| sf_base_e6 (original settings, 6 ep) | 44.6M | 0.884 / 0.194 / 0.480 | 0.862 / 0.172 / 0.452 | 0.917 / 0.219 / 0.519 |
-| sf_base_reg20 (regularized, 20 ep) | 44.6M | 0.899 / 0.161 / 0.437 | 0.882 / 0.137 / 0.424 | 0.925 / 0.191 / 0.420 |
-
-**Validation loss** (mean over ASAP and PERiScoPe validation sets):
-
-| run | best (epoch) | last (epoch) |
-|---|---|---|
-| s2s | 0.2781 (16) | 0.2796 (19) |
-| sf_small | 0.2659 (9) | 0.2726 (19) |
-| sf_base | 0.2754 (2) | 0.3172 (19) |
-| sf_base_e6 | 0.2742 (2) | 0.2834 (5) |
-| sf_base_reg | 0.2414 (4) | 0.2424 (5) |
-| sf_base_reg20 | 0.2408 (5) | 0.2616 (19) |
+**Best model: `sf_base_reg_ca`** (the regularized 45M Scoreformer with both fixes), the demo's
+default: best onset and bar F1 on clean, synthetic and real input, and the lowest validation loss;
+`s2s_m_ca` is a close second (best on PERiScoPe, 0.367 vs 0.359 onset F1). Its full meter-mode
+numbers on `real`: note F1 0.909, onset F1 0.323, onset-shift F1 0.503, duration 0.762, staff 0.877,
+bar F1 0.616, time signature 0.280.
 
 What this shows:
-- **Regularization, not the shorter schedule, fixed most of the 45M model's overfitting.** With the
-  original settings, 6 epochs reach the same best loss as 20 (0.274 vs 0.275). Dropout 0.2, weight
-  decay 0.1 and learning rate 2e-4 bring it to 0.241 and halve the later climb (+0.021 over 14
-  epochs instead of +0.042 over 17), but the loss still rises after epoch 5. Early stopping, now
-  the default, keeps exactly that checkpoint (sf_base_reg20 predates it and trained all 20 epochs).
-- **H1 is not supported at equal size.** sf_small (9.7M) has a lower validation loss than s2s
-  (10.2M), but s2s decodes better in guarded mode on every test set. The Scoreformer variants match
-  Score2Seq when given the correct context (sf_base_reg has the best PERiScoPe oracle onset F1,
-  0.587) but fall behind without it (bar F1 0.41-0.45 with no context vs 0.52 for s2s): they lean
-  harder on the context to locate the bar.
-- **Context noise is mixed:** s2s_ctx is the best model on clean input, about equal to s2s on real
-  transcriptions, and it hurt sf_small on clean and synthetic input.
-- **The remaining gap is bar alignment.** Guarded onset F1 (~0.2) is far below oracle (~0.56), but
-  onset-shift F1 (~0.4) is twice onset F1: many windows get the rhythm right and place it at the
-  wrong point in the bar.
+- **The two fixes work together, not alone.** Context notes alone give the best 10M validation loss
+  and the best oracle-context scores (clean oracle onset F1 0.578) but no gain once the model writes
+  its own context (meter onset F1 0.198 vs 0.202). The metrical head alone helps on transcribed
+  input (PERiScoPe bar F1 +0.14, real +0.08) but little on ASAP MIDI. Both together improve onset F1 on
+  every test set (+32% on clean, +43% on real for the 10M model): the head learns where beats fall,
+  and the extra notes give it enough of the surrounding beat to place them.
+- **They turn the 45M model from the worst into the best.** Without them it leaned on the context to
+  find the bar and fell behind (`sf_base_reg` onset F1 0.154 on clean); with them its onset F1
+  nearly doubles on every test set (0.296 clean, 0.323 real), and bar F1 rises 0.42-0.46 -> 0.61-0.64.
+- **The bar-phase gap has narrowed but not closed.** Onset-shift F1 / onset F1 is 1.65 for
+  sf_base_reg_ca on clean input (was 2.2 for sf_base_reg), and meter-mode onset F1 is 53% of the
+  oracle-context value (0.296 vs 0.562; was 28%). Time signature accuracy (0.28-0.41) is now the
+  weakest metric.
+- **Validation loss does not rank the systems.** It is teacher-forced with the true context, so it
+  measures the oracle mode: `sf_base_reg` has a much lower loss than `s2s` (0.241 vs 0.278) and
+  decodes worse in every realistic mode. Compare runs on the decoded test sets.
+- **Regularization, not the shorter schedule, fixed most of the 45M model's overfitting**: with
+  the original settings, 6 epochs reach the same best loss as 20 (`sf_base_e6` 0.2742 vs
+  `sf_base` 0.2754); dropout 0.2, weight decay 0.1 and lr 2e-4 bring it to 0.241. Early stopping
+  (the default since) keeps that checkpoint: `sf_base_reg_ca` stopped at epoch 10.9.
+- **Training on noise is essential:** `sf_clean` (clean input only) is the worst run on every test
+  set (onset F1 0.130 clean, 0.133 real).
+- **H1 is not supported at equal size.** `sf_small` (9.7M) has a lower validation loss than `s2s`
+  (10.2M) but decodes worse on every test set (meter onset F1 0.177 vs 0.202 on clean).
+- **Context noise is mixed:** `s2s_ctx` improves `s2s` on clean input (onset F1 0.223 vs 0.202),
+  about equal elsewhere; it hurt `sf_small`.
+
+**Decoding modes.** Guarded decoding beats chained on onset F1 for all 14 models on all four test
+sets (56 / 56) and on bar F1 in 50 / 56 (the model's own context, unguarded, carries errors from
+window to window: `sf_base_e6` chained bar F1 on real is 0.213, guarded 0.489). The 6 exceptions
+are all models with the metrical head, whose own context is good enough that chained bar F1 comes
+close or ahead (`s2s_a` on real: 0.595 chained vs 0.553 guarded). Guarded mode replaces 39-52% of
+windows with their no-context output. Meter mode adds to it for the models with both fixes: for `sf_base_reg_ca`,
++0.001 to +0.007 onset F1 and +0.005 to +0.014 bar F1 over guarded on every full test set, with
+the time signature corrected in 7-9% of windows. Meter is therefore the default in the demo, in
+`scripts/audio_to_score.py` and in `scripts/export_musicxml.py --mode auto`.
+
+**Guard margin: 0 is kept.** Swept on `s2s` and `sf_base_reg` (`--extra-margins -0.05,-0.02,0.05`,
+`outputs/compare/margins.md`): in meter mode margin 0 has the best onset F1 on all four test sets
+for `s2s` and on three of four for `sf_base_reg` (clean: 0.154 vs 0.157 at +0.05). Negative margins
+fall back on 73-92% of windows and lower onset F1 everywhere (s2s real: 0.200 at -0.05 vs 0.223);
+bar F1 differences between margins are at most 0.023, in both directions.
+
+`real_unseen_audio` (the 3 `real` performances whose audio Transkun never trained on) is reported in
+`outputs/compare/` but too small to decide anything (time signature accuracy is 0.000 for 6 runs).
 
 ## Demo: audio in, score out
 
 A small web app runs the whole system on one recording: Transkun V2 transcribes the audio, the
-score model writes the score window by window with guarded decoding (each window's context is the
-model's own previous output, and degenerate windows are redone without it; the page can also switch
-to plain chained or no context), and the page shows the engraved score with playback and downloads.
+score model writes the score window by window in meter mode, the best in the evaluation (guarded
+decoding: each window's context is the model's own previous output, and degenerate windows are
+redone without it; plus time signatures kept consistent along the piece; the page can also switch
+to guarded only, plain chained or no context), and the page shows the engraved score with playback
+and downloads. The default checkpoint is the best model, `sf_base_reg_ca`.
 
 ```bash
 pip install fastapi uvicorn python-multipart        # once (also listed in environment.yml)
-python demo/app.py --ckpt outputs/runs/sf_base/best.pt
+python demo/app.py --ckpt outputs/runs/sf_base_reg_ca/best.pt
 # open http://127.0.0.1:7860 and drop in a WAV / MP3 / FLAC (or a .mid to skip transcription)
 ```
 
@@ -708,7 +723,7 @@ and the MIDI players use html-midi-player, both loaded from a CDN. Each job's fi
 `result.json`. The same pipeline from the command line:
 
 ```bash
-python scripts/audio_to_score.py recording.wav --ckpt outputs/runs/sf_base/best.pt
+python scripts/audio_to_score.py recording.wav --ckpt outputs/runs/sf_base_reg_ca/best.pt
 ```
 
 The demo needs `vocab.json` (and, for Score2Seq checkpoints, `feature_stats.json`) next to the

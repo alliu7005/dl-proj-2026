@@ -1,18 +1,20 @@
 """End-to-end inference: piano recording (or performance MIDI) -> engraved score.
 
-    audio --Transkun V2--> performance MIDI --note windows--> score model (guarded) --> tokens
+    audio --Transkun V2--> performance MIDI --note windows--> score model (meter) --> tokens
           --> MusicXML + score MIDI
 
 Used by the demo (demo/app.py) and by scripts/audio_to_score.py. Windows are cut exactly like the
 test sets (128 notes, cut at the largest onset gap nearby, carried-over notes and pedal included)
 and decoded by src/decoding.py, the same code scripts/evaluate_pieces.py scores, with the same
 per-window output budget. Modes:
-  guarded  (default) each window's context is the model's own previous output, but a window whose
-           output clearly disagrees with its input notes (a degenerate window) is replaced by the
-           window decoded without context, so one bad window cannot derail the rest of the piece
-  meter    guarded, plus consistent time signatures: a window whose time signature disagrees with
-           a clear majority of its neighbours is decoded again with that one forced, and the piece
-           re-decoded from there (decoding.decode_pieces_meter)
+  meter    (default) guarded, plus consistent time signatures: a window whose time signature
+           disagrees with a clear majority of its neighbours is decoded again with that one forced,
+           and the piece re-decoded from there (decoding.decode_pieces_meter). The best mode in the
+           evaluation (outputs/compare/summary.md): for sf_base_reg_ca it beats guarded on onset and
+           bar F1 on every full test set
+  guarded  each window's context is the model's own previous output, but a window whose output
+           clearly disagrees with its input notes (a degenerate window) is replaced by the window
+           decoded without context, so one bad window cannot derail the rest of the piece
   chained  the model's own previous output as context, unguarded
   none     every window decoded on its own
 """
@@ -36,7 +38,7 @@ from .scoreformer import load_model
 
 AUDIO_EXT = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".aiff", ".aif"}
 MIDI_EXT = {".mid", ".midi"}
-MODES = ("guarded", "meter", "chained", "none")
+MODES = ("meter", "guarded", "chained", "none")  # the first is the default
 GUARD_MARGIN = DEFAULT_GUARD_MARGIN  # the same default as scripts/evaluate_pieces.py
 CARRY_MIN_SEC = 0.125  # training uses 1/4 quarter note past the cut; ~0.125 s at 120 bpm
 
@@ -177,7 +179,7 @@ class ScorePipeline:
         ids = ids.tolist() if torch.is_tensor(ids) else list(ids)
         return self.vocab.decode(ids[:max_new])
 
-    def decode(self, windows: list[dict], mode: str = "guarded", progress: Progress = _noop,
+    def decode(self, windows: list[dict], mode: str = MODES[0], progress: Progress = _noop,
                guard_margin: float = GUARD_MARGIN) -> tuple[list[str], dict]:
         """Decode a piece window by window (see the module docstring for the modes). Returns the
         stitched tokens and {"guard_fallbacks": windows replaced by their no-context output,
@@ -201,7 +203,7 @@ class ScorePipeline:
         return history[0], {"guard_fallbacks": len(fallbacks), "meter_fixes": len(forced)}
 
     # ------------------------------------------------------------------ all of it
-    def run(self, src: str | Path, out_dir: str | Path, mode: str = "guarded",
+    def run(self, src: str | Path, out_dir: str | Path, mode: str = MODES[0],
             progress: Progress = _noop, guard_margin: float = GUARD_MARGIN) -> Result:
         src, out = Path(src), Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)

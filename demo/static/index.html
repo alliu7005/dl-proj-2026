@@ -108,8 +108,8 @@
     <div class="options">
       <span>Context between windows</span>
       <div class="seg">
-        <label title="The model's own previous output, but a window that clearly disagrees with its notes is redone without context, so one bad window cannot derail the rest"><input type="radio" name="mode" value="guarded" checked><span>Guarded</span></label>
-        <label title="Guarded, and time signatures kept consistent along the piece: a window whose meter disagrees with its neighbours is redone with theirs"><input type="radio" name="mode" value="meter"><span>Guarded + meter</span></label>
+        <label title="Guarded, and time signatures kept consistent along the piece: a window whose meter disagrees with its neighbours is redone with theirs (the best mode in the evaluation)"><input type="radio" name="mode" value="meter" checked><span>Guarded + meter</span></label>
+        <label title="The model's own previous output, but a window that clearly disagrees with its notes is redone without context, so one bad window cannot derail the rest"><input type="radio" name="mode" value="guarded"><span>Guarded</span></label>
         <label title="The model's own previous output, unguarded"><input type="radio" name="mode" value="chained"><span>Previous output</span></label>
         <label title="Every window is decoded on its own"><input type="radio" name="mode" value="none"><span>None</span></label>
       </div>

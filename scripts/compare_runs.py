@@ -189,6 +189,24 @@ def summary(runs, res, info, now):
     return "\n".join(out)
 
 
+def margin_of(run_res, name, v):
+    """A guarded / meter result's guard margin: recorded in the result, else in the mode name
+    (guarded@-0.05), else the margin the same mode recorded on another test set (real_unseen_audio
+    results written before src/eval/plan.py carry none: they come from the same decoding as real)."""
+    if "guard_margin" in v:
+        return v["guard_margin"]
+    if "@" in name:
+        try:
+            return float(name.split("@", 1)[1])
+        except ValueError:
+            return None
+    for modes in run_res.values():
+        other = modes.get(name)
+        if isinstance(other, dict) and "guard_margin" in other:
+            return other["guard_margin"]
+    return None
+
+
 def margins(runs, res, now):
     swept = [r for r in runs if any("@" in m for c in res[r].values() for m in c)]
     out = ["# Guard-margin sweeps", "",
@@ -207,7 +225,7 @@ def margins(runs, res, now):
             modes = res[r].get(cond, {})
             rows = []
             for kind in ("guarded", "meter"):
-                entries = [(v.get("guard_margin"), name, v) for name, v in modes.items()
+                entries = [(margin_of(res[r], name, v), name, v) for name, v in modes.items()
                            if name.split("@")[0] == kind and isinstance(v, dict)]
                 for m, name, v in sorted(entries, key=lambda e: (e[0] is None, e[0])):
                     label = name if m is None else "{} {}".format(

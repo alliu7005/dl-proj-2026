@@ -65,6 +65,8 @@ def build(runs):
             sweep[c]["guarded@{:g}".format(m)] = metrics(0.3 + m, fallback_rate=0.5 - m, guard_margin=m)
             sweep[c]["meter@{:g}".format(m)] = metrics(0.32 + m, fallback_rate=0.5 - m, meter_fix_rate=0.05,
                                                        guard_margin=m)
+    for v in sweep["real_unseen_audio"].values():  # the evaluator wrote no margin there before
+        v.pop("guard_margin", None)
     make_run(runs, "s2s", sweep, cfg(10e6), [(0.30, 1000), (0.2781, 1500), (0.29, 2000)],
              {"phase": "done", "stopped_early": False})
     make_run(runs, "s2s_ca", full(0.25, ("clean", "synthetic", "periscope")), cfg(10.2e6, cb=64, ca=32, aux=True),
@@ -123,6 +125,10 @@ def test_tables():
         assert rows == ["guarded -0.05", "guarded 0 (default)", "guarded +0.05", "meter -0.05",
                         "meter 0 (default)", "meter +0.05", "chained", "none"], rows
         assert "|:-------" in m.split("### clean: ")[1]  # the text column is left-aligned
+        # real_unseen_audio as written before margins were recorded there: read from the mode names
+        unseen = [ln.split("|")[1].strip() for ln in m.split("### real_unseen_audio: ")[1].splitlines()
+                  if ln.startswith("| ") and not ln.startswith("| mode")]
+        assert unseen == rows, unseen
 
         # every line of every table has the same width (aligned as plain text)
         for text in (s, m):
