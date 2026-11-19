@@ -194,6 +194,26 @@ When every job has finished, add the real condition to every run that does not h
 ARGS="--conditions real" bash pace/reevaluate.sh
 ```
 
+## 4f. Beats as an input
+
+```bash
+bash pace/beats.sh               # ground-truth beats + tests (CPU), Beat This! + noise fit (GPU), 3 runs
+```
+
+| job / run | what | waits for |
+|---|---|---|
+| `beatprep` (CPU) | `scripts/build_beats.py --check`: ground-truth beats for every split, compared with the ASAP annotations; the beat, plan and pipeline tests on this data build | - |
+| `beattrack` (GPU, `pace/track_beats.sbatch`) | installs Beat This!, tracks the MAESTRO audio of test / train / val _transcribed with the held-out fold models, fits `configs/beat_noise.json` | `beatprep` |
+| `sf_base_reg_ca_r` | the best model's recipe with the real-transcription data (new in these runs): the control | `beatprep` |
+| `sf_base_reg_cab` | the same + `--beats` | `beattrack` |
+| `s2s_m_cab` | the runner-up (25.9M Score2Seq) + `--beats` | `beattrack` |
+| `eval_<run>` | the new `piece` mode for every finished run (`pace/reevaluate.sh`) | the three trainings have started |
+
+`sf_base_reg_cab` vs `sf_base_reg_ca_r` is the effect of the beats alone (same data, same recipe);
+`sf_base_reg_ca_r` vs `sf_base_reg_ca` the effect of the real-transcription data. Afterwards, copy
+`configs/beat_noise.json` back and commit it (`scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/configs/beat_noise.json configs/`).
+Compare everything with `python3 scripts/compare_runs.py` (it shows the beat-only conditions too).
+
 ## 5. Compare the runs and bring results back
 
 ```bash

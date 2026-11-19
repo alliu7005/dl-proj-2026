@@ -29,14 +29,18 @@ CONDITIONS = [  # (key in the results, description)
     ("periscope", "PERiScoPe test, real piano transcriptions"),
     ("real", "ASAP test performances transcribed from audio by Transkun V2"),
     ("real_unseen_audio", "the subset of `real` whose audio Transkun never trained on"),
+    ("clean_gt_beats", "beat models only: clean MIDI with the annotated beats (what the beat-snap baselines get)"),
+    ("real_gt_beats", "beat models only: the real transcriptions with the annotated beats (upper bound)"),
+    ("real_no_beats", "beat models only: the real transcriptions without any beats (MIDI input, no tracker)"),
 ]
-MODES = ["oracle", "chained", "none", "guarded", "meter"]
+MODES = ["oracle", "chained", "none", "guarded", "meter", "piece"]
 SYSTEM = "meter"  # the mode the demo runs (guarded + time-signature consistency)
 METRICS = [("note_f1", "note F1"), ("onset_f1", "onset F1"), ("onset_shift_f1", "onset-shift F1"),
            ("duration_acc", "duration"), ("staff_acc", "staff"), ("bar_f1", "bar F1"), ("ts_acc", "time sig")]
 MODE_HELP = ("oracle = the true score before each window (upper bound); chained = the model's own "
              "previous output; none = no context; guarded = chained, falling back to no context when "
-             "that output matches the input notes better; meter = guarded + consistent time signatures")
+             "that output matches the input notes better; meter = guarded + consistent time signatures; "
+             "piece = meter with one time signature per piece unless it changes for a long stretch")
 DASH = "-"  # ASCII: prints the same in every terminal
 
 
@@ -224,7 +228,7 @@ def margins(runs, res, now):
         for cond, desc in CONDITIONS:
             modes = res[r].get(cond, {})
             rows = []
-            for kind in ("guarded", "meter"):
+            for kind in ("guarded", "meter", "piece"):
                 entries = [(margin_of(res[r], name, v), name, v) for name, v in modes.items()
                            if name.split("@")[0] == kind and isinstance(v, dict)]
                 for m, name, v in sorted(entries, key=lambda e: (e[0] is None, e[0])):

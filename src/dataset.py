@@ -17,6 +17,14 @@ Each item:
     downbeat, phase  int8 [N]   with ``metrical=True``: each note's metrical labels for the auxiliary
                                 target (src/metrical.py), -1 where unknown (context, carried, ...)
 
+Beats (``beats`` = "gt" / "tracked" / "none"): 7 more features per note (src/beats.py
+``beat_features``) from the performance's beat list in ``<split>/beats_<source>.npz``: ground
+truth (scripts/build_beats.py) or a beat tracker's output (scripts/track_beats.py); "none" gives
+the all-zero "no beats" features (MIDI input without a tracker). ``beat_noise`` corrupts each
+window's beats like a real tracker (src.beats.BeatNoise; the simulated-tracker test condition uses
+it too, with a fixed seed), and when training ``beat_dropout`` of the windows get no beats at all,
+so the model also works without them. Beat times follow the tempo augmentation.
+
 Context notes (``context_before`` / ``context_after`` > 0): the encoder also sees up to that many
 performed notes just before and just after the window, flagged by two extra features, so it can
 read the rhythm and meter around the window instead of guessing where the bar starts from ~128
@@ -40,12 +48,19 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, WeightedRandomSampler
 
+from .beats import N_BEAT_FEATURES, BeatNoise, beat_features, beats_path, load_beats, window_beats
 from .preprocessing.noise import NoiseModel
 from .preprocessing.store import SegmentStore
 from .preprocessing.vocab import BOS, EOS, ORNAMENT_PREFIXES, SEP, Vocab
 
 N_FEATURES = 8           # without context notes
 N_FEATURES_CONTEXT = 10  # with context notes: + "context before", "context after" flags
+BEAT_SOURCES = ("gt", "tracked", "none")
+
+
+def n_features(context: bool, beats: bool) -> int:
+    """Per-note input width: 8, 10 with context notes, + 7 with beats (src/beats.py)."""
+    return (N_FEATURES_CONTEXT if context else N_FEATURES) + (N_BEAT_FEATURES if beats else 0)
 SCALED = [1, 2, 3, 4]  # onset, inter-onset gap, log duration, velocity: standardized with train stats
 FEATURE_NAMES = ["pitch", "onset", "ioi", "log_dur", "velocity", "ped_at_onset", "ped_at_offset", "carried",
                  "context_before", "context_after"]
@@ -276,7 +291,8 @@ class ScoreSegmentDataset(Dataset):
                  seed: int = 0, ornament_oversample: float = 3.0, augment: AugmentConfig | None = None,
                  use_prompt: bool = True, prompt_dropout: float = 0.1, feature_stats: str | None = "auto",
                  context_noise: ContextNoise | None = None, context_before: int = 0, context_after: int = 0,
-                 metrical: bool = False):
+                 metrical: bool = False, beats: str | None = None, beat_noise: BeatNoise | None = None,
+                 beat_dropout: float = 0.0):
         """``prompt_dropout``: chance (when training, i.e. with noise or augmentation) of hiding the
         prompt, so the model also works without context (first window of a piece, or after a bad
         window). ``feature_stats``: JSON from ``compute_feature_stats`` (written by build_dataset.py
@@ -285,7 +301,8 @@ class ScoreSegmentDataset(Dataset):
         ``ContextNoise``); like prompt dropout, only when training. ``context_before`` /
         ``context_after``: context notes the encoder also sees (module docstring); 0 = none.
         ``metrical``: add per-note metrical labels (src/metrical.py), read from the split's
-        metrical.npy if scripts/build_metrical.py made it, else aligned on the fly."""
+        metrical.npy if scripts/build_metrical.py made it, else aligned on the fly.
+        ``beats`` / ``beat_noise`` / ``beat_dropout``: beat features (module docstring); None = off."""
         self.store = SegmentStore(split_dir)
         self.vocab = Vocab.load(vocab_path)
         self.noise = noise
@@ -300,6 +317,16 @@ class ScoreSegmentDataset(Dataset):
         self.with_context = self.context_before > 0 or self.context_after > 0
         self._pools: dict = {}  # performance -> (notes, keys, pedal) in absolute time, built lazily
         self._by_perf = None
+        if beats is not None and beats not in BEAT_SOURCES:
+            raise ValueError(f"beats must be one of {BEAT_SOURCES} or None, not {beats!r}")
+        self.beats, self.beat_noise, self.beat_dropout = beats, beat_noise, float(beat_dropout)
+        self._beats = {}
+        if beats in ("gt", "tracked"):
+            path = beats_path(split_dir, beats)
+            if not path.exists():
+                raise FileNotFoundError(f"{path} missing: run scripts/build_beats.py (gt) or "
+                                        f"scripts/track_beats.py (tracked) first")
+            self._beats = load_beats(path)
         self.metrical = bool(metrical)
         self._mfile = None
         self._mcache: dict = {}
@@ -391,6 +418,20 @@ class ScoreSegmentDataset(Dataset):
             self._mcache[i] = np.stack([d, ph], axis=1)
         return self._mcache[i]
 
+    def _window_beats(self, i: int, lo: float, hi: float, rng, training: bool):
+        """Beat list of window ``i`` in its time frame (before tempo augmentation), from window-frame
+        ``lo`` to ``hi`` seconds (its notes and context notes), corrupted / dropped as configured."""
+        m = self.store.meta[i]
+        t0 = float(m["perf_t0"])
+        times, down = self._beats.get(m["performance"], (None, None))
+        bt, bd = window_beats(times, down, t0, t0 + lo, t0 + hi)
+        brng = np.random.default_rng((self.seed, self.epoch if training else 0, i, 13))  # own stream
+        if training and self.beat_dropout > 0 and brng.random() < self.beat_dropout:
+            return np.zeros(0), np.zeros(0, bool)
+        if self.beat_noise is not None and len(bt):
+            bt, bd = self.beat_noise(bt, bd, brng)
+        return bt, bd
+
     def sampler(self) -> WeightedRandomSampler:
         """Oversamples segments containing grace notes / arpeggios / ornaments."""
         return WeightedRandomSampler(torch.as_tensor(self.weights, dtype=torch.double),
@@ -433,8 +474,17 @@ class ScoreSegmentDataset(Dataset):
             nb, nw, npw = len(before), len(notes), len(pedal)
             notes = np.concatenate([before, notes, after])  # augmented together: same key and tempo
             pedal = np.concatenate([pedal.reshape(-1, 2), cped])
+        training = self.noise is not None or self.augment is not None
+        if self.beats in ("gt", "tracked"):  # the span of every note the encoder will see
+            span = notes[:, 1] if len(notes) else np.zeros(1)
+            ends = notes[:, 1] + notes[:, 2] if len(notes) else np.zeros(1)
+            bt, bd = self._window_beats(i, float(span.min()), float(max(ends.max(), self.store.meta[i]["window_sec"])),
+                                        rng, training)
+        else:
+            bt, bd = np.zeros(0), np.zeros(0, bool)
         if self.augment is not None:
             notes, pedal, tokens, prompt, tempo = self._augment(notes, pedal, tokens, prompt, rng)
+            bt = bt * tempo  # the beats follow the tempo change
         if self.with_context:
             before, notes, after = notes[:nb], notes[nb:nb + nw], notes[nb + nw:]
             pedal, cped = pedal[:npw], pedal[npw:]
@@ -450,7 +500,6 @@ class ScoreSegmentDataset(Dataset):
                 nrng = np.random.default_rng((self.seed, self.epoch, i, 11))
                 before = self.noise(before, cped, nrng)[0] if len(before) else before
                 after = self.noise(after, cped, nrng)[0] if len(after) else after
-        training = self.noise is not None or self.augment is not None
         if training and rng.random() < self.prompt_dropout:
             prompt = prompt[:0]
         if training and self._ctx is not None and len(prompt):
@@ -477,6 +526,8 @@ class ScoreSegmentDataset(Dataset):
         if self.scale is not None:
             cols, mean, std = self.scale
             feats[:, cols] = (feats[:, cols] - mean) / std
+        if self.beats is not None:
+            feats = np.concatenate([feats, beat_features(notes[:, 1], bt, bd)], axis=1)
         item = {"notes": torch.from_numpy(feats), "roles": torch.from_numpy(roles),
                 "target": torch.from_numpy(target), "prompt_len": len(head)}
         if lab is not None:
@@ -529,13 +580,18 @@ class MixedTrainDataset(Dataset):
     def __init__(self, clean_dir: str, real_dir: str, vocab_path: str, noise: NoiseModel | None,
                  augment: AugmentConfig | None = None, real_fraction: float = 0.3, seed: int = 0,
                  ornament_oversample: float = 3.0, context_noise: ContextNoise | None = None,
-                 context_before: int = 0, context_after: int = 0, metrical: bool = False):
+                 context_before: int = 0, context_after: int = 0, metrical: bool = False,
+                 beats: dict | None = None, real_beats: dict | None = None):
+        """``beats`` / ``real_beats``: beat arguments of ScoreSegmentDataset (beats, beat_noise,
+        beat_dropout) for the clean and the real-transcription part; None = no beat features."""
         ctx = dict(context_noise=context_noise, context_before=context_before, context_after=context_after,
                    metrical=metrical)
         self.synthetic = ScoreSegmentDataset(clean_dir, vocab_path, noise=noise, augment=augment,
-                                             seed=seed, ornament_oversample=ornament_oversample, **ctx)
+                                             seed=seed, ornament_oversample=ornament_oversample, **ctx,
+                                             **(beats or {}))
         self.real = ScoreSegmentDataset(real_dir, vocab_path, noise=None, augment=augment,
-                                        seed=seed + 1, ornament_oversample=ornament_oversample, **ctx)
+                                        seed=seed + 1, ornament_oversample=ornament_oversample, **ctx,
+                                        **(real_beats if real_beats is not None else beats or {}))
         self.vocab = self.synthetic.vocab
         self.real_fraction = real_fraction
         self.n_syn = len(self.synthetic)

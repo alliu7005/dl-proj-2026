@@ -42,6 +42,7 @@ class ModelConfig:
     context_before: int = 0      # context notes the Dataset / pipeline add before each window
     context_after: int = 0       # ... and after it (0 = none)
     aux_metrical: bool = False   # auxiliary head: each note's downbeat / beat phase (src/metrical.py)
+    beat_features: bool = False  # + per-note beat features (src/beats.py): n_features + 7
 
     def to_dict(self):
         return asdict(self)

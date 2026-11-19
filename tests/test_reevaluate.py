@@ -104,13 +104,18 @@ def test_reevaluate():
         assert "skip queued: already being evaluated (job 777)" in out and "smoke_x" not in out, out
         assert "2 job(s) submitted" in out, out
 
-        # extra margins: every finished run gets the two new modes, and only those
+        # extra margins: every finished run gets the three new modes, and only those
         out, sub = reevaluate(tmp, bin_, "done_all", ARGS="--conditions clean --extra-margins -0.05")
         assert sub["done_all"][1] == "--conditions clean --extra-margins -0.05 --only-missing", sub
-        assert "clean: guarded@-0.05,meter@-0.05" in out, out
+        assert "clean: guarded@-0.05,meter@-0.05,piece@-0.05\n" in out, out
         # FORCE recomputes existing results (without --only-missing), but never a run in training
         out, sub = reevaluate(tmp, bin_, "done_all", "training", FORCE="1")
         assert set(sub) == {"done_all"} and sub["done_all"][1] == "", sub
+        # AFTER: one Slurm dependency for every submitted job (pace/beats.sh: after the trainings start)
+        out, sub = reevaluate(tmp, bin_, "no_real", ARGS="--conditions real", AFTER="after:11:12")
+        assert "--dependency=after:11:12" in sub["no_real"][2], sub
+        out, sub = reevaluate(tmp, bin_, "no_real", ARGS="--conditions real")
+        assert "--dependency" not in sub["no_real"][2], sub
         out, _ = reevaluate(tmp, bin_, "no_ckpt")
         assert "skip no_ckpt: outputs/runs/no_ckpt/best.pt not found" in out, out
         # a bad argument stops the script before anything is submitted
@@ -118,6 +123,48 @@ def test_reevaluate():
         r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash pace/reevaluate.sh'],
                            cwd=tmp, env=e, capture_output=True, text=True)
         assert r.returncode != 0 and "unknown mode" in r.stdout and not (tmp / "bad.txt").exists(), r.stdout
+
+
+def test_beats_batch():
+    """pace/beats.sh: the job graph (names, arguments, dependencies) and the piece-mode evaluations."""
+    if shutil.which("bash") is None:
+        print("  (skipped: no bash)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        bin_ = setup(tmp)
+        shutil.copy(ROOT / "pace" / "beats.sh", tmp / "pace")
+        # sbatch: a new job id per call, one line per submission (NAME, ARGS, its arguments)
+        (bin_ / "sbatch").write_text('#!/bin/bash\nn=$(( $(cat "$SUBMITS.n" 2>/dev/null || echo 100) + 1 ))\n'
+                                     'echo $n > "$SUBMITS.n"\n'
+                                     'printf "%s\\t%s\\t%s\\t%s\\n" "$n" "$NAME" "$ARGS" "$*" >> "$SUBMITS"\n'
+                                     'echo $n\n')
+        (bin_ / "sbatch").chmod(0o755)
+        e = dict(os.environ, USER="me", SUBMITS=str(tmp / "jobs.txt"))
+        r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/beats.sh'],
+                           cwd=tmp, env=e, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        jobs = [ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()]
+        by_id = {j[0]: j for j in jobs}
+        prep, track = jobs[0], jobs[1]
+        assert "-J beatprep" in prep[3] and "build_beats.py --check" in prep[3] and "tests.test_beats" in prep[3]
+        assert f"--dependency=afterok:{prep[0]}" in track[3] and "track_beats.sbatch" in track[3]
+        train = {j[1]: j for j in jobs if "train.sbatch" in j[3]}
+        assert set(train) == {"sf_base_reg_ca_r", "sf_base_reg_cab", "s2s_m_cab"}, train.keys()
+        assert f"afterok:{prep[0]}" in train["sf_base_reg_ca_r"][3] and "--beats" not in train["sf_base_reg_ca_r"][2]
+        for name in ("sf_base_reg_cab", "s2s_m_cab"):
+            assert f"afterok:{track[0]}" in train[name][3] and train[name][2].endswith("--beats"), train[name]
+            assert "--context-before 64 --context-after 32 --aux-metrical" in train[name][2]
+        # the control differs from the beat run only by --beats
+        assert train["sf_base_reg_cab"][2] == train["sf_base_reg_ca_r"][2] + " --beats"
+        ids = ":".join(train[n][0] for n in ("sf_base_reg_ca_r", "sf_base_reg_cab", "s2s_m_cab"))
+        evals = [j for j in jobs if "evaluate.sbatch" in j[3]]
+        assert evals and all(f"--dependency=after:{ids}" in j[3] for j in evals), evals
+        assert all(j[2] == "--modes piece --only-missing" for j in evals) and len(by_id) == len(jobs)
+        # done_all / finished already have piece results everywhere (built from the current modes);
+        # no_real / big_no_real lack it on real; training / queued / smoke runs are never submitted
+        assert {j[1] for j in evals} == {"no_real", "big_no_real"}, [j[1] for j in evals]
+        assert "skip done_all: nothing missing" in r.stdout and "skip training: training not finished" in r.stdout
 
 
 def main():

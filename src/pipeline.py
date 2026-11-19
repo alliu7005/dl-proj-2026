@@ -15,8 +15,15 @@ per-window output budget. Modes:
   guarded  each window's context is the model's own previous output, but a window whose output
            clearly disagrees with its input notes (a degenerate window) is replaced by the window
            decoded without context, so one bad window cannot derail the rest of the piece
+  piece    meter, with one time signature for the whole piece unless a different one holds
+           for a stretch as long as the rest
   chained  the model's own previous output as context, unguarded
   none     every window decoded on its own
+
+Beats: a model trained with beat features (src/beats.py) gets the beats of the recording from
+Beat This! (scripts/track_beats.py Tracker, checkpoint final0) after transcription. MIDI input, or
+an environment without the beat-this package, gives the "no beats" features the model was also
+trained on (``beat_dropout``), and the result says which it was (stats "beats").
 """
 from __future__ import annotations
 
@@ -30,7 +37,9 @@ import numpy as np
 import torch
 
 from .dataset import assemble_notes, note_features
+from .beats import beat_features, window_beats
 from .decoding import DEFAULT_GUARD_MARGIN, decode_pieces, decode_pieces_meter, max_new_tokens
+from .eval.plan import PIECE_MAX_BLIP
 from .preprocessing.performance import OFFSET, ONSET, load_performance
 from .preprocessing.segment import SegmentConfig, cut_windows
 from .preprocessing.vocab import BOS, EOS, SEP, Vocab
@@ -38,7 +47,7 @@ from .scoreformer import load_model
 
 AUDIO_EXT = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".aiff", ".aif"}
 MIDI_EXT = {".mid", ".midi"}
-MODES = ("meter", "guarded", "chained", "none")  # the first is the default
+MODES = ("meter", "piece", "guarded", "chained", "none")  # the first is the default
 GUARD_MARGIN = DEFAULT_GUARD_MARGIN  # the same default as scripts/evaluate_pieces.py
 CARRY_MIN_SEC = 0.125  # training uses 1/4 quarter note past the cut; ~0.125 s at 120 bpm
 
@@ -51,14 +60,16 @@ def _noop(stage: str, frac: float, msg: str):
 
 def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
                         search: float | None = None, context_before: int = 0,
-                        context_after: int = 0) -> list[dict]:
+                        context_after: int = 0, beats: tuple | None = None) -> list[dict]:
     """Cut a performance (no score) into model inputs, mirroring segment.segment_windows at eval
     time: cut points at the midpoint of the largest onset gap near every ``size`` notes, onsets
     relative to the cut, notes struck before the cut but still held past it carried over with a
     negative onset, pedal intervals clipped to the window. Returns raw [N,4] notes and pedal.
     With ``context_before`` / ``context_after``, each window also gets that many of the performed
     notes just before / after it ("before" / "after", same time frame; the carried-over notes are
-    not repeated), as src/dataset.py gives the model during training."""
+    not repeated), as src/dataset.py gives the model during training. ``beats`` = (times, down)
+    in the performance's seconds: each window gets the beats around it ("beat_t" / "beat_d", in its
+    own time frame), as src/dataset.py does."""
     if search is None:
         search = SegmentConfig().cut_search
     on = notes[:, ONSET].astype(np.float64)
@@ -83,9 +94,11 @@ def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
             after = np.stack([notes[nxt, 0], on[nxt] - t0, off[nxt] - on[nxt], notes[nxt, 3]], axis=1)
             hi = max(t1, float(off[nxt].max()))
         ped = pedal[(pedal[:, 1] > lo) & (pedal[:, 0] < hi)] - t0 if len(pedal) else pedal.reshape(-1, 2)
+        bt, bd = window_beats(beats[0], beats[1], t0, lo, hi) if beats is not None else (np.zeros(0), np.zeros(0, bool))
         out.append({"notes": w.astype(np.float32), "pedal": np.asarray(ped, np.float32).reshape(-1, 2),
                     "before": np.asarray(before, np.float32), "after": np.asarray(after, np.float32),
-                    "t0": t0, "t1": t1, "n": int(b - a), "carried": int(len(carried))})
+                    "t0": t0, "t1": t1, "n": int(b - a), "carried": int(len(carried)),
+                    "beat_t": bt, "beat_d": bd})
     return out
 
 
@@ -124,9 +137,11 @@ class ScorePipeline:
         self.bos, self.sep, self.eos = (self.vocab.stoi[t] for t in (BOS, SEP, EOS))
         self.ckpt = ckpt
         self._transkun = None
+        self._tracker = None
         n_params = sum(p.numel() for p in self.model.parameters())
         self.info = {"checkpoint": str(ckpt), "arch": type(self.model).__name__,
-                     "params_M": round(n_params / 1e6, 1), "device": str(self.device)}
+                     "params_M": round(n_params / 1e6, 1), "device": str(self.device),
+                     "beats": bool(getattr(self.cfg, "beat_features", False))}
 
     @staticmethod
     def _find(given, ckpt: Path, name: str) -> Path:
@@ -146,15 +161,32 @@ class ScorePipeline:
         self._transkun(str(audio), str(midi_out))
         return midi_out
 
+    def track_beats(self, audio: Path):
+        """(times, down) from Beat This!, or None if it is not installed."""
+        if self._tracker is None:
+            import sys
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from scripts.track_beats import Tracker
+            try:
+                self._tracker = Tracker("cuda" if self.device.type == "cuda" else "cpu")
+            except ImportError:
+                self._tracker = False
+        return self._tracker(audio) if self._tracker else None
+
     def features(self, w: dict) -> torch.Tensor:
-        """Model input for a window: its notes, plus context notes if the model was trained with them."""
-        if getattr(self.cfg, "n_features", 8) > 8:
+        """Model input for a window: its notes, plus context notes and beat features if the model
+        was trained with them (the same layout as src/dataset.py)."""
+        if int(getattr(self.cfg, "context_before", 0)) or int(getattr(self.cfg, "context_after", 0)):
             notes, roles = assemble_notes(w["notes"], w.get("before", np.zeros((0, 4))), w.get("after", np.zeros((0, 4))))
             f = note_features(notes, w["pedal"], roles)
         else:
-            f = note_features(w["notes"], w["pedal"])
+            notes = w["notes"]
+            f = note_features(notes, w["pedal"])
         cols, mean, std = self.scale
         f[:, cols] = (f[:, cols] - mean) / std
+        if getattr(self.cfg, "beat_features", False):
+            beats = beat_features(notes[:, 1], w.get("beat_t", np.zeros(0)), w.get("beat_d", np.zeros(0, bool)))
+            f = np.concatenate([f, beats], axis=1)
         return torch.from_numpy(f[: self.cfg.max_notes])
 
     def prefix(self, prompt: list[str], start: list[str] = ()) -> torch.Tensor:
@@ -195,8 +227,10 @@ class ScorePipeline:
         kw = dict(contiguous=(lambda prev, w: mode != "none"), pitches=lambda w: w["notes"][:, 0].tolist(),
                   progress=lambda j, total: progress("score", j / total, f"window {j} of {total}"))
         forced = {}
-        if mode == "meter":
-            _, history, fallbacks, forced = decode_pieces_meter({0: windows}, decode, guard_margin=guard_margin, **kw)
+        if mode in ("meter", "piece"):
+            _, history, fallbacks, forced = decode_pieces_meter(
+                {0: windows}, decode, guard_margin=guard_margin,
+                max_blip=PIECE_MAX_BLIP if mode == "piece" else 2, **kw)
         else:
             _, history, fallbacks = decode_pieces({0: windows}, decode,
                                                   guard_margin=guard_margin if mode == "guarded" else None, **kw)
@@ -223,9 +257,20 @@ class ScorePipeline:
         notes, pedal = load_performance(midi)
         if len(notes) == 0:
             raise ValueError("no notes found (silent recording, or not a piano?)")
+        beats, beat_info = None, "not used by this model"
+        if getattr(self.cfg, "beat_features", False):
+            if ext in AUDIO_EXT:
+                progress("beats", 0.0, "tracking beats with Beat This!")
+                t = time.perf_counter()
+                beats = self.track_beats(src)
+                timing["beats_s"] = round(time.perf_counter() - t, 1)
+                beat_info = (f"Beat This!: {len(beats[0])} beats, {int(beats[1].sum())} downbeats" if beats is not None
+                             else "none (Beat This! not installed: pip install beat-this rotary-embedding-torch einops)")
+            else:
+                beat_info = "none (MIDI input)"
         windows = performance_windows(notes, pedal, self.window_notes,
                                       context_before=int(getattr(self.cfg, "context_before", 0)),
-                                      context_after=int(getattr(self.cfg, "context_after", 0)))
+                                      context_after=int(getattr(self.cfg, "context_after", 0)), beats=beats)
         progress("score", 0.0, f"window 0 of {len(windows)}")
         t = time.perf_counter()
         tokens, counts = self.decode(windows, mode, progress, guard_margin)
@@ -251,7 +296,7 @@ class ScorePipeline:
 
         dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())
         res.stats = {**self.info, "mode": mode, "duration_s": round(dur, 1), "notes": int(len(notes)),
-                     "pedal_presses": int(len(pedal)), "windows": len(windows), **counts,
+                     "pedal_presses": int(len(pedal)), "windows": len(windows), "beats": beat_info, **counts,
                      "bars": tokens.count("bar"), "tokens": len(tokens), **timing}
         (out / "result.json").write_text(json.dumps({"stats": res.stats, "errors": res.errors,
                                                      "files": {k: str(v) for k, v in files.items()}}, indent=1))

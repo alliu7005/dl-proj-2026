@@ -12,6 +12,8 @@
 #   TIME=8:00:00 ARGS=... bash pace/reevaluate.sh    # walltime (default: 2.5 h for models under 15M
 #                                                    # parameters, else 4 h: what one evaluation needs,
 #                                                    # since PACE caps a user's running walltime x GPUs)
+#   AFTER=after:123:124 bash pace/reevaluate.sh      # a Slurm dependency for every job (e.g. start only
+#                                                    # once these training jobs have started)
 #
 # For each run, `python3 -m src.eval.plan` (standard library only) lists what is missing from
 # outputs/runs/<run>/eval_pieces_best.json for the requested conditions and modes: a result counts
@@ -27,6 +29,9 @@ G=(--gres=gpu:1 "--constraint=$GPUS")
 ARGS=${ARGS:-}
 TIME=${TIME:-}
 FORCE=${FORCE:-0}
+AFTER=${AFTER:-}
+DEP=()
+[ -n "$AFTER" ] && DEP=("--dependency=$AFTER")
 RUNS=("$@")
 if [ ${#RUNS[@]} -eq 0 ]; then  # every run with a best.pt, except smoke tests
   for f in outputs/runs/*/best.pt; do
@@ -70,7 +75,7 @@ for r in "${RUNS[@]}"; do
   [ "$FORCE" = 1 ] || args="$args --only-missing"
   # NAME / ARGS travel as environment variables (--export=ALL): the --export=ALL,ARGS=... form
   # splits on commas, which would break arguments like --modes guarded,meter
-  id=$(NAME="$r" ARGS="$args" sbatch --parsable "${G[@]}" -t "$t" -J "eval_$r" --export=ALL pace/evaluate.sbatch)
+  id=$(NAME="$r" ARGS="$args" sbatch --parsable "${G[@]}" ${DEP[@]+"${DEP[@]}"} -t "$t" -J "eval_$r" --export=ALL pace/evaluate.sbatch)
   submitted=$((submitted + 1))
   if [ "$FORCE" = 1 ]; then
     echo "  $r: job $id  ($t; everything requested, FORCE=1${ARGS:+; $ARGS})"

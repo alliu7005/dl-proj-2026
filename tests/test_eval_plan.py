@@ -37,10 +37,10 @@ def full_results(names, margins, version=EVAL_VERSION, limit=0, conds=("clean", 
 
 def test_mode_names_and_passes():
     assert decode_passes(ALL, 0.0, []) == [("chained", "chained", 0.0), ("guarded", "guarded", 0.0),
-                                           ("meter", "meter", 0.0)]
+                                           ("meter", "meter", 0.0), ("piece", "piece", 0.0)]
     passes = decode_passes(ALL, 0.0, [-0.05, 0.0, 0.05])  # an extra equal to the main margin is dropped
     assert [p[0] for p in passes] == ["chained", "guarded", "guarded@-0.05", "guarded@0.05",
-                                      "meter", "meter@-0.05", "meter@0.05"]
+                                      "meter", "meter@-0.05", "meter@0.05", "piece", "piece@-0.05", "piece@0.05"]
     assert dict((n, m) for n, _, m in passes)["meter@-0.05"] == -0.05
     assert mode_names(["none", "guarded"], 0.0, [0.1]) == ["none", "guarded", "guarded@0.1"]
     assert mode_names(["oracle", "chained"], 0.0, [0.1]) == ["oracle", "chained"]  # chained has no margin
@@ -51,7 +51,7 @@ def test_mode_names_and_passes():
 def test_missing_rules():
     names = mode_names(ALL, 0.0, [])
     margins = plan.margins_of(ALL, 0.0, [])
-    assert set(margins) == {"guarded", "meter"}
+    assert set(margins) == {"guarded", "meter", "piece"}
     yes = lambda c: True  # noqa: E731
     conds = ["clean", "real", "periscope"]
     res = full_results(names, margins)
@@ -69,7 +69,7 @@ def test_missing_rules():
     # a margin sweep's file (guarded / meter at several margins, no oracle / none / chained)
     sweep = {c: {n: r for n, r in legacy[c].items() if n.split("@")[0] in ("guarded", "meter")}
              for c in legacy}
-    assert missing(sweep, ["real"], names, margins, yes) == {"real": ["oracle", "none", "chained"]}
+    assert missing(sweep, ["real"], names, margins, yes) == {"real": ["oracle", "none", "chained", "piece"]}
     # a recorded unseen-audio margin is still compared
     bad = json.loads(json.dumps(res))
     bad["real_unseen_audio"]["meter"]["guard_margin"] = 0.05
@@ -90,7 +90,7 @@ def test_missing_rules():
     # extra margins: only the new modes are missing
     n2 = mode_names(ALL, 0.0, [-0.02])
     m2 = plan.margins_of(ALL, 0.0, [-0.02])
-    assert missing(res, ["clean"], n2, m2, yes) == {"clean": ["guarded@-0.02", "meter@-0.02"]}
+    assert missing(res, ["clean"], n2, m2, yes) == {"clean": ["guarded@-0.02", "meter@-0.02", "piece@-0.02"]}
 
 
 def test_arguments():
@@ -129,13 +129,44 @@ def test_command_line():
         (run / "eval_pieces_best.json").write_text(json.dumps(res))
         assert run_plan("--run", "r", *dirs) == (plan.NOTHING_MISSING, "nothing missing")
         code, out = run_plan("--run", "r", "--conditions", "real", "--extra-margins", "-0.05", *dirs)
-        assert code == plan.MISSING and out == "real: guarded@-0.05,meter@-0.05", out
+        assert code == plan.MISSING and out == "real: guarded@-0.05,meter@-0.05,piece@-0.05", out
         (run / "status.json").write_text(json.dumps({"phase": "cooldown", "step": 5}))
         assert run_plan("--run", "r", *dirs) == (plan.TRAINING, "training not finished (phase cooldown)")
         (run / "status.json").write_text(json.dumps({"phase": "done", "step": 9}))
         assert run_plan("--run", "r", *dirs)[0] == plan.NOTHING_MISSING
         code, out = run_plan("--run", "r", "--modes", "bogus", *dirs)
         assert code != 0 and code not in (plan.NOTHING_MISSING, plan.TRAINING)
+
+
+def test_beat_conditions():
+    """Beat-only conditions apply to beat models only; a beat model waits for its beats."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        data, runs = tmp / "data", tmp / "runs"
+        for split in ("test", "test_transcribed"):
+            (data / split).mkdir(parents=True)
+            (data / split / "index.npy").write_bytes(b"")
+        for name, beats in (("plain", False), ("beat", True)):
+            (runs / name).mkdir(parents=True)
+            (runs / name / "config.json").write_text(json.dumps({"model": {"beat_features": beats}}))
+        noise = tmp / "beat_noise.json"
+        dirs = ["--runs-dir", str(runs), "--data-dir", str(data), "--beat-noise", str(noise)]
+        conds = lambda out: [ln.split(":")[0] for ln in out.splitlines()]  # noqa: E731
+        assert plan.has_beats(runs / "beat") and not plan.has_beats(runs / "plain")
+        # a model without beats: the beat-only conditions never apply
+        assert conds(run_plan("--run", "plain", *dirs)[1]) == ["clean", "synthetic", "real"]
+        # a beat model: nothing with beats until they exist; only "none" needs nothing
+        assert conds(run_plan("--run", "beat", *dirs)[1]) == ["real_no_beats"]
+        for split in ("test", "test_transcribed"):
+            (data / split / "beats_gt.npz").write_bytes(b"")
+        assert conds(run_plan("--run", "beat", *dirs)[1]) == ["clean_gt_beats", "real_gt_beats", "real_no_beats"]
+        noise.write_text("{}")  # the fitted tracker noise: the simulated-tracker conditions
+        assert conds(run_plan("--run", "beat", *dirs)[1]) == ["clean", "synthetic", "clean_gt_beats",
+                                                              "real_gt_beats", "real_no_beats"]
+        (data / "test_transcribed" / "beats_tracked.npz").write_bytes(b"")  # Beat This! on the audio: real
+        assert conds(run_plan("--run", "beat", *dirs)[1]) == ["clean", "synthetic", "real", "clean_gt_beats",
+                                                              "real_gt_beats", "real_no_beats"]
+        assert plan.BEATS["real"] == "tracked" and plan.BEATS["clean"] == "sim" and set(plan.BEAT_ONLY) <= set(plan.BEATS)
 
 
 def test_login_node_python():

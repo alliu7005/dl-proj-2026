@@ -157,21 +157,19 @@ def _map_through(pairs, sq, pt):
     return pred
 
 
-def align(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str]):
-    """Label performed notes (window time frame; onsets < 0 = carried over, not labelled).
-    Returns (downbeat [N] int8, phase [N] int8), IGNORE where unknown.
+def fit_alignment(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str]):
+    """The alignment behind ``align``: (score onsets, their q, live performed-note indices, pairs
+    {live index: score index}, performed times of the live notes), or None if there is too little
+    to align. Shared with src/beats.py, which reads the beat grid off the same time map.
 
     Written and performed onsets are nearly one-to-one, so the first time map pairs them by rank
     (the k-th written onset with the performed onset at the same relative rank), which follows any
     tempo change without assuming one; order-preserving matches per pitch within half the local
     quarter note then give a piecewise-linear map, refitted twice."""
-    n = len(onsets)
-    down = np.full(n, IGNORE, np.int8)
-    phase = np.full(n, IGNORE, np.int8)
     score = score_onsets(tokens)
     live = np.nonzero(onsets >= 0)[0]
     if len(score) < 2 or len(live) < 2:
-        return down, phase
+        return None
     sq = np.array([x[0] for x in score])
     sp = np.array([x[1] for x in score])
     pt, pp = onsets[live].astype(np.float64), pitches[live].astype(np.int64)
@@ -191,6 +189,19 @@ def align(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str]):
             break
         pred = _map_through(pairs, sq, pt)
         pairs = _match_tol(pt, pp, pred, sp, _local_tol(sq, pred, frac))
+    return score, sq, live, pairs, pt
+
+
+def align(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str]):
+    """Label performed notes (window time frame; onsets < 0 = carried over, not labelled).
+    Returns (downbeat [N] int8, phase [N] int8), IGNORE where unknown (``fit_alignment``)."""
+    n = len(onsets)
+    down = np.full(n, IGNORE, np.int8)
+    phase = np.full(n, IGNORE, np.int8)
+    fit = fit_alignment(onsets, pitches, tokens)
+    if fit is None:
+        return down, phase
+    score, _, live, pairs, _ = fit
     for k, s_ in pairs.items():
         down[live[k]] = score[s_][2]
         phase[live[k]] = score[s_][3]

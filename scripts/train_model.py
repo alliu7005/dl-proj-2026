@@ -21,6 +21,12 @@ difference between two runs is what you change on the command line. Differences 
   * ``--context-before`` / ``--context-after``: the encoder also sees that many performed notes
     before / after each window (src/dataset.py), so it can read the meter around the window;
     recorded in the checkpoint, which evaluation and the demo follow;
+  * ``--beats``: every note also gets 7 beat features (src/beats.py) from the performance's beats:
+    the ground truth (scripts/build_beats.py) corrupted like a real beat tracker (``--beat-noise``,
+    fitted by scripts/fit_beat_noise.py), and on the real transcriptions the tracker's own beats
+    (scripts/track_beats.py) when they exist. ``--beat-dropout`` of the windows get no beats, so the
+    model also works without a tracker (MIDI input). Validation uses the same fitted noise with a
+    fixed seed. Recorded in the checkpoint (``beat_features``);
   * early stopping with a cooldown. ``--epochs`` (default 20) is the maximum and the length of the
     cosine learning-rate schedule. When the mean validation loss has not improved for
     ``--patience`` epochs (default 5; 0 = off), training goes back to the best checkpoint (weights
@@ -51,7 +57,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import (SHOW, TokenBudgetBatches, TruncatingCollate, lower_priority,  # noqa: E402
                            pick_device, store_lengths)
-from src.dataset import AugmentConfig, ContextNoise, MixedTrainDataset, ScoreSegmentDataset  # noqa: E402
+from src.beats import BeatNoise, beats_path  # noqa: E402
+from src.dataset import AugmentConfig, ContextNoise, MixedTrainDataset, ScoreSegmentDataset, n_features  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.metrical import aux_counts, aux_loss, aux_scores  # noqa: E402
 from src.model import token_loss  # noqa: E402
@@ -85,7 +92,9 @@ class Evaluator:
     """Fixed validation subsets: teacher-forced loss / token accuracy + greedy-decoding metrics
     (ground-truth prompt, as in scripts/train.py). Sets with no data are left out."""
 
-    def __init__(self, vocab_path, n_loss: int, n_decode: int, coll, seed: int = 0, **ctx):
+    def __init__(self, vocab_path, n_loss: int, n_decode: int, coll, seed: int = 0, beats=None,
+                 real_beats=None, **ctx):
+        """``beats`` / ``real_beats``: beat arguments of ScoreSegmentDataset for val / val_transcribed."""
         rng = np.random.default_rng(seed)
         self.coll = coll
         self.sets = {}
@@ -94,14 +103,15 @@ class Evaluator:
             idx = list(idx)
             return sorted(rng.choice(idx, size=min(n, len(idx)), replace=False).tolist())
 
-        val = ScoreSegmentDataset(str(D / "val"), vocab_path, **ctx)
+        val = ScoreSegmentDataset(str(D / "val"), vocab_path, **ctx, **(beats or {}))
         self.vocab = val.vocab
         for name, ds_name in (("val_asap", "asap"), ("val_periscope", "pianocore")):
             idx = [i for i, m in enumerate(val.store.meta) if m.get("dataset", "asap") == ds_name]
             if idx:
                 self.sets[name] = (val, sample(idx, n_loss), sample(idx, n_decode))
         if has_split("val_transcribed"):
-            real = ScoreSegmentDataset(str(D / "val_transcribed"), vocab_path, **ctx)
+            real = ScoreSegmentDataset(str(D / "val_transcribed"), vocab_path, **ctx,
+                                       **(real_beats if real_beats is not None else beats or {}))
             self.sets["val_real"] = (real, sample(range(len(real)), n_loss), sample(range(len(real)), n_decode))
         print("validation sets:", {k: len(v[1]) for k, v in self.sets.items()}, flush=True)
 
@@ -186,6 +196,12 @@ def main():
     ap.add_argument("--context-noise", type=float, default=0.0,
                     help="fraction of training windows whose context (prompt) is corrupted with the kind of "
                          "errors a model's own previous output contains (src.dataset.ContextNoise); 0 = off")
+    ap.add_argument("--beats", action="store_true",
+                    help="beat features per note (src/beats.py): ground truth + tracker-like noise in training")
+    ap.add_argument("--beat-noise", default="configs/beat_noise.json",
+                    help="tracker errors to simulate (scripts/fit_beat_noise.py); 'none' = exact beats")
+    ap.add_argument("--beat-dropout", type=float, default=0.15,
+                    help="share of training windows without beats (input without a tracker)")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--eval-every", type=int, default=2000)
     ap.add_argument("--eval-loss-windows", type=int, default=400)
@@ -215,16 +231,48 @@ def main():
     ctx = ContextNoise(prob=args.context_noise) if args.context_noise > 0 else None
     # context notes: a resumed run keeps the inputs it was started with (config.json)
     notes_ctx = {"context_before": args.context_before, "context_after": args.context_after}
-    aux_on = args.aux_metrical
+    aux_on, beats_on = args.aux_metrical, args.beats
     if args.resume and (run / "config.json").exists():
-        started = json.loads((run / "config.json").read_text()).get("model", {})
+        rec = json.loads((run / "config.json").read_text())
+        started = rec.get("model", {})
         notes_ctx = {k: int(started.get(k, 0)) for k in notes_ctx}
         aux_on = bool(started.get("aux_metrical", False))
+        beats_on = bool(started.get("beat_features", False))
+        beat_rec = (rec.get("data") or {}).get("beats") or {}
+        if beats_on and beat_rec:  # the same tracker noise and dropout as when it started
+            args.beat_noise, args.beat_dropout = beat_rec.get("noise", args.beat_noise), beat_rec.get("dropout", args.beat_dropout)
     n_ctx = notes_ctx["context_before"] + notes_ctx["context_after"]
     notes_ctx_m = {**notes_ctx, "metrical": aux_on}  # dataset arguments
+    # beats: ground truth + fitted tracker noise; the real transcriptions use the tracker's own beats
+    beat_args = real_beat_args = val_beats = val_real_beats = None
+    beat_record = None
+    if beats_on:
+        if args.beat_noise == "none":
+            bn = None
+        elif Path(args.beat_noise).exists():
+            bn = BeatNoise.from_json(args.beat_noise)
+        else:
+            raise SystemExit(f"{args.beat_noise} not found: fit it with scripts/fit_beat_noise.py "
+                             f"(pace/beats.sh does), or pass --beat-noise none for exact beats")
+        for split in ("train", "val"):
+            if not beats_path(D / split, "gt").exists():
+                raise SystemExit(f"{beats_path(D / split, 'gt')} missing: run scripts/build_beats.py first")
+
+        def split_beats(split, dropout):
+            """Tracked beats where they exist (real errors already), else ground truth + noise."""
+            if beats_path(D / split, "tracked").exists():
+                return {"beats": "tracked", "beat_noise": None, "beat_dropout": dropout}
+            return {"beats": "gt", "beat_noise": bn, "beat_dropout": dropout}
+        beat_args = {"beats": "gt", "beat_noise": bn, "beat_dropout": args.beat_dropout}
+        real_beat_args = split_beats("train_transcribed", args.beat_dropout)
+        val_beats = {"beats": "gt", "beat_noise": bn}
+        val_real_beats = split_beats("val_transcribed", 0.0)
+        beat_record = {"noise": args.beat_noise, "fitted": bool(bn is not None and bn.fitted),
+                       "dropout": args.beat_dropout, "train_transcribed": real_beat_args["beats"],
+                       "val_transcribed": val_real_beats["beats"]}
     if args.no_noise:
         train = ScoreSegmentDataset(str(D / "train"), vocab_path, augment=AugmentConfig(), context_noise=ctx,
-                                    **notes_ctx_m)
+                                    **notes_ctx_m, **(beat_args or {}))
         clean_idx = [i for i, m in enumerate(train.store.meta) if m.get("source", "clean") == "clean"]
         w = np.zeros(len(train))
         w[clean_idx] = train.weights[clean_idx]
@@ -234,7 +282,8 @@ def main():
     elif real_ok:
         nm = NoiseModel.from_json(args.noise)
         train = MixedTrainDataset(str(D / "train"), str(D / "train_transcribed"), vocab_path, noise=nm,
-                                  augment=AugmentConfig(), real_fraction=0.0, context_noise=ctx, **notes_ctx_m)
+                                  augment=AugmentConfig(), real_fraction=0.0, context_noise=ctx, **notes_ctx_m,
+                                  beats=beat_args, real_beats=real_beat_args)
         train.real_fraction = len(train.real) / len(train)  # natural proportion
         sampler = train.sampler()
         a, b = store_lengths(train.synthetic.store, args.max_notes, args.max_tokens)
@@ -243,7 +292,7 @@ def main():
     else:
         print("note: no data/processed/train_transcribed, training on `train` only", flush=True)
         train = ScoreSegmentDataset(str(D / "train"), vocab_path, noise=NoiseModel.from_json(args.noise),
-                                    augment=AugmentConfig(), context_noise=ctx, **notes_ctx_m)
+                                    augment=AugmentConfig(), context_noise=ctx, **notes_ctx_m, **(beat_args or {}))
         sampler = train.sampler()
         tok_len, note_len = store_lengths(train.store, args.max_notes, args.max_tokens)
     vocab = train.vocab
@@ -275,8 +324,11 @@ def main():
         if getattr(args, k) is not None:
             cfg[k] = getattr(args, k)
     if n_ctx:
-        from src.dataset import N_FEATURES_CONTEXT
-        cfg.update(n_features=N_FEATURES_CONTEXT, **notes_ctx)
+        cfg.update(**notes_ctx)
+    if n_ctx or beats_on:
+        cfg["n_features"] = n_features(bool(n_ctx), beats_on)
+    if beats_on:
+        cfg["beat_features"] = True
     if aux_on:
         cfg["aux_metrical"] = True
     if args.arch == "score2seq":
@@ -322,7 +374,7 @@ def main():
     # which data this run trained on: runs started before / after the real-transcription splits
     # were built (pace/real_asap.sbatch) are not trained on the same data
     data = {"train_windows": len(train), "train_transcribed": bool(real_ok and not args.no_noise),
-            "val_transcribed": has_split("val_transcribed"),
+            "val_transcribed": has_split("val_transcribed"), "beats": beat_record,
             "train_periscope": any(m.get("dataset") == "pianocore" for m in
                                    (train.synthetic if hasattr(train, "synthetic") else train).store.meta)}
     if ck is not None and (run / "config.json").exists():  # a resumed run keeps its original record
@@ -333,7 +385,8 @@ def main():
     print(f"{args.arch}: {n_params / 1e6:.1f}M parameters on {device} | {len(train)} training windows, "
           f"{steps_per_epoch} steps/epoch, {total_steps} steps total | Ctrl+C saves and stops", flush=True)
 
-    evaluator = Evaluator(vocab_path, args.eval_loss_windows, args.eval_decode_windows, coll, **notes_ctx_m)
+    evaluator = Evaluator(vocab_path, args.eval_loss_windows, args.eval_decode_windows, coll, beats=val_beats,
+                          real_beats=val_real_beats, **notes_ctx_m)
 
     def save(path):
         # atomic: a job killed mid-save (PACE's time limit) keeps the previous complete checkpoint

@@ -471,6 +471,8 @@ python -m tests.test_metrical                                     # metrical lab
 python -m tests.test_eval_plan                                    # what an evaluation still has to compute
 python -m tests.test_reevaluate                                   # pace/reevaluate.sh submissions (bash)
 python -m tests.test_compare_runs                                 # the comparison tables
+python -m tests.test_beats                                        # beats: ground truth, features, tracker noise
+python scripts/build_beats.py --check                             # ground-truth beats -> <split>/beats_gt.npz
 python scripts/compare_runs.py                                    # all evaluated runs -> outputs/compare/
 sbatch pace/train.sbatch                                          # train + evaluate on a PACE GPU
 ```
@@ -624,6 +626,52 @@ so the windows after a corrected one see the corrected context. Meter mode reuse
 outputs as its first pass and costs nothing when no window needs fixing; the evaluation reports the
 share of windows corrected (`meter_fix_rate`) and `ts_acc`.
 
+### Beats as an input (`--beats`)
+
+Even given the true previous bars, the best model puts ~40% of onsets in the wrong place, while the
+beat-snap + XGBoost baseline, which is given the annotated beats, reaches onset F1 0.74. So the
+model can also be given the beats (`src/beats.py`): 7 more features per note, its phase between the
+surrounding beats and its position in the bar (each on the unit circle), the local beat period,
+the beats per bar, and a "has beats" flag (all zero where there are no beats).
+
+| where the beats come from | ASAP | PERiScoPe (no annotations, no audio) |
+|---|---|---|
+| ground truth (`scripts/build_beats.py` -> `<split>/beats_gt.npz`) | the human annotations (`asap_annotations.json`) | the score's beats timed by the note alignment of every window (`window_grid`), joined by bar number |
+| a real tracker (`scripts/track_beats.py` -> `beats_tracked.npz`) | Beat This! on the MAESTRO audio of the real-transcription splits | - |
+
+- **Beat counting follows ASAP** (`beat_layout`, checked on all 1,067 annotated performances):
+  dotted beats when the numerator is a multiple of 3 above 3 (6/8 -> 2, 12/8 -> 4, 6/4 -> 2), the
+  numerator otherwise (4/4 -> 4, 3/8 -> 3).
+- **The alignment-derived grid is checked against the human annotations** on ASAP (`build_beats.py
+  --check`): median beat F-measure 0.92 (train), 0.90 (val), 0.85 (test); where it is right it is
+  exact (median error 1 ms), and it is weakest around pickup bars (written left-aligned in our
+  tokens) and on beats where nothing is played. That is better than the tracker it stands in for
+  (Beat This!: beat F 0.76 on ASAP in its paper), and training adds tracker errors on top.
+- **No leakage from the tracker.** Beat This! was trained on ASAP, so each performance is tracked by
+  the authors' cross-validation model that never saw it (their `asap/8-folds.split`: fold k ->
+  checkpoint `fold<k>`; tracks outside the split -> `final0`). Its beats are shifted onto the ASAP
+  timeline by the same offset as the transcription.
+- **Tracker errors are fitted, not guessed** (`scripts/fit_beat_noise.py` -> `configs/beat_noise.json`):
+  Beat This! vs the annotations on train / val _transcribed (never test), per performance: tempo
+  octave (double / half), off-beat tracking, missed / extra beats, timing jitter, and downbeat
+  errors (none, shifted, wrong bar length). `BeatNoise` applies them to the ground truth in training
+  (`--beat-noise`), and `--beat-dropout` (0.15) of the windows get no beats, so the model also
+  works on MIDI input without a tracker. On the real transcriptions it trains on the tracker's own
+  beats.
+
+Beat models are evaluated with the beats each condition would really have (`src/eval/plan.py BEATS`):
+
+| condition | beats | what for |
+|---|---|---|
+| clean, synthetic, periscope | ground truth + the fitted tracker errors (fixed seed) | the usual test sets, a simulated tracker |
+| real | Beat This! on the audio (held-out folds) | the system as the demo runs it |
+| clean_gt_beats, real_gt_beats | the annotated beats | the upper bound; what the beat-snap baselines are given |
+| real_no_beats | none | MIDI input without a tracker |
+
+Models without beats skip the three beat-only conditions. **`piece` mode** (new, for every model)
+is meter mode with no limit on how long a deviating run of windows may be: a piece keeps one time
+signature unless a different one holds for a stretch as long as the rest (`PIECE_MAX_BLIP`).
+
 ### Post-milestone results
 
 All runs trained with the same loop on the same PACE data (ASAP + PERiScoPe; none of them on the
@@ -725,6 +773,11 @@ and the MIDI players use html-midi-player, both loaded from a CDN. Each job's fi
 ```bash
 python scripts/audio_to_score.py recording.wav --ckpt outputs/runs/sf_base_reg_ca/best.pt
 ```
+
+For a model trained with `--beats`, the demo tracks the uploaded audio with Beat This! (`final0`;
+`pip install beat-this rotary-embedding-torch einops`, in environment.yml) after transcription and
+shows how many beats it found; MIDI input, or no beat-this package, runs it without beats (the
+"no beats" input it was also trained on), and the page says so.
 
 The demo needs `vocab.json` (and, for Score2Seq checkpoints, `feature_stats.json`) next to the
 checkpoint or in `data/processed/`. Copy both next to `best.pt` when sharing a checkpoint.
@@ -885,6 +938,10 @@ src/pipeline.py                  audio / MIDI -> windows -> chained decoding -> 
 demo/app.py, demo/static/        web demo (FastAPI + one HTML page); scripts/audio_to_score.py: CLI
 scripts/train_model.py           train either model; scripts/evaluate_pieces.py: oracle/chained/none
 src/eval/plan.py                 evaluation options and mode names; what a run's results still lack
+src/beats.py                     beats: ground-truth grid, per-note features, tracker errors (BeatNoise)
+scripts/build_beats.py           ground-truth beats per performance -> <split>/beats_gt.npz
+scripts/track_beats.py           Beat This! on the MAESTRO audio (held-out folds) -> beats_tracked.npz
+scripts/fit_beat_noise.py        tracker vs ground truth -> configs/beat_noise.json
 scripts/compare_runs.py          tables of every evaluated run -> outputs/compare/{summary,margins}.md, results.csv
 pace/train.sbatch                PACE GPU job: train + evaluate
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
@@ -896,6 +953,7 @@ tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume, 
 tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --only-missing end to end
 tests/test_reevaluate.py         pace/reevaluate.sh: what it submits / skips (stand-in squeue / sbatch)
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
+tests/test_beats.py              beats vs ASAP annotations, features, noise fit, tracker folds, train / eval / demo
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes
 scripts/analyze_chained.py       why chained decoding loses notes (from saved predictions)
 scripts/simulate_guard.py        guarded decoding estimated offline, per guard margin

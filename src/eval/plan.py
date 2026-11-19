@@ -14,9 +14,18 @@ Exit status: 0 = something is missing (printed one condition per line), 3 = noth
 4 = the run's training has not finished (outputs/runs/<run>/status.json), 2 = bad arguments.
 
 A result counts as present only if it was computed the same way as the one requested: the same
-guard margin for guarded / meter modes, all performances (not a --limit-perfs subset), and the
-current EVAL_VERSION. Results written before these were recorded count as version 1, all
+guard margin for guarded / meter / piece modes, all performances (not a --limit-perfs subset), and
+the current EVAL_VERSION. Results written before these were recorded count as version 1, all
 performances: every evaluation run since the per-window output cap (the code version 1 describes).
+
+Beats (models trained with --beats, src/beats.py): each condition says where the beats come from
+(``BEATS``): a simulated tracker (the ground truth with the fitted tracker errors, fixed seed) on
+the MIDI test sets, Beat This! itself on the real audio, plus three beat-only conditions on the
+same windows: the ground-truth beats on clean MIDI and on the real transcriptions (the upper bound,
+what the beat-snap baselines are given), and no beats at all on the real transcriptions (MIDI input
+without a tracker). Models without beats skip the beat-only conditions; a beat model skips a
+condition whose beats are not there yet (no beats_tracked.npz, no fitted noise), so a later
+pace/reevaluate.sh adds it.
 """
 import argparse
 import json
@@ -25,12 +34,23 @@ from pathlib import Path
 
 # condition -> data split under data/processed (a missing split is skipped, not an error)
 SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed",
-          "real_kong": "test_transcribed_kong", "periscope": "test_periscope"}
-DEFAULT_MODES = "oracle,chained,none,guarded,meter"
-DEFAULT_CONDITIONS = "clean,synthetic,real,real_kong,periscope"
+          "real_kong": "test_transcribed_kong", "periscope": "test_periscope",
+          "clean_gt_beats": "test", "real_gt_beats": "test_transcribed", "real_no_beats": "test_transcribed"}
+# beat source per condition for beat models: sim = ground truth + fitted tracker errors (fixed seed),
+# tracked = Beat This! on the audio, gt = ground truth, none = no beats
+BEATS = {"clean": "sim", "synthetic": "sim", "real": "tracked", "real_kong": "sim", "periscope": "sim",
+         "clean_gt_beats": "gt", "real_gt_beats": "gt", "real_no_beats": "none"}
+BEAT_ONLY = ("clean_gt_beats", "real_gt_beats", "real_no_beats")  # identical to another condition without beats
+DEFAULT_MODES = "oracle,chained,none,guarded,meter,piece"
+DEFAULT_CONDITIONS = "clean,synthetic,real,real_kong,periscope,clean_gt_beats,real_gt_beats,real_no_beats"
+DEFAULT_BEAT_NOISE = "configs/beat_noise.json"
 # results derived from another condition's decoding, never requested on their own
 DERIVED = {"real_unseen_audio": "real"}
-DECODED = ("chained", "guarded", "meter")  # modes decoded piece by piece (src/decoding.py)
+DECODED = ("chained", "guarded", "meter", "piece")  # modes decoded piece by piece (src/decoding.py)
+GUARDED = ("guarded", "meter", "piece")  # modes with a guard margin
+# piece: meter with no limit on the length of a run that is smoothed away, so a piece keeps one
+# time signature unless it really changes for a stretch at least as long as the rest
+PIECE_MAX_BLIP = 10 ** 6
 # guarded mode keeps the no-context output when its input agreement beats the chained output's by
 # more than this. scripts/simulate_guard.py on all six post-milestone models: 0 beats 0.02 / 0.05 /
 # 0.1 / 0.2 on note, onset, duration and bar F1 in nearly every model and condition (s2s clean:
@@ -79,6 +99,8 @@ def build_parser():
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--normal-priority", action="store_true")
+    ap.add_argument("--beat-noise", default=DEFAULT_BEAT_NOISE,
+                    help="beat models: the simulated tracker's errors (scripts/fit_beat_noise.py)")
     ap.add_argument("--runs-dir", default="outputs/runs")
     ap.add_argument("--data-dir", default="data/processed")
     return ap
@@ -121,6 +143,31 @@ def mode_names(modes, guard_margin, extras):
 
 def margins_of(modes, guard_margin, extras):
     return {n: m for n, _, m in decode_passes(modes, guard_margin, extras) if not n.startswith("chained")}
+
+
+def has_beats(run_dir) -> bool:
+    """Was the run trained with beat features (config.json model.beat_features)?"""
+    try:
+        return bool(json.loads((Path(run_dir) / "config.json").read_text()).get("model", {}).get("beat_features"))
+    except (OSError, ValueError):
+        return False
+
+
+def condition_available(cond, data_dir, beats, beat_noise=DEFAULT_BEAT_NOISE):
+    """Can ``cond`` be evaluated for a model with (``beats`` True) or without beat features?"""
+    data_dir = Path(data_dir)
+    if not (data_dir / SPLITS[cond] / "index.npy").exists():
+        return False
+    if not beats:
+        return cond not in BEAT_ONLY
+    source = BEATS[cond]
+    if source in ("sim", "gt") and not (data_dir / SPLITS[cond] / "beats_gt.npz").exists():
+        return False
+    if source == "sim" and not Path(beat_noise).exists():
+        return False
+    if source == "tracked" and not (data_dir / SPLITS[cond] / "beats_tracked.npz").exists():
+        return False
+    return True
 
 
 def stamp(result, margin=None, limit_perfs=0):
@@ -168,9 +215,8 @@ def missing(results, conditions, names, margins, available, limit_perfs=0):
     return out
 
 
-def split_available(data_dir):
-    data_dir = Path(data_dir)
-    return lambda cond: (data_dir / SPLITS[cond] / "index.npy").exists()
+def split_available(data_dir, beats=False, beat_noise=DEFAULT_BEAT_NOISE):
+    return lambda cond: condition_available(cond, data_dir, beats, beat_noise)
 
 
 def results_path(run_dir, ckpt):
@@ -201,7 +247,7 @@ def plan(args):
     extras = extra_margins(args.extra_margins)
     todo = missing(load_results(run_dir, args.ckpt), args.conditions.split(","),
                    mode_names(modes, args.guard_margin, extras), margins_of(modes, args.guard_margin, extras),
-                   split_available(args.data_dir), args.limit_perfs)
+                   split_available(args.data_dir, has_beats(run_dir), args.beat_noise), args.limit_perfs)
     return training_state(run_dir), todo
 
 

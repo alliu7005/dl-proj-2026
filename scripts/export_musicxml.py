@@ -37,7 +37,7 @@ def main():
     ap.add_argument("--run", required=True)
     ap.add_argument("--ckpt", default="best", help="checkpoint stem in the file names (best, last)")
     ap.add_argument("--conditions", default="clean,synthetic,real,real_kong,periscope")
-    ap.add_argument("--mode", default="auto", choices=["auto", "meter", "guarded", "chained", "oracle", "none"])
+    ap.add_argument("--mode", default="auto", choices=["auto", "meter", "piece", "guarded", "chained", "oracle", "none"])
     ap.add_argument("--n", type=int, default=5, help="pieces per condition (0 = all)")
     args = ap.parse_args()
     run = Path("outputs/runs") / args.run

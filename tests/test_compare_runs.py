@@ -114,7 +114,7 @@ def test_tables():
         # context-mode tables include runs without meter, with dashes for the missing modes
         modes = s.split("## Context modes")[1]
         old = next(ln for ln in modes.splitlines() if ln.startswith("| sf_old "))
-        assert old.count(compare_runs.DASH) == 6 and "0.510" in old and "**" not in old
+        assert old.count(compare_runs.DASH) == 8 and "0.510" in old and "**" not in old  # 4 modes x 2 metrics
         ca = next(ln for ln in modes.splitlines() if ln.startswith("| s2s_ca "))
         assert "**0.560**" in ca  # the best oracle onset F1 on clean
 

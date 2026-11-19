@@ -24,12 +24,17 @@ Prompt modes (the decoder's context before each window):
   meter    guarded, then time signatures made consistent along each piece: a window whose time
            signature disagrees with a clear majority of its neighbours is decoded again with that
            one forced, and the piece re-decoded from there (src/decoding.py decode_pieces_meter).
+  piece    meter with no limit on how long a deviating run may be: the piece keeps one time
+           signature unless a different one holds for a stretch as long as the rest.
 Chained, guarded and meter decoding are src/decoding.py, the same code the demo runs.
 All modes score every window against its ground-truth target with src/eval/metrics.py, so the
 numbers are comparable with each other and with scripts/run_baselines.py. A window whose
 predecessor was dropped by preprocessing starts without a prompt in chained mode.
 
-Conditions (as in scripts/evaluate.py): clean, synthetic, real, real_kong, periscope.
+Conditions (as in scripts/evaluate.py): clean, synthetic, real, real_kong, periscope; for models
+trained with beats (src/beats.py) also clean_gt_beats, real_gt_beats and real_no_beats, the beat
+source of every condition being src/eval/plan.py BEATS (a simulated tracker on MIDI, Beat This! on
+the real audio, the ground truth, or none).
 Options, mode names and conditions are defined in src/eval/plan.py. ``--only-missing`` computes
 only the condition / mode results the run does not have yet with the same margin, all performances
 and the current src/eval/plan.py EVAL_VERSION (what pace/reevaluate.sh submits).
@@ -60,8 +65,10 @@ from src.dataset import ROLE_CARRIED, ScoreSegmentDataset  # noqa: E402
 from src.decoding import (decode_pieces, decode_pieces_meter, input_agreement,  # noqa: E402,F401
                           max_new_tokens, pedal_down, stitch)
 from src.eval.metrics import Accumulator  # noqa: E402
-from src.eval.plan import (SPLITS, decode_passes, extra_margins, join_dash_values,  # noqa: E402,F401
-                           load_results, missing, parse_args, split_available, stamp)
+from src.beats import BeatNoise  # noqa: E402
+from src.eval.plan import (BEATS, GUARDED, PIECE_MAX_BLIP, SPLITS, condition_available,  # noqa: E402,F401
+                           decode_passes, extra_margins, has_beats, join_dash_values, load_results, missing,
+                           parse_args, split_available, stamp)
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 from src.preprocessing.vocab import BOS, EOS, SEP  # noqa: E402
 from src.scoreformer import load_model  # noqa: E402
@@ -144,7 +151,8 @@ def main():
     todo = None  # --only-missing: {condition: [mode names]} not yet in this run's results
     if args.only_missing:
         todo = missing(load_results(run, args.ckpt), args.conditions.split(","), requested_names,
-                       {n: m for n, m in margins.items() if n != "chained"}, split_available(D), args.limit_perfs)
+                       {n: m for n, m in margins.items() if n != "chained"},
+                       split_available(D, has_beats(run), args.beat_noise), args.limit_perfs)
         print("to compute: " + ("; ".join(f"{c} {','.join(n)}" for c, n in todo.items()) or "nothing"), flush=True)
         if not todo:
             return
@@ -152,6 +160,17 @@ def main():
     cfg = model.cfg
     # context notes the model was trained with (src/dataset.py); 0 for older checkpoints
     ctx = {k: int(getattr(cfg, k, 0)) for k in ("context_before", "context_after")}
+    beat_model = bool(getattr(cfg, "beat_features", False))
+    beat_noise = BeatNoise.from_json(args.beat_noise) if beat_model and Path(args.beat_noise).exists() else None
+
+    def beat_args(cond):
+        """Dataset beat arguments for this condition (src/eval/plan.py BEATS); {} without beats."""
+        if not beat_model:
+            return {}
+        source = BEATS[cond]
+        if source == "sim":  # the fitted tracker errors on the ground truth, fixed seed per window
+            return {"beats": "gt", "beat_noise": beat_noise}
+        return {"beats": source}
     coll = TruncatingCollate(cfg.max_notes, cfg.max_tokens)
     vocab_path = str(D / "vocab.json")
     nm = NoiseModel.from_json("configs/noise_stats.json")
@@ -164,15 +183,22 @@ def main():
         if not (D / split / "index.npy").exists():
             print(f"skip {cond}: {D / split} missing")
             continue
+        if not condition_available(cond, D, beat_model, args.beat_noise):
+            why = ("only for models trained with beats" if not beat_model else
+                   f"its beats ({BEATS[cond]}) are not there yet: scripts/build_beats.py, scripts/track_beats.py, "
+                   f"scripts/fit_beat_noise.py")
+            print(f"skip {cond}: {why}", flush=True)
+            continue
         if todo is not None and cond not in todo:
             print(f"skip {cond}: every requested mode is already in the results", flush=True)
             continue
         all_modes = requested_names if todo is None else todo[cond]  # the results computed here
         decode_modes = [p for p in requested if p[0] in all_modes]
         if cond == "synthetic":  # fixed noise draw (seeded per window), no prompt dropout
-            ds = ScoreSegmentDataset(str(D / split), vocab_path, noise=nm, seed=12345, prompt_dropout=0.0, **ctx)
+            ds = ScoreSegmentDataset(str(D / split), vocab_path, noise=nm, seed=12345, prompt_dropout=0.0, **ctx,
+                                     **beat_args(cond))
         else:
-            ds = ScoreSegmentDataset(str(D / split), vocab_path, **ctx)
+            ds = ScoreSegmentDataset(str(D / split), vocab_path, **ctx, **beat_args(cond))
         if len(ds) == 0:
             print(f"skip {cond}: {split} is empty")
             continue
@@ -222,15 +248,17 @@ def main():
             elif kind == "guarded":
                 outs, history, fbs = guarded_pass[margin] = decode_pieces(
                     by_piece, decode, guard_margin=margin, alone=alone, progress=show, **common)
-            else:
+            else:  # meter / piece: guarded, then one time signature per run of windows / per piece
                 outs, history, fbs, forced[name] = decode_pieces_meter(
                     by_piece, decode, guard_margin=margin, alone=alone, first_pass=guarded_pass.get(margin),
-                    progress=show, **common)
+                    progress=show, max_blip=PIECE_MAX_BLIP if kind == "piece" else 2, **common)
             preds.update({(name, perfs[p][j]): o for (p, j), o in outs.items()})
             if kind != "chained":
                 fallback[(cond, name)] = len(fbs) / len(windows)
             extra = {"chained": "", "guarded": f", {len(fbs) / len(windows):.1%} of windows fell back to no prompt",
                      "meter": f", time signature corrected in {len(forced.get(name, {})) / len(windows):.1%} "
+                              f"of windows",
+                     "piece": f", time signature corrected in {len(forced.get(name, {})) / len(windows):.1%} "
                               f"of windows"}[kind]
             print(f"{cond}: {name} done{extra}                ", flush=True)
             # MusicXML from the system's best mode run here: meter, else guarded, else chained
@@ -245,12 +273,12 @@ def main():
                 acc.add(gt[i], preds[(mode, i)])
                 if cond == "real" and ds.store.meta[i].get("maestro_split") != "train":
                     acc_unseen.add(gt[i], preds[(mode, i)])
-            guarded = mode.split("@")[0] in ("guarded", "meter")
+            guarded = mode.split("@")[0] in GUARDED
             # how it was computed (src/eval/plan.py: --only-missing / pace/reevaluate.sh compare it)
             res[mode] = stamp(acc.result(), margins[mode] if guarded else None, args.limit_perfs)
             if guarded:
                 res[mode]["fallback_rate"] = fallback.get((cond, mode), 0.0)
-            if mode.split("@")[0] == "meter":
+            if mode.split("@")[0] in ("meter", "piece"):
                 res[mode]["meter_fix_rate"] = len(forced.get(mode, {})) / len(windows)
             if cond == "real":
                 results.setdefault("real_unseen_audio", {})[mode] = stamp(
