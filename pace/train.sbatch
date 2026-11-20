@@ -27,4 +27,6 @@ nvidia-smi --query-gpu=name,memory.total --format=csv
 RESUME=""
 [ -f "outputs/runs/$NAME/last.pt" ] && RESUME="--resume"
 python scripts/train_model.py --name "$NAME" --normal-priority --workers 7 $RESUME $ARGS
-python scripts/evaluate_pieces.py --run "$NAME" --normal-priority --musicxml 5
+# only what the run lacks: a fresh run gets everything; a finished run submitted again (by accident, or
+# to finish an evaluation the time limit cut off) computes only the missing results, not all of them
+python scripts/evaluate_pieces.py --run "$NAME" --normal-priority --musicxml 5 --only-missing
