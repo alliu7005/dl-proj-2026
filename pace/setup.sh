@@ -27,4 +27,4 @@ mkdir -p data/raw
 git -C data/raw/asap_bd checkout -q 8cba199e15931975542010a7ea2ff94a6fc9cbee
 [ -d data/raw/asap ] || git clone --depth 1 https://github.com/fosfrancesco/asap-dataset.git data/raw/asap
 mkdir -p outputs
-echo "setup done. Next: sbatch pace/data.sbatch  (or copy Michael's data/processed, see pace/README.md)"
+echo "setup done. Next: sbatch pace/data.sbatch, then bash pace/real_asap.sh (see pace/README.md)"

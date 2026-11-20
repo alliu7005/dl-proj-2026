@@ -1,7 +1,7 @@
 #!/bin/bash
 # Submit the post-milestone experiments (run on the login node from the repo root):
-#   bash pace/overnight.sh                  # Blackwell GPUs (default)
-#   GPU=h100 bash pace/overnight.sh         # another GPU type
+#   bash pace/overnight.sh                  # any of H100 / H200 / RTX Pro Blackwell (default)
+#   GPUS=gpu-h100 bash pace/overnight.sh    # other GPU types (node features, "a|b" for several)
 #
 # A short CPU job first checks the context-noise code on this data build; the four training jobs
 # (each: train, then evaluate_pieces.py on all test sets) only start if it passes.
@@ -12,16 +12,18 @@
 #   sf_small_ctx   both                                              sf_small, s2s_ctx
 #   sf_base_reg    45M model with more regularization, shorter run   sf_base
 set -euo pipefail
-GPU=${GPU:-rtx_pro_6000_blackwell}
-G="--gres=gpu:${GPU}:1"
+GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}  # node features: whichever of these GPUs frees up first
+G=(--gres=gpu:1 "--constraint=$GPUS")
 
 test_id=$(sbatch --parsable -J ctxtest -c 4 --mem=16G -t 0:30:00 -o slurm-ctxtest-%j.out \
   --wrap="source pace/common.sh; python -m tests.test_context_noise")
 echo "context-noise check: job $test_id"
 
+# NAME / ARGS travel as environment variables (--export=ALL): sbatch's --export=ALL,NAME=..,ARGS=..
+# form splits on commas, which would break arguments like --modes guarded,meter.
 submit() {  # name, args
   local id
-  id=$(sbatch --parsable $G --dependency=afterok:$test_id --export=ALL,NAME="$1",ARGS="$2" pace/train.sbatch)
+  id=$(NAME="$1" ARGS="$2" sbatch --parsable "${G[@]}" --dependency=afterok:$test_id --export=ALL pace/train.sbatch)
   echo "  $1: job $id  ($2)"
 }
 submit sf_small     "--size small --dec-layers 6"

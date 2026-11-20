@@ -57,6 +57,8 @@ def main():
     coll = TruncatingCollate(cfg.max_notes, cfg.max_tokens)
     nm = NoiseModel.from_json("configs/noise_stats.json")
     nm.cfg.clean_prob = 0.0
+    # context notes the model was trained with (scripts/train_model.py --context-before/after)
+    ctx = {"context_before": cfg.context_before, "context_after": cfg.context_after}
 
     sets = {}
     for c in args.conditions.split(","):
@@ -66,9 +68,9 @@ def main():
             print(f"skip {c}: {D / split} missing")
             continue
         if c == "synthetic":  # fixed, reproducible noise draw; no augmentation, no prompt dropout
-            sets[c] = ScoreSegmentDataset(str(D / split), vocab_path, noise=nm, seed=12345, prompt_dropout=0.0)
+            sets[c] = ScoreSegmentDataset(str(D / split), vocab_path, noise=nm, seed=12345, prompt_dropout=0.0, **ctx)
         else:
-            sets[c] = ScoreSegmentDataset(str(D / split), vocab_path)
+            sets[c] = ScoreSegmentDataset(str(D / split), vocab_path, **ctx)
 
     results = {}
     rng = np.random.default_rng(0)

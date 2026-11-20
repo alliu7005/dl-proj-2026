@@ -1,7 +1,7 @@
 """Web demo: upload a piano recording, get the transcribed score back.
 
-    python demo/app.py --ckpt outputs/runs/sf_base/best.pt          # then open http://127.0.0.1:7860
-    python demo/app.py --ckpt outputs/runs/sf_base/best.pt --device cpu --port 8000
+    python demo/app.py --ckpt outputs/runs/sf_base_reg_cab/best.pt         # then open http://127.0.0.1:7860
+    python demo/app.py --ckpt outputs/runs/sf_base_reg_cab/best.pt --device cpu --port 8000
 
 Everything runs in this process (Transkun + the score model, on the GPU if there is one, else the
 CPU); the page only uploads the file and shows the result. Jobs run one at a time in a background
@@ -26,7 +26,7 @@ import uvicorn  # noqa: E402
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 
-from src.pipeline import AUDIO_EXT, MIDI_EXT, ScorePipeline  # noqa: E402
+from src.pipeline import AUDIO_EXT, MIDI_EXT, MODES, ScorePipeline  # noqa: E402
 
 MAX_MB = 100
 STAGES = {"transcribe": (0.0, 0.45), "score": (0.45, 0.95), "engrave": (0.95, 1.0)}
@@ -76,12 +76,12 @@ def create_app(pipe: ScorePipeline, out_root: Path) -> FastAPI:
         return {**pipe.info, "audio": sorted(AUDIO_EXT), "midi": sorted(MIDI_EXT), "max_mb": MAX_MB}
 
     @app.post("/api/jobs")
-    async def submit(file: UploadFile = File(...), mode: str = Form("chained")):
+    async def submit(file: UploadFile = File(...), mode: str = Form(MODES[0])):
         ext = Path(file.filename or "").suffix.lower()
         if ext not in AUDIO_EXT | MIDI_EXT:
             raise HTTPException(400, f"unsupported file type {ext or '(none)'}; use audio or .mid")
-        if mode not in ("chained", "none"):
-            raise HTTPException(400, "mode must be 'chained' or 'none'")
+        if mode not in MODES:
+            raise HTTPException(400, f"mode must be one of {', '.join(MODES)}")
         data = await file.read()
         if len(data) > MAX_MB * 2**20:
             raise HTTPException(413, f"file larger than {MAX_MB} MB")
@@ -129,7 +129,7 @@ def create_app(pipe: ScorePipeline, out_root: Path) -> FastAPI:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ckpt", default="outputs/runs/sf_base/best.pt")
+    ap.add_argument("--ckpt", default="outputs/runs/sf_base_reg_cab/best.pt")
     ap.add_argument("--vocab", default=None, help="default: next to the checkpoint, else data/processed")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to allow other machines on the network")

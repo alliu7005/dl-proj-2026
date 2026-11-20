@@ -439,6 +439,10 @@ python scripts/evaluate.py --run base           # test sets, same metrics/window
   greedy decoding of a few windows from `val` (ASAP), `val` (PERiScoPe) and `val_transcribed`,
   scored with the baseline metrics. Logged to `outputs/runs/<name>/log.csv`.
 - **Checkpoints:** `last.pt` at every eval and on Ctrl+C; `best.pt` has the best `val_real` loss.
+  Both are written to a temporary file and renamed, so a job killed mid-save (a time limit) keeps the
+  previous complete checkpoint and the resubmitted job resumes. `status.json` holds the training
+  phase (`train` / `cooldown` / `done`), step and best loss from the first step on, readable without
+  torch: `pace/reevaluate.sh` leaves a run alone until it says `done`.
 
 **Clean-input baseline** (Beyer & Dai-style, for H1): `--no-noise` trains on clean ASAP windows
 only, with augmentation but no synthetic noise and no real transcriptions.
@@ -456,8 +460,20 @@ the same `forward` / `generate` interface, so both are trained and scored by the
 ```bash
 python scripts/train_model.py --name sf_base                      # base size, ~45M parameters
 python scripts/train_model.py --name sf_base --resume             # continue after Ctrl+C / time limit
-python scripts/evaluate_pieces.py --run sf_base --musicxml 5      # test sets, 3 prompt modes
+python scripts/evaluate_pieces.py --run sf_base --musicxml 5      # test sets, 5 context modes
+python scripts/build_metrical.py                                  # labels for --aux-metrical (once)
 python -m tests.test_scoreformer                                  # model + chained-prompt checks
+python -m tests.test_decoding                                     # chained / guarded / meter decoding
+python -m tests.test_pipeline                                     # demo pipeline end to end
+python -m tests.test_training_stop                                # LR schedule, early stop, cooldown
+python -m tests.test_context_notes                                # context notes, exact neighbours
+python -m tests.test_metrical                                     # metrical labels and the aux head
+python -m tests.test_eval_plan                                    # what an evaluation still has to compute
+python -m tests.test_reevaluate                                   # pace/reevaluate.sh submissions (bash)
+python -m tests.test_compare_runs                                 # the comparison tables
+python -m tests.test_beats                                        # beats: ground truth, features, tracker noise
+python scripts/build_beats.py --check                             # ground-truth beats -> <split>/beats_gt.npz
+python scripts/compare_runs.py                                    # all evaluated runs -> outputs/compare/
 sbatch pace/train.sbatch                                          # train + evaluate on a PACE GPU
 ```
 
@@ -476,19 +492,71 @@ sbatch pace/train.sbatch                                          # train + eval
 batches, bf16, warmup + cosine, label smoothing, 5× weight on ornament/pedal tokens). Additions:
 `--arch score2seq` trains Michael's model under the identical loop (a fair architecture comparison),
 `--no-noise` is the clean-input ablation, `--grad-accum` / `--compile` for big runs, and missing
-splits (`train_transcribed`, PERiScoPe) are skipped instead of crashing. 20 epochs by default.
+splits (`train_transcribed`, PERiScoPe) are skipped instead of crashing.
+
+**Early stopping with a cooldown.** `--epochs` (default 20) is the maximum and the length of the
+cosine learning-rate schedule. `sf_base` showed why a fixed 20 epochs is wrong for big models: its
+mean validation loss bottomed out at step 20,000, in the 3rd of 20 epochs (0.275), and rose to
+0.317 by the end. Now, once
+the mean validation loss has not improved for `--patience` epochs (default 5; `0` = off),
+training reloads the best checkpoint (weights and optimizer state) and runs a `--cooldown`
+(default 1 epoch) in which the learning rate decays linearly from its value at the best step to the
+schedule's minimum. An early-stopped run therefore still gets the low-learning-rate phase that the
+cosine schedule would have given it at the end, and `best.pt` keeps improving if the cooldown
+helps. The phase (`train` / `cooldown` / `done`) is stored in every checkpoint: a job killed
+mid-cooldown resumes the cooldown, and resubmitting a finished run trains nothing.
+`tests/test_training_stop.py` checks the schedule values and runs real short trainings for every
+path (stop + cooldown at the predicted steps, resume after finishing, resume mid-cooldown,
+`--cooldown 0`, `--patience 0`, context notes + auxiliary head kept on resume).
+
+**Bar alignment.** The realistic scores trail the oracle ones mostly in rhythm (guarded onset F1
+~0.2 vs ~0.56), and onset-shift F1 is about twice onset F1: windows often get the rhythm right but
+place it at the wrong point in the bar. A window sees ~128 notes, a few bars, and has to work out
+the meter and where the bar starts on its own. Three fixes, each optional and recorded in the
+checkpoint (so evaluation and the demo follow it automatically):
+
+- **Context notes** (`--context-before N --context-after M`): the encoder also sees the N performed
+  notes before the window and the M after it, flagged by two extra input features (10 instead of
+  8), so it can read the rhythm and meter around the window. The target is unchanged: the model
+  still writes only the window's notes. The notes come from a pool of every stored window of the
+  same performance in absolute time (no data rebuild), get the same augmentation as the window and
+  their own synthetic noise, and are assembled by one function (`dataset.assemble_notes`) for
+  training and for the inference pipeline. With both set to 0 the data is identical to before.
+- **Auxiliary metrical head** (`--aux-metrical`, `--aux-weight 0.5`): a linear head on the
+  encoder predicts, for every performed note of the window, whether it starts a bar and its
+  position within the beat (on the beat, an eighth, a triplet, a sixteenth, finer), so the encoder
+  has to learn the bar phase from the timing. Labels (`src/metrical.py`) come from aligning each
+  window's performed notes to its score: a rank-based first time map that follows any rubato, then
+  order-preserving per-pitch matching and two refits through the matches. On performances rendered
+  from real windows' scores (drifting tempo, chord asynchrony, 3% dropped and 3% extra notes) the
+  labels are 99% correct and cover 97% of the notes; on the real data they cover 88% (test) and
+  91% (train) of performed notes (the rest are mostly ornaments and grace notes the score writes
+  differently). `scripts/build_metrical.py` precomputes them into `<split>/metrical.npy` once per
+  data build (45 s on 6 cores here); validation logs the head's downbeat F1 and phase accuracy. The
+  head is used only in training; decoding never touches it.
+- **Meter consistency** (decoding mode `meter`, below): fixes isolated windows whose time signature
+  disagrees with the rest of the piece.
 
 **Evaluation** (`scripts/evaluate_pieces.py`), works for checkpoints of either script:
 
-| prompt mode | the decoder's context before each window | use |
+| context mode | the decoder's context before each window | use |
 |---|---|---|
 | `oracle` | the ground-truth score before the window (= `scripts/evaluate.py`) | upper bound |
-| `chained` | the model's **own** output so far, window by window through each piece | **the system's real performance** |
+| `chained` | the model's **own** output so far, window by window through each piece | what a real recording gets, unguarded |
 | `none` | nothing | robustness check |
+| `guarded` | chained, with degenerate windows redone without context (below) | **the system's real performance** (the demo's default) |
+| `meter` | guarded, plus consistent time signatures along each piece (below) | guarded, with the meter fixed |
 
-All three score each window against its ground truth with `src/eval/metrics.py`, so they compare
+All five score each window against its ground truth with `src/eval/metrics.py`, so they compare
 directly with the baselines. `--musicxml N` writes the stitched prediction and ground truth of the
-first N pieces as MusicXML (for figures and for MUSTER / MV2H).
+first N pieces as MusicXML (for figures and for MUSTER / MV2H). Running the script with a subset of
+`--modes` adds those modes to an earlier evaluation's files instead of replacing them.
+
+Chained, guarded and meter decoding live in `src/decoding.py`, which the demo pipeline uses too, so
+the demo and the evaluation run identical decoding. Each window's output is capped at
+8 tokens per input note + 64 (`decoding.max_new_tokens`): real targets average 3.4 tokens per note
+and the longest train / val / test target is 80% of the cap, so it never truncates a real output;
+it only keeps a looping window from running on to the model's 2,048-token limit.
 
 **Prompt fix** (`segment.prompt_from_output`): when a position in the bar held only a pedal token,
 removing the pedal left an empty `pos_k sub_x` behind, so 43% of inference-time prompts differed
@@ -505,15 +573,274 @@ mistakes a model's own previous output makes: a wrong time signature, all positi
 durations, flipped staff. Targets and note inputs are never changed, and with the flag off the data
 is identical to before (`python -m tests.test_context_noise`).
 
+**Guarded chained decoding** (`--modes guarded`, on by default). `scripts/analyze_chained.py`
+rebuilds every chained context from saved predictions and showed that the chained losses come from
+cascades, not from long contexts as such. One degenerate window (no notes, or a loop more than 3x
+its target's length) wrecks the next window's context, and pitch F1 after such a window drops to
+0.12-0.40, often degenerating again:
+
+| model, synthetic input | degenerate windows | pitch F1 after one | pitch F1 chained / none |
+|---|---|---|---|
+| s2s | 0.6% | 0.77 | 0.87 / 0.88 |
+| s2s_ctx | 20.9% | 0.16 | 0.70 / 0.88 |
+| sf_small_ctx | 71.2% | 0.12 | 0.24 / 0.86 |
+| sf_base | 56.9% | 0.21 | 0.36 / 0.81 |
+| sf_base_reg | 45.4% | 0.30 | 0.49 / 0.86 |
+
+The model cannot see the true score at inference, but it does know the notes it was given: a
+healthy output contains about the same pitches as its input, a degenerate one does not. Guarded mode
+also decodes every window without context and keeps that output when its pitch F1 against the
+window's input notes (`decoding.input_agreement`) beats the chained output's by more than
+`--guard-margin` (default 0; ties keep the chained output). The kept output becomes the history the
+next context is built from, so one bad window can no longer take the rest of the piece down with it.
+`tests/test_decoding.py` checks the logic with a stand-in model.
+
+**Choosing the margin.** `scripts/simulate_guard.py` estimates guarded decoding offline from saved
+chained / none predictions for a range of margins (conservatively: it cannot show the better
+contexts that follow a replaced window). On all six post-milestone models, a smaller margin was
+better down to 0, on note, onset, duration and bar F1 in nearly every model and condition:
+
+| s2s, clean (offline) | windows replaced | note F1 | onset F1 | duration acc | bar F1 |
+|---|---|---|---|---|---|
+| margin 0.2 | 2% | 0.890 | 0.138 | 0.572 | 0.433 |
+| margin 0.05 (first default) | 16% | 0.900 | 0.148 | 0.594 | 0.457 |
+| margin 0 | 56% | 0.907 | 0.170 | 0.642 | 0.494 |
+
+At margin 0 the no-context output still had the better rhythm on its own (onset F1 0.188), so the
+simulation now also tries negative margins (the no-context output wins unless it agrees clearly
+worse), and the real decoding can compare margins in one job: `--extra-margins -0.05,-0.02` adds
+modes `guarded@-0.05`, `guarded@-0.02` (and `meter@...` if meter is run) next to the default, each
+with its `guard_margin` recorded in the results.
+
+**Meter consistency** (`--modes meter`, on by default). A wrong time signature mis-sizes every bar
+of its window, so every later position shifts. Every window opens with `[bar] ts_X`, so after a
+guarded pass the time signatures along a piece can be read off and checked. `smooth_meters` works on
+runs of windows with equal time signatures: a run of at most 2 windows with the same time signature
+on both sides takes it (`A A B A A`, `A B B A A A`); at the start or end of a piece a short run takes
+its neighbour's only if that run is at least twice as long (`B A A`); a genuine change of meter
+(`A A A B B B`) has no short run between equal ones and is kept. Each corrected window is decoded
+again with the new time signature forced as its first token(s), and generating any other time
+signature in that window is blocked (`generate(banned=...)`: without the block a real model writes
+its own `ts_4/4` right after a forced `ts_3/4`). The whole piece is then decoded again from there,
+so the windows after a corrected one see the corrected context. Meter mode reuses guarded mode's
+outputs as its first pass and costs nothing when no window needs fixing; the evaluation reports the
+share of windows corrected (`meter_fix_rate`) and `ts_acc`.
+
+### Beats as an input (`--beats`)
+
+Even given the true previous bars, the best model puts ~40% of onsets in the wrong place, while the
+beat-snap + XGBoost baseline, which is given the annotated beats, reaches onset F1 0.74. So the
+model can also be given the beats (`src/beats.py`): 7 more features per note, its phase between the
+surrounding beats and its position in the bar (each on the unit circle), the local beat period,
+the beats per bar, and a "has beats" flag (all zero where there are no beats).
+
+| where the beats come from | ASAP | PERiScoPe (no annotations, no audio) |
+|---|---|---|
+| ground truth (`scripts/build_beats.py` -> `<split>/beats_gt.npz`) | the human annotations (`asap_annotations.json`) | the score's beats timed by the note alignment of every window (`window_grid`), joined by bar number |
+| a real tracker (`scripts/track_beats.py` -> `beats_tracked.npz`) | Beat This! on the MAESTRO audio of the real-transcription splits | - |
+
+- **Beat counting follows ASAP** (`beat_layout`, checked on all 1,067 annotated performances):
+  dotted beats when the numerator is a multiple of 3 above 3 (6/8 -> 2, 12/8 -> 4, 6/4 -> 2), the
+  numerator otherwise (4/4 -> 4, 3/8 -> 3).
+- **The alignment-derived grid is checked against the human annotations** on ASAP (`build_beats.py
+  --check`): median beat F-measure 0.92 (train), 0.90 (val), 0.85 (test); where it is right it is
+  exact (median error 1 ms), and it is weakest around pickup bars (written left-aligned in our
+  tokens) and on beats where nothing is played. That is better than the tracker it stands in for
+  (below: beat F 0.81 / 0.71), and training adds tracker errors on top.
+- **No leakage from the tracker.** Beat This! was trained on ASAP, so each performance is tracked by
+  the authors' cross-validation model that never saw it (their `asap/8-folds.split`: fold k ->
+  checkpoint `fold<k>`; tracks outside the split -> `final0`). Its beats are shifted onto the ASAP
+  timeline by the same offset as the transcription.
+- **How good Beat This! is on our audio** (`scripts/fit_beat_noise.py`, held-out fold models, scored
+  within each piece's annotated span: 101 of the 418 MAESTRO recordings hold more than one ASAP
+  piece, e.g. a prelude and its fugue, and the tracker hears the whole recording):
+
+  | | beat F | downbeat F | wrong tempo octave |
+  |---|---|---|---|
+  | train / val _transcribed (107 performances, fitted on) | 0.81 | 0.65 | 23% (19 too fast, 6 too slow) |
+  | test_transcribed (24, never fitted on) | 0.71 | 0.60 | 33% (8 too fast) |
+  | the Beat This! paper, ASAP | 0.76 | 0.61 | |
+
+  At the right tempo it misses 12% of the beats and adds 13% spurious ones (mostly mid-beat: local
+  subdivision), 7 ms late on average with 18 ms jitter. Downbeats: without its DBN (`dbn=False`,
+  what we run) Beat This! imposes no bar length, every downbeat is its own peak: it marks 87% of
+  the true downbeats, but also 38% of the half-bar beats (beat 3 of 4/4), 22% of the other beats
+  and 34% of its spurious ones, and how often varies a lot between pieces (false downbeats on
+  "other" beats: 9% to 40% between the quartiles). Too-fast tracking is often partial (a stretch of
+  the piece) and sometimes by 3 (the eighth notes of a compound meter).
+- **Tracker errors are fitted, not guessed** (`scripts/fit_beat_noise.py` -> `configs/beat_noise.json`):
+  Beat This! vs the annotations on train / val _transcribed (never test), one performance at a
+  time (`compare`). `BeatNoise` replays them on the ground truth: each beat list draws one fitted
+  performance profile (from the same bar length; its miss / extra rates, timing, and downbeat rates
+  by the beat's place in the bar), and with the fitted probability a tempo octave error replayed
+  from one of the real wrong-tempo performances (its kind, factor, the stretch of the piece it
+  covered, its downbeat rates). Replayed on the same ground truth it tracks like Beat This!: beat F
+  0.82 vs 0.81 (right tempo 0.87 vs 0.87, too fast 0.64 vs 0.62, too slow 0.70 vs 0.64), downbeat F
+  0.60 vs 0.65 (a little pessimistic, the wrong-tempo lists most); on test, never fitted on,
+  downbeat F 0.60 vs 0.60
+  (`tests/test_beats.py test_noise_matches_tracker`). Training applies it (`--beat-noise`; a run
+  records the values it started with in config.json and resumes with them), and `--beat-dropout`
+  (0.15) of the windows get no beats, so the model also works on MIDI input without a tracker. On
+  the real transcriptions it trains on the tracker's own beats.
+
+Beat models are evaluated with the beats each condition would really have (`src/eval/plan.py BEATS`):
+
+| condition | beats | what for |
+|---|---|---|
+| clean, synthetic, periscope | ground truth + the fitted tracker errors (fixed seed) | the usual test sets, a simulated tracker |
+| real | Beat This! on the audio (held-out folds) | the system as the demo runs it |
+| clean_gt_beats, real_gt_beats | the annotated beats | the upper bound; what the beat-snap baselines are given |
+| real_no_beats | none | MIDI input without a tracker |
+
+Models without beats skip the three beat-only conditions. **`piece` mode** (new, for every model)
+is meter mode with no limit on how long a deviating run of windows may be: a piece keeps one time
+signature unless a different one holds for a stretch as long as the rest (`PIECE_MAX_BLIP`).
+
+### Post-milestone results
+
+All runs trained with the same loop on the same PACE data (ASAP + PERiScoPe; the runs in this
+first table not on the real-transcription split, which was built after they started; the beat batch
+below also on it), each evaluated with `best.pt` on
+four test sets: the 59 ASAP test performances as clean MIDI and with the fixed synthetic noise draw,
+the PERiScoPe test transcriptions, and `real`, 24 ASAP test performances transcribed from their
+MAESTRO audio by Transkun V2 (closest to the demo). Tables: `python3 scripts/compare_runs.py` ->
+`outputs/compare/` (every run, test set, mode and metric; `margins.md` for the margin sweeps).
+Numbers below are **meter mode** unless stated: the system as the demo runs it.
+
+**The bar-alignment fixes** (context notes: 64 performed notes before / 32 after each window;
+auxiliary metrical head: per-note downbeat and beat phase, `src/metrical.py`), onset F1 / bar F1:
+
+| run | params | best val loss | clean | synthetic | PERiScoPe | real |
+|---|---|---|---|---|---|---|
+| s2s | 10.2M | 0.2781 | 0.202 / 0.507 | 0.192 / 0.504 | 0.246 / 0.521 | 0.223 / 0.484 |
+| s2s_c (context notes) | 10.2M | 0.2694 | 0.198 / 0.521 | 0.181 / 0.501 | 0.242 / 0.520 | 0.234 / 0.509 |
+| s2s_a (metrical head) | 10.2M | 0.2800 | 0.211 / 0.501 | 0.201 / 0.480 | 0.354 / **0.660** | 0.257 / 0.567 |
+| s2s_ca (both) | 10.2M | 0.2779 | 0.267 / 0.553 | 0.255 / 0.557 | 0.332 / 0.601 | 0.319 / 0.568 |
+| s2s_m_ca (both, regularized) | 25.9M | 0.2563 | 0.280 / 0.604 | 0.271 / 0.599 | **0.367** / 0.653 | 0.309 / 0.590 |
+| sf_base_reg | 44.6M | 0.2414 | 0.154 / 0.424 | 0.145 / 0.421 | 0.200 / 0.430 | 0.177 / 0.460 |
+| **sf_base_reg_ca** (both) | 44.6M | **0.2384** | **0.296 / 0.615** | **0.272 / 0.608** | 0.359 / 0.643 | **0.323 / 0.616** |
+
+Of these, `sf_base_reg_ca` (the regularized 45M Scoreformer with both fixes) was best: best onset
+and bar F1 on clean, synthetic and real input, and the lowest validation loss; `s2s_m_ca` a close
+second (best on PERiScoPe, 0.367 vs 0.359 onset F1). Its full meter-mode numbers on `real`: note F1
+0.909, onset F1 0.323, onset-shift F1 0.503, duration 0.762, staff 0.877, bar F1 0.616, time
+signature 0.280. The beat batch below improves on it.
+
+What this shows:
+- **The two fixes work together, not alone.** Context notes alone give the best 10M validation loss
+  and the best oracle-context scores (clean oracle onset F1 0.578) but no gain once the model writes
+  its own context (meter onset F1 0.198 vs 0.202). The metrical head alone helps on transcribed
+  input (PERiScoPe bar F1 +0.14, real +0.08) but little on ASAP MIDI. Both together improve onset F1 on
+  every test set (+32% on clean, +43% on real for the 10M model): the head learns where beats fall,
+  and the extra notes give it enough of the surrounding beat to place them.
+- **They turn the 45M model from the worst into the best.** Without them it leaned on the context to
+  find the bar and fell behind (`sf_base_reg` onset F1 0.154 on clean); with them its onset F1
+  nearly doubles on every test set (0.296 clean, 0.323 real), and bar F1 rises 0.42-0.46 -> 0.61-0.64.
+- **The bar-phase gap has narrowed but not closed.** Onset-shift F1 / onset F1 is 1.65 for
+  sf_base_reg_ca on clean input (was 2.2 for sf_base_reg), and meter-mode onset F1 is 53% of the
+  oracle-context value (0.296 vs 0.562; was 28%). Time signature accuracy (0.28-0.41) is now the
+  weakest metric.
+- **Validation loss does not rank the systems.** It is teacher-forced with the true context, so it
+  measures the oracle mode: `sf_base_reg` has a much lower loss than `s2s` (0.241 vs 0.278) and
+  decodes worse in every realistic mode. Compare runs on the decoded test sets.
+- **Regularization, not the shorter schedule, fixed most of the 45M model's overfitting**: with
+  the original settings, 6 epochs reach the same best loss as 20 (`sf_base_e6` 0.2742 vs
+  `sf_base` 0.2754); dropout 0.2, weight decay 0.1 and lr 2e-4 bring it to 0.241. Early stopping
+  (the default since) keeps that checkpoint: `sf_base_reg_ca` stopped at epoch 10.9.
+- **Training on noise is essential:** `sf_clean` (clean input only) is the worst run on every test
+  set (onset F1 0.130 clean, 0.133 real).
+- **H1 is not supported at equal size.** `sf_small` (9.7M) has a lower validation loss than `s2s`
+  (10.2M) but decodes worse on every test set (meter onset F1 0.177 vs 0.202 on clean).
+- **Context noise is mixed:** `s2s_ctx` improves `s2s` on clean input (onset F1 0.223 vs 0.202),
+  about equal elsewhere; it hurt `sf_small`.
+
+**Decoding modes.** Guarded decoding beats chained on onset F1 for all 14 models on all four test
+sets (56 / 56) and on bar F1 in 50 / 56 (the model's own context, unguarded, carries errors from
+window to window: `sf_base_e6` chained bar F1 on real is 0.213, guarded 0.489). The 6 exceptions
+are all models with the metrical head, whose own context is good enough that chained bar F1 comes
+close or ahead (`s2s_a` on real: 0.595 chained vs 0.553 guarded). Guarded mode replaces 39-52% of
+windows with their no-context output. Meter mode adds to it for the models with both fixes: for `sf_base_reg_ca`,
++0.001 to +0.007 onset F1 and +0.005 to +0.014 bar F1 over guarded on every full test set, with
+the time signature corrected in 7-9% of windows. Meter is therefore the default in the demo, in
+`scripts/audio_to_score.py` and in `scripts/export_musicxml.py --mode auto`.
+
+**Guard margin: 0 is kept.** Swept on `s2s` and `sf_base_reg` (`--extra-margins -0.05,-0.02,0.05`,
+`outputs/compare/margins.md`): in meter mode margin 0 has the best onset F1 on all four test sets
+for `s2s` and on three of four for `sf_base_reg` (clean: 0.154 vs 0.157 at +0.05). Negative margins
+fall back on 73-92% of windows and lower onset F1 everywhere (s2s real: 0.200 at -0.05 vs 0.223);
+bar F1 differences between margins are at most 0.023, in both directions.
+
+**Beats as an input (the beat batch, `pace/beats.sh`).** Three runs on the best recipe (45M
+Scoreformer, regularized, context notes + metrical head), all three also trained on the
+real-transcription split: `sf_base_reg_ca_r` without beats (the control), `sf_base_reg_cab` with
+beats, and `s2s_m_cab`, the runner-up's recipe (25.9M Score2Seq) with beats. Meter mode, onset F1 /
+bar F1:
+
+| run | beats | clean | synthetic | PERiScoPe | real | real: time sig |
+|---|---|---|---|---|---|---|
+| sf_base_reg_ca (before) | - | 0.296 / 0.615 | 0.272 / 0.608 | 0.359 / 0.643 | 0.323 / 0.616 | 0.280 |
+| sf_base_reg_ca_r (control) | - | 0.293 / 0.603 | 0.267 / 0.597 | 0.396 / 0.651 | 0.307 / 0.572 | 0.229 |
+| **sf_base_reg_cab** | yes | 0.319 / **0.635** | 0.305 / **0.623** | **0.441** / 0.695 | 0.350 / **0.639** | **0.352** |
+| s2s_m_ca (before) | - | 0.280 / 0.604 | 0.271 / 0.599 | 0.367 / 0.653 | 0.309 / 0.590 | 0.280 |
+| s2s_m_cab | yes | **0.333** / 0.621 | **0.314** / 0.620 | 0.436 / **0.713** | **0.363** / 0.600 | 0.309 |
+
+(Their validation losses, 0.2253-0.2346, also average over `val_transcribed`, so they are not
+comparable with the runs above.)
+
+- **The beats help on every test set.** Same data and recipe, `sf_base_reg_cab` vs the control:
+  onset F1 +0.026 to +0.045, bar F1 +0.027 to +0.067, time signature +0.05 to +0.12 (real: +0.123),
+  duration +0.008 to +0.032 on the four full test sets; note F1 unchanged, staff accuracy lower
+  (-0.008 to -0.023). The Score2Seq recipe gains as much (`s2s_m_cab` vs `s2s_m_ca`: onset F1 +0.043
+  to +0.069), though that comparison also includes the real-transcription data.
+- **The real-transcription data alone did not help on ASAP.** The control vs `sf_base_reg_ca` (one
+  run each, so differences of a few hundredths can be noise): about equal on clean and synthetic,
+  better on PERiScoPe (onset F1 +0.037), worse on real (onset -0.016, bar -0.044).
+- **New best model: `sf_base_reg_cab`**, now the demo's default. On `real`, against `sf_base_reg_ca`:
+  onset F1 0.350 (+0.027), bar F1 0.639 (+0.023), time signature 0.352 (+0.072), duration 0.785
+  (+0.023); onset-shift F1 0.485 (-0.017) and staff 0.849 (-0.028) are lower. Its meter-mode onset
+  F1 is 61% of the oracle-context value on real (was 57%). `s2s_m_cab` has the best onset F1 (0.363
+  on real) but lower bar F1 (0.600) and time signature accuracy (0.309).
+- **The tracker's errors cost nothing; the beats themselves are worth +0.04 onset F1.** On the real
+  transcriptions, for `sf_base_reg_cab` (meter mode, onset / bar / time signature):
+
+  | beats | onset F1 | bar F1 | time sig |
+  |---|---|---|---|
+  | annotated (`real_gt_beats`) | 0.324 | 0.634 | 0.365 |
+  | Beat This! (`real`, what the demo gets) | 0.350 | 0.639 | 0.352 |
+  | none (`real_no_beats`) | 0.310 | 0.610 | 0.293 |
+
+  Beat This!'s beats are as good as the annotations for this model (`s2s_m_cab`: 0.363 vs 0.355
+  onset F1); on real transcriptions it was trained with the tracker's own beats. Better beat
+  tracking (Beat This!'s DBN, say) is therefore not the next lever. Without beats, the beat model is
+  still as good as the control (onset 0.310 vs 0.307, bar 0.610 vs 0.572), so MIDI input loses
+  nothing.
+- **The model still uses the beats far less than the beat-snap baseline does.** Even with the
+  annotated beats and the true previous bars (oracle mode), `sf_base_reg_cab` reaches onset F1 0.586
+  on clean input and 0.585 on the real transcriptions, against the beat-snap + XGBoost baseline's
+  0.718 and 0.738 with the same beats (B2, below). The beats are an input feature
+  the model weighs, not a grid its onsets are placed on; that gap is where the remaining onset
+  errors are.
+- **`piece` mode does not beat `meter`.** Over all 17 runs on the four full test sets it is better on
+  onset F1 in 22 / 68 cases (mean -0.007) and on bar F1 in 27 / 68 (mean -0.003); time signature
+  accuracy is a wash (38 / 68, mean +0.009). Meter stays the default.
+
+`real_unseen_audio` (the 3 `real` performances whose audio Transkun never trained on, 62 windows) is
+reported in `outputs/compare/` but too small to decide anything (time signature accuracy is 0.000 for
+6 runs, and 0.000 to 0.500 between runs).
+
 ## Demo: audio in, score out
 
 A small web app runs the whole system on one recording: Transkun V2 transcribes the audio, the
-score model writes the score window by window (each window prompted with its own previous output,
-as in the chained evaluation), and the page shows the engraved score with playback and downloads.
+score model writes the score window by window in meter mode, the best in the evaluation (guarded
+decoding: each window's context is the model's own previous output, and degenerate windows are
+redone without it; plus time signatures kept consistent along the piece; the page can also switch
+to guarded only, plain chained or no context), and the page shows the engraved score with playback
+and downloads. The default checkpoint is the best model, `sf_base_reg_cab`, which also takes the
+beats Beat This! finds in the audio.
 
 ```bash
 pip install fastapi uvicorn python-multipart        # once (also listed in environment.yml)
-python demo/app.py --ckpt outputs/runs/sf_base/best.pt
+python demo/app.py --ckpt outputs/runs/sf_base_reg_cab/best.pt
 # open http://127.0.0.1:7860 and drop in a WAV / MP3 / FLAC (or a .mid to skip transcription)
 ```
 
@@ -525,8 +852,13 @@ and the MIDI players use html-midi-player, both loaded from a CDN. Each job's fi
 `result.json`. The same pipeline from the command line:
 
 ```bash
-python scripts/audio_to_score.py recording.wav --ckpt outputs/runs/sf_base/best.pt
+python scripts/audio_to_score.py recording.wav --ckpt outputs/runs/sf_base_reg_cab/best.pt
 ```
+
+For a model trained with `--beats`, the demo tracks the uploaded audio with Beat This! (`final0`;
+`pip install beat-this rotary-embedding-torch einops`, in environment.yml) after transcription and
+shows how many beats it found; MIDI input, or no beat-this package, runs it without beats (the
+"no beats" input it was also trained on), and the page says so.
 
 The demo needs `vocab.json` (and, for Score2Seq checkpoints, `feature_stats.json`) next to the
 checkpoint or in `data/processed/`. Copy both next to `best.pt` when sharing a checkpoint.
@@ -638,6 +970,11 @@ about 10× higher.
   agreement drops from 0.962 (clean) to 0.955 (Transkun) / 0.948 (Kong) on train; on val from
   0.957 to 0.952 / 0.945.
 - **`test_transcribed`:** see the caveat below.
+- **Building them on PACE:** `bash pace/real_asap.sh` runs the whole chain in one GPU job
+  (`pace/real_asap.sbatch`: fetch the MAESTRO audio of these performances, Transkun V2,
+  `build_transcribed.py`, metrical labels, `tests/test_integrity.py`). The splits reuse the
+  existing vocabulary and the clean splits' targets, so existing checkpoints work on them
+  unchanged.
 
 ### Caveat: test_transcribed
 
@@ -674,12 +1011,34 @@ src/baselines/xgb_quantizer.py   Baseline 2: beat-snap + per-note XGBoost
 src/eval/metrics.py              shared window-level metrics
 src/model.py                     Score2Seq: first small encoder-decoder transformer
 src/scoreformer.py               Scoreformer: main model (time-rotary encoder), checkpoint loading
-src/dataset.py     PyTorch Dataset / sampler / collate
+src/dataset.py     PyTorch Dataset / sampler / collate, context noise (ContextNoise)
+src/decoding.py                  chained / guarded / meter decoding of whole pieces (evaluation and demo)
+src/metrical.py                  per-note downbeat / beat-phase labels (alignment) and the aux loss
+scripts/build_metrical.py        precompute the metrical labels of every split (once per data build)
 src/pipeline.py                  audio / MIDI -> windows -> chained decoding -> MusicXML
 demo/app.py, demo/static/        web demo (FastAPI + one HTML page); scripts/audio_to_score.py: CLI
 scripts/train_model.py           train either model; scripts/evaluate_pieces.py: oracle/chained/none
+src/eval/plan.py                 evaluation options and mode names; what a run's results still lack
+src/beats.py                     beats: ground-truth grid, per-note features, tracker errors (BeatNoise)
+scripts/build_beats.py           ground-truth beats per performance -> <split>/beats_gt.npz
+scripts/track_beats.py           Beat This! on the MAESTRO audio (held-out folds) -> beats_tracked.npz
+scripts/fit_beat_noise.py        tracker vs ground truth -> configs/beat_noise.json
+scripts/compare_runs.py          tables of every evaluated run -> outputs/compare/{summary,margins}.md, results.csv
 pace/train.sbatch                PACE GPU job: train + evaluate
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
+tests/test_decoding.py           chained / guarded decoding with a stand-in model
+tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
+tests/test_context_notes.py      context notes: exact neighbours, unchanged window notes, both models
+tests/test_metrical.py           metrical labels: synthetic precision / recall, coverage, the aux head
+tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume, status.json, atomic saves
+tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --only-missing end to end
+tests/test_reevaluate.py         pace/reevaluate.sh: what it submits / skips (stand-in squeue / sbatch)
+tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
+tests/test_beats.py              beats vs ASAP annotations, features, tracker errors (bar classes, octave stretches, profiles, fit, vs Beat This!), tracker folds, train / eval / demo
+tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes
+scripts/analyze_chained.py       why chained decoding loses notes (from saved predictions)
+scripts/simulate_guard.py        guarded decoding estimated offline, per guard margin
+scripts/export_musicxml.py       MusicXML from saved predictions (no GPU)
 scripts/           build_dataset, make_bd_split, fetch_maestro_audio, transcribe, fit_noise,
                    build_transcribed, train_xgb_detector, audit_data
 tests/test_integrity.py   leakage, pairing, array and loader checks
