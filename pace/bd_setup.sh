@@ -30,7 +30,12 @@ git -C "$BD/MIDI2ScoreTransformer" checkout --quiet "$COMMIT"
 [ "$COMMIT" = main ] && git -C "$BD/MIDI2ScoreTransformer" pull --quiet --ff-only origin main
 echo "MIDI2ScoreTransformer at $(git -C "$BD/MIDI2ScoreTransformer" rev-parse --short HEAD)"
 pip install --quiet -r "$BD/MIDI2ScoreTransformer/requirements.txt"
-pip install --quiet joblib
+# imported but not declared anywhere pip reads: score_transformer parses MusicXML with BeautifulSoup
+# ('lxml-xml' parser: lxml); their models/model.py imports pytorch_lightning while requirements.txt
+# lists only lightning (pinned to the same version so pip leaves torch alone); tqdm (dataset.py,
+# run_eval.py); joblib runs scripts/beyer_dai.py score in parallel
+pip install --quiet joblib beautifulsoup4 lxml tqdm \
+  "pytorch-lightning==$(python -c 'import lightning; print(lightning.__version__)')"
 # muster runs its evaluation programs through a bash script: make sure they are executable
 python - <<'EOF'
 import os, stat, muster
