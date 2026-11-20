@@ -249,6 +249,20 @@ PER_CONDITION=1 bash pace/reevaluate.sh sf_base_reg_cab_s1 sf_base_reg_cabx sf_b
 `pace/tsearch.sh`; it resumes from `last.pt`.) Compare with `python3 scripts/compare_runs.py`: the new
 "Time-signature search per test set" tables put meter, ts_true, tsearch and tsearch_beat side by side.
 
+## 4h. Beyer & Dai (Baseline 3) and the system-level comparison
+
+```bash
+bash pace/bd_setup.sh        # once, on the login node (~10 min): env bd311, their code, checkpoint
+bash pace/system_eval.sh     # sysinputs (CPU) -> sys_<run> + bdpredict (GPU) -> sysscore (CPU)
+```
+
+`bd_setup.sh` ends with a smoke test (their code imports; MUSTER of a score against itself is 0).
+`system_eval.sh` runs our systems (`RUNS="run:mode ..."`, default `sf_base_reg_cab:meter
+sf_base_reg_cab:tsearch_beat s2s_m_cab:meter`) and theirs on the same whole-piece inputs and scores
+everything with their metrics: `outputs/system_eval/results.md`, with their paper's Table 3 row next to
+the clean results to check the reproduction. Bring it back with
+`scp -r <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/outputs/system_eval/results.md outputs/system_eval/`.
+
 ## 5. Compare the runs and bring results back
 
 ```bash

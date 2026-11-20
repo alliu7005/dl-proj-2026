@@ -929,7 +929,7 @@ python scripts/run_baselines.py --methods beat_snap,xgb_quantizer   # ~5 min
 |---|---|---|
 | **1. Beat-snap** (`src/baselines/quantize.py`) | classical heuristic | Maps each note to score time through the **annotated (oracle) beats**, snaps onsets to the nearest 16th / 8th-triplet and durations to the nearest common value, and splits staffs at middle C. No grace notes, ties or ornaments. |
 | **2. Beat-snap + XGBoost** (`src/baselines/xgb_quantizer.py`) | lightweight supervised | Baseline 1, plus four per-note XGBoost classifiers (keep/delete, staff, written duration, onset shift). Trained on synthetic-noise (Transkun) and real-Transkun training windows (1.16M notes). |
-| 3. Beyer & Dai (2024), pretrained | prior published | Not run yet: needs their code and checkpoint (external code; see below). |
+| 3. Beyer & Dai (2024), pretrained | prior published (ISMIR 2024, the published state of the art for performance MIDI -> score) | Their end-to-end transformer and released checkpoint, run on our test inputs and scored with their metrics, alongside our systems (below). |
 
 Conditions (same windows, same targets):
 - **clean:** clean MIDI.
@@ -960,10 +960,35 @@ Conditions (same windows, same targets):
 - **test_periscope:** the baselines need ASAP's beat annotations (oracle beats), so they can't
   run on `test_periscope`. Only the transformer is evaluated there.
 
-**Baseline 3 (Beyer & Dai) needs a decision.** Their pretrained checkpoint and their MUSTER /
-score-similarity metrics need their code: a patched music21 fork plus the `score_transformer` and
-`muster` packages, installed from GitHub into a separate Python 3.11 environment. That's external
-code, so it needs explicit approval before it's installed and run.
+**Baseline 3: Beyer & Dai, and the system-level comparison** (`pace/bd_setup.sh`, `pace/system_eval.sh`).
+Their model writes whole scores, not our windows, and their paper reports MUSTER and score-similarity
+error rates, so the comparison is made at the level of whole pieces, with their metrics, for every
+system alike:
+
+```bash
+bash pace/bd_setup.sh        # once, login node: conda env bd311 (Python 3.11), their code, its forks
+                             # (music21 0ed70bb, score_transformer 934a228, muster: compiles C++),
+                             # the checkpoint (release v0.0.1, 390 MB); smoke test: MUSTER of a score
+                             # against itself is 0
+bash pace/system_eval.sh     # inputs, ours + theirs on every input, scoring -> outputs/system_eval/results.md
+```
+
+- **Inputs** (`scripts/system_inputs.py`): the 59 ASAP test performances' MIDI (their test set) and
+  the same performances transcribed by Transkun V2, shifted onto the ASAP timeline and cut to their
+  piece (a MAESTRO recording can hold a prelude and its fugue), each with its ASAP reference score.
+- **Ours** (`scripts/system_scores.py`): the demo pipeline on each file, exactly as the demo runs a MIDI
+  file (windows cut from the performance alone); a beat model gets the tracked beats on the real
+  transcriptions (what the demo gets from audio) and none on clean MIDI (like any MIDI input).
+- **Theirs** (`scripts/beyer_dai.py predict`): their `quantize_path` (512-note chunks, 64 overlap), the
+  score written with `makeNotation=False` as their code says.
+- **Scoring** (`scripts/beyer_dai.py score`): every predicted score is read back and cleaned with their
+  `postprocess_score`, then rated with `muster` (pitch / missing / extra / onset / offset / mean error
+  %) and `score_similarity_normalized` (deletion / insertion / duration / staff / stem / spelling, per
+  reference note), averaged over performances without weighting as their `run_eval.py` does. Tables
+  over all performances a system scored and over those every system scored ("common"); their paper's
+  Table 3 row sits next to the clean results (MUSTER onset 15.55, mean 11.30; duration 51.86, staff
+  6.62), which checks that their model runs here as published (if not: `COMMIT=fc21531 bash
+  pace/bd_setup.sh`, their release-tag code).
 
 ## XGBoost baseline: note-level error detector
 
@@ -1074,10 +1099,15 @@ scripts/build_beats.py           ground-truth beats per performance -> <split>/b
 scripts/track_beats.py           Beat This! on the MAESTRO audio (held-out folds) -> beats_tracked.npz
 scripts/fit_beat_noise.py        tracker vs ground truth -> configs/beat_noise.json
 scripts/compare_runs.py          tables of every evaluated run -> outputs/compare/{summary,margins}.md, results.csv
+scripts/system_inputs.py         whole-piece test inputs (clean MIDI, cut Transkun transcriptions) + references
+scripts/system_scores.py         our pipeline on them -> one MusicXML per performance
+scripts/beyer_dai.py             Baseline 3: Beyer & Dai's model (predict) and their metrics for every system (score)
 pace/train.sbatch                PACE GPU job: train + evaluate
 pace/reevaluate.sh               evaluate finished runs: what is missing, one job per run or per test set
 pace/beats.sh                    the beat batch (ground-truth beats, Beat This!, 3 beat runs)
 pace/tsearch.sh                  the time-signature batch (search modes on the best models, 3 runs)
+pace/bd_setup.sh                 Beyer & Dai's environment, code, forks and checkpoint (once)
+pace/system_eval.sh              system-level comparison: ours vs Beyer & Dai on whole pieces
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model
 tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
@@ -1086,6 +1116,7 @@ tests/test_metrical.py           metrical labels: synthetic precision / recall, 
 tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume, status.json, atomic saves
 tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --only-missing end to end
 tests/test_reevaluate.py         pace/reevaluate.sh (per run / per test set), pace/beats.sh, pace/tsearch.sh: what they submit
+tests/test_system_eval.py        system-level comparison: inputs, our pipeline on them, aggregation, job graph
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
 tests/test_beats.py              beats vs ASAP annotations, features, tracker errors (bar classes, octave stretches, profiles, fit, vs Beat This!), tracker folds, train / eval / demo
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes

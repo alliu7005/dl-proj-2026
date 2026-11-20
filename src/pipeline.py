@@ -264,7 +264,10 @@ class ScorePipeline:
 
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, mode: str = MODES[0],
-            progress: Progress = _noop, guard_margin: float = GUARD_MARGIN) -> Result:
+            progress: Progress = _noop, guard_margin: float = GUARD_MARGIN, beats: tuple | None = None) -> Result:
+        """``beats``: (times, down) in the input's seconds, given instead of tracking them (e.g. the
+        tracked beats of a transcription already made; scripts/system_scores.py). Only used by a
+        model trained with beats."""
         src, out = Path(src), Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         timing, files = {}, {}
@@ -283,9 +286,12 @@ class ScorePipeline:
         notes, pedal = load_performance(midi)
         if len(notes) == 0:
             raise ValueError("no notes found (silent recording, or not a piano?)")
-        beats, beat_info = None, "not used by this model"
+        given, beats, beat_info = beats, None, "not used by this model"
         if getattr(self.cfg, "beat_features", False):
-            if ext in AUDIO_EXT:
+            if given is not None:
+                beats = (np.asarray(given[0], np.float64), np.asarray(given[1], bool))
+                beat_info = f"given: {len(beats[0])} beats, {int(beats[1].sum())} downbeats"
+            elif ext in AUDIO_EXT:
                 progress("beats", 0.0, "tracking beats with Beat This!")
                 t = time.perf_counter()
                 beats = self.track_beats(src)

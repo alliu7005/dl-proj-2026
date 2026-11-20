@@ -1,0 +1,219 @@
+"""Baseline 3: Beyer & Dai (ISMIR 2024), "End-to-end Piano Performance-MIDI to Score Conversion with
+Transformers", and the system-level comparison with their metrics. Runs in its own environment
+(Python 3.11, their patched music21 / score_transformer / muster forks): pace/bd_setup.sh.
+
+    python scripts/beyer_dai.py predict --repo <MIDI2ScoreTransformer> --ckpt <MIDI2ScoreTF.ckpt>
+        -> outputs/system_eval/beyer_dai/<condition>/<slug>.musicxml      (their model, every input)
+    python scripts/beyer_dai.py score --repo <MIDI2ScoreTransformer> --systems beyer_dai,sf_base_reg_cab_meter
+        -> outputs/system_eval/results.json, results.md                   (every system, same metrics)
+
+Inputs: outputs/system_eval/manifest.json (scripts/system_inputs.py): every ASAP test performance
+(clean MIDI) and its Transkun V2 transcription (real), each with its ASAP reference score
+(xml_score.musicxml). Their model needs only the MIDI; it chunks it itself (512 notes, 64 overlap:
+``utils.quantize_path`` with its defaults) and returns a music21 score, written with
+makeNotation=False as their code says.
+
+Scoring follows their evaluation (midi2scoretransformer/evaluation/run_eval.py, utils.eval): each
+predicted score is read back, cleaned with their ``postprocess_score`` (every system's, so all are
+treated alike), then
+  muster(est, reference)                                    MUSTER error rates: pitch, missing,
+                                                            extra, onset, offset, mean (%)
+  score_similarity_normalized(est, reference, full=False)   score-similarity error rates per note:
+                                                            deletion, insertion, duration, staff,
+                                                            stem direction, spelling (x 100)
+and the per-performance values are averaged without weighting (their aggregation), skipping a
+performance whose metric failed (None). Each table row says how many performances it averages;
+rows over the performances every system scored ("common") compare like with like. Their paper's
+test-set row (Table 3, "Ours") is printed with the clean results, to check the reproduction.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+import warnings
+from pathlib import Path
+
+MUSTER_KEYS = [("PitchER", "pitch"), ("MissRate", "missing"), ("ExtraRate", "extra"), ("OnsetER", "onset"),
+               ("OffsetER", "offset"), ("MeanER", "mean")]
+SIM_KEYS = [("NoteDeletion", "deletion"), ("NoteInsertion", "insertion"), ("NoteDuration", "duration"),
+            ("StaffAssignment", "staff"), ("StemDirection", "stem"), ("NoteSpelling", "spelling")]
+# Beyer & Dai 2024, Table 3, "Ours" on the ASAP test set (59 performances): lower is better
+PAPER = {"muster": {"PitchER": 3.11, "MissRate": 7.56, "ExtraRate": 6.44, "OnsetER": 15.55, "OffsetER": 23.84,
+                    "MeanER": 11.30},
+         "sim": {"NoteDeletion": 12.69, "NoteInsertion": 9.06, "NoteDuration": 51.86, "StaffAssignment": 6.62,
+                 "StemDirection": 25.03, "NoteSpelling": 8.69}}
+
+
+def their_code(repo: str):
+    """Make their flat-import package importable (``from tokenizer import ...``)."""
+    sys.path.insert(0, str(Path(repo) / "midi2scoretransformer"))
+
+
+def pred_path(out: Path, system: str, entry: dict) -> Path:
+    return out / system / entry["condition"] / f"{entry['slug']}.musicxml"
+
+
+# ------------------------------------------------------------------------------------- predict
+def predict(args) -> None:
+    their_code(args.repo)
+    import torch
+    from models.roformer import Roformer
+    from utils import quantize_path
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = Roformer.load_from_checkpoint(args.ckpt, map_location=device).to(device).eval()
+    entries = load_manifest(args.manifest, args.conditions)
+    out, done = Path(args.out), []
+    for k, e in enumerate(entries):
+        dst = pred_path(out, "beyer_dai", e)
+        t, err = time.perf_counter(), None
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                score = quantize_path(e["midi"], model)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            score.write("musicxml", fp=str(dst), makeNotation=False)
+        except Exception as ex:  # noqa: BLE001  (one bad piece must not stop the rest)
+            err = f"{type(ex).__name__}: {ex}"
+        done.append({"condition": e["condition"], "performance": e["performance"],
+                     "musicxml": None if err else str(dst), "errors": [err] if err else [],
+                     "seconds": round(time.perf_counter() - t, 1)})
+        print(f"{k + 1}/{len(entries)} {e['condition']} {e['performance']}: {err or 'ok'} ({done[-1]['seconds']} s)",
+              flush=True)
+    (out / "beyer_dai").mkdir(parents=True, exist_ok=True)
+    (out / "beyer_dai" / "summary.json").write_text(json.dumps({"system": "beyer_dai", "pieces": done}, indent=1))
+    print(f"wrote {out / 'beyer_dai'}: {sum(d['musicxml'] is not None for d in done)}/{len(done)} scores")
+
+
+# --------------------------------------------------------------------------------------- score
+def rate(job: tuple) -> dict:
+    """Their metrics for one predicted score (in a worker process): {muster: {...}, sim: {...}}, a
+    metric that failed -> None, a missing prediction -> both None."""
+    repo, est_path, ref_path = job
+    their_code(repo)
+    out = {"muster": None, "sim": None, "error": None}
+    if est_path is None or not Path(est_path).exists():
+        out["error"] = "no prediction"
+        return out
+    from music21 import converter
+    from muster import muster
+    from score_utils import postprocess_score
+    from utils import score_similarity_normalized
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            est = postprocess_score(converter.parse(est_path), inPlace=False)
+        except Exception as ex:  # noqa: BLE001
+            out["error"] = f"parse: {type(ex).__name__}: {ex}"
+            return out
+        for key, fn in (("muster", lambda: muster(est, ref_path)),
+                        ("sim", lambda: score_similarity_normalized(est, ref_path, full=False))):
+            try:
+                r = fn()
+                out[key] = {k: (float(v) if isinstance(v, (int, float)) else None) for k, v in r.items()}
+            except Exception as ex:  # noqa: BLE001
+                out["error"] = f"{key}: {type(ex).__name__}: {ex}"
+    return out
+
+
+def mean_over(values: list) -> float | None:
+    vals = [v for v in values if isinstance(v, (int, float))]
+    return sum(vals) / len(vals) if vals else None
+
+
+def aggregate(rated: dict, entries: list[dict], systems: list[str]) -> dict:
+    """rated[(system, condition, performance)] = rate() result -> per system and condition: the
+    unweighted mean over performances of every metric (their aggregation; failed metrics skipped),
+    over all performances the system scored ("all") and over the ones every system scored
+    ("common"), with the number of performances each mean covers."""
+    out = {}
+    for cond in sorted({e["condition"] for e in entries}):
+        perfs = [e["performance"] for e in entries if e["condition"] == cond]
+
+        def ok(s, p):
+            r = rated.get((s, cond, p))
+            return bool(r and r["muster"] and r["muster"].get("OnsetER") is not None and r["sim"])
+        common = [p for p in perfs if all(ok(s, p) for s in systems)]
+        for s in systems:
+            row = {}
+            for subset, ps in (("all", [p for p in perfs if ok(s, p)]), ("common", common)):
+                rs = [rated[(s, cond, p)] for p in ps]
+                row[subset] = {"n": len(rs),
+                               "muster": {k: mean_over([r["muster"].get(k) for r in rs]) for k, _ in MUSTER_KEYS},
+                               "sim": {k: (None if (m := mean_over([r["sim"].get(k) for r in rs])) is None else 100 * m)
+                                       for k, _ in SIM_KEYS}}
+            row["failed"] = [p for p in perfs if not ok(s, p)]
+            out.setdefault(cond, {})[s] = row
+    return out
+
+
+def table(results: dict) -> str:
+    """Markdown tables: one per condition and subset, every system, the paper's row with clean."""
+    hdr = ["system", "n"] + [f"MUSTER {lab}" for _, lab in MUSTER_KEYS] + [f"sim {lab}" for _, lab in SIM_KEYS]
+    fmt = lambda v: "-" if v is None else f"{v:.2f}"  # noqa: E731
+    lines = ["# System-level comparison (whole pieces, Beyer & Dai's metrics)", "",
+             "Error rates in %, lower is better. MUSTER: pitch / missing / extra / onset / offset / mean; score "
+             "similarity (per reference note): deletion / insertion / duration / staff / stem / spelling. Unweighted "
+             "mean over performances; n = performances averaged. \"common\" = the performances every system scored.", ""]
+    for cond, rows in results.items():
+        for subset in ("common", "all"):
+            lines += [f"## {cond}, {subset}", "", "| " + " | ".join(hdr) + " |", "|" + "---|" * len(hdr)]
+            for s, row in rows.items():
+                r = row[subset]
+                lines.append("| " + " | ".join([s, str(r["n"])] + [fmt(r["muster"][k]) for k, _ in MUSTER_KEYS]
+                                               + [fmt(r["sim"][k]) for k, _ in SIM_KEYS]) + " |")
+            if cond == "clean":
+                lines.append("| " + " | ".join(["Beyer & Dai, paper (Table 3)", "59"]
+                                               + [fmt(PAPER["muster"][k]) for k, _ in MUSTER_KEYS]
+                                               + [fmt(PAPER["sim"][k]) for k, _ in SIM_KEYS]) + " |")
+            lines.append("")
+        failed = {s: row["failed"] for s, row in rows.items() if row["failed"]}
+        if failed:
+            lines += [f"Not scored ({cond}): " + "; ".join(f"{s}: {len(f)}" for s, f in failed.items()), ""]
+    return "\n".join(lines)
+
+
+def score(args) -> None:
+    from joblib import Parallel, delayed
+    entries = load_manifest(args.manifest, args.conditions)
+    systems = [s for s in args.systems.split(",") if s]
+    out = Path(args.out)
+    jobs = [(s, e) for s in systems for e in entries]
+    paths = [(args.repo, str(pred_path(out, s, e)) if pred_path(out, s, e).exists() else None, e["reference"])
+             for s, e in jobs]
+    res = Parallel(n_jobs=args.jobs, verbose=5)(delayed(rate)(j) for j in paths)
+    rated = {(s, e["condition"], e["performance"]): r for (s, e), r in zip(jobs, res)}
+    results = aggregate(rated, entries, systems)
+    per_piece = [{"system": s, "condition": c, "performance": p, **r} for (s, c, p), r in rated.items()]
+    (out / "results.json").write_text(json.dumps({"results": results, "pieces": per_piece}, indent=1))
+    text = table(results)
+    (out / "results.md").write_text(text + "\n", encoding="utf-8")
+    print(text)
+    print(f"wrote {out / 'results.md'} and {out / 'results.json'}")
+
+
+def load_manifest(path: str, conditions: str) -> list[dict]:
+    keep = conditions.split(",")
+    return [e for e in json.loads(Path(path).read_text()) if e["condition"] in keep]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("predict", "score"):
+        p = sub.add_parser(name)
+        p.add_argument("--repo", required=True, help="the MIDI2ScoreTransformer checkout")
+        p.add_argument("--manifest", default="outputs/system_eval/manifest.json")
+        p.add_argument("--conditions", default="clean,real")
+        p.add_argument("--out", default="outputs/system_eval")
+    sub.choices["predict"].add_argument("--ckpt", required=True, help="MIDI2ScoreTF.ckpt")
+    sub.choices["score"].add_argument("--systems", required=True,
+                                      help="comma-separated folders under --out (beyer_dai, <run>_<mode>, ...)")
+    sub.choices["score"].add_argument("--jobs", type=int, default=8)
+    args = ap.parse_args(argv)
+    predict(args) if args.cmd == "predict" else score(args)
+
+
+if __name__ == "__main__":
+    main()
