@@ -698,8 +698,9 @@ signature unless a different one holds for a stretch as long as the rest (`PIECE
 
 ### Post-milestone results
 
-All runs trained with the same loop on the same PACE data (ASAP + PERiScoPe; none of them on the
-real-transcription split, which was built after they started), each evaluated with `best.pt` on
+All runs trained with the same loop on the same PACE data (ASAP + PERiScoPe; the runs in this
+first table not on the real-transcription split, which was built after they started; the beat batch
+below also on it), each evaluated with `best.pt` on
 four test sets: the 59 ASAP test performances as clean MIDI and with the fixed synthetic noise draw,
 the PERiScoPe test transcriptions, and `real`, 24 ASAP test performances transcribed from their
 MAESTRO audio by Transkun V2 (closest to the demo). Tables: `python3 scripts/compare_runs.py` ->
@@ -719,11 +720,11 @@ auxiliary metrical head: per-note downbeat and beat phase, `src/metrical.py`), o
 | sf_base_reg | 44.6M | 0.2414 | 0.154 / 0.424 | 0.145 / 0.421 | 0.200 / 0.430 | 0.177 / 0.460 |
 | **sf_base_reg_ca** (both) | 44.6M | **0.2384** | **0.296 / 0.615** | **0.272 / 0.608** | 0.359 / 0.643 | **0.323 / 0.616** |
 
-**Best model: `sf_base_reg_ca`** (the regularized 45M Scoreformer with both fixes), the demo's
-default: best onset and bar F1 on clean, synthetic and real input, and the lowest validation loss;
-`s2s_m_ca` is a close second (best on PERiScoPe, 0.367 vs 0.359 onset F1). Its full meter-mode
-numbers on `real`: note F1 0.909, onset F1 0.323, onset-shift F1 0.503, duration 0.762, staff 0.877,
-bar F1 0.616, time signature 0.280.
+Of these, `sf_base_reg_ca` (the regularized 45M Scoreformer with both fixes) was best: best onset
+and bar F1 on clean, synthetic and real input, and the lowest validation loss; `s2s_m_ca` a close
+second (best on PERiScoPe, 0.367 vs 0.359 onset F1). Its full meter-mode numbers on `real`: note F1
+0.909, onset F1 0.323, onset-shift F1 0.503, duration 0.762, staff 0.877, bar F1 0.616, time
+signature 0.280. The beat batch below improves on it.
 
 What this shows:
 - **The two fixes work together, not alone.** Context notes alone give the best 10M validation loss
@@ -769,8 +770,63 @@ for `s2s` and on three of four for `sf_base_reg` (clean: 0.154 vs 0.157 at +0.05
 fall back on 73-92% of windows and lower onset F1 everywhere (s2s real: 0.200 at -0.05 vs 0.223);
 bar F1 differences between margins are at most 0.023, in both directions.
 
-`real_unseen_audio` (the 3 `real` performances whose audio Transkun never trained on) is reported in
-`outputs/compare/` but too small to decide anything (time signature accuracy is 0.000 for 6 runs).
+**Beats as an input (the beat batch, `pace/beats.sh`).** Three runs on the best recipe (45M
+Scoreformer, regularized, context notes + metrical head), all three also trained on the
+real-transcription split: `sf_base_reg_ca_r` without beats (the control), `sf_base_reg_cab` with
+beats, and `s2s_m_cab`, the runner-up's recipe (25.9M Score2Seq) with beats. Meter mode, onset F1 /
+bar F1:
+
+| run | beats | clean | synthetic | PERiScoPe | real | real: time sig |
+|---|---|---|---|---|---|---|
+| sf_base_reg_ca (before) | - | 0.296 / 0.615 | 0.272 / 0.608 | 0.359 / 0.643 | 0.323 / 0.616 | 0.280 |
+| sf_base_reg_ca_r (control) | - | 0.293 / 0.603 | 0.267 / 0.597 | 0.396 / 0.651 | 0.307 / 0.572 | 0.229 |
+| **sf_base_reg_cab** | yes | 0.319 / **0.635** | 0.305 / **0.623** | **0.441** / 0.695 | 0.350 / **0.639** | **0.352** |
+| s2s_m_ca (before) | - | 0.280 / 0.604 | 0.271 / 0.599 | 0.367 / 0.653 | 0.309 / 0.590 | 0.280 |
+| s2s_m_cab | yes | **0.333** / 0.621 | **0.314** / 0.620 | 0.436 / **0.713** | **0.363** / 0.600 | 0.309 |
+
+(Their validation losses, 0.2253-0.2346, also average over `val_transcribed`, so they are not
+comparable with the runs above.)
+
+- **The beats help on every test set.** Same data and recipe, `sf_base_reg_cab` vs the control:
+  onset F1 +0.026 to +0.045, bar F1 +0.027 to +0.067, time signature +0.05 to +0.12 (real: +0.123),
+  duration +0.008 to +0.032 on the four full test sets; note F1 unchanged, staff accuracy lower
+  (-0.008 to -0.023). The Score2Seq recipe gains as much (`s2s_m_cab` vs `s2s_m_ca`: onset F1 +0.043
+  to +0.069), though that comparison also includes the real-transcription data.
+- **The real-transcription data alone did not help on ASAP.** The control vs `sf_base_reg_ca` (one
+  run each, so differences of a few hundredths can be noise): about equal on clean and synthetic,
+  better on PERiScoPe (onset F1 +0.037), worse on real (onset -0.016, bar -0.044).
+- **New best model: `sf_base_reg_cab`**, now the demo's default. On `real`, against `sf_base_reg_ca`:
+  onset F1 0.350 (+0.027), bar F1 0.639 (+0.023), time signature 0.352 (+0.072), duration 0.785
+  (+0.023); onset-shift F1 0.485 (-0.017) and staff 0.849 (-0.028) are lower. Its meter-mode onset
+  F1 is 61% of the oracle-context value on real (was 57%). `s2s_m_cab` has the best onset F1 (0.363
+  on real) but lower bar F1 (0.600) and time signature accuracy (0.309).
+- **The tracker's errors cost nothing; the beats themselves are worth +0.04 onset F1.** On the real
+  transcriptions, for `sf_base_reg_cab` (meter mode, onset / bar / time signature):
+
+  | beats | onset F1 | bar F1 | time sig |
+  |---|---|---|---|
+  | annotated (`real_gt_beats`) | 0.324 | 0.634 | 0.365 |
+  | Beat This! (`real`, what the demo gets) | 0.350 | 0.639 | 0.352 |
+  | none (`real_no_beats`) | 0.310 | 0.610 | 0.293 |
+
+  Beat This!'s beats are as good as the annotations for this model (`s2s_m_cab`: 0.363 vs 0.355
+  onset F1); on real transcriptions it was trained with the tracker's own beats. Better beat
+  tracking (Beat This!'s DBN, say) is therefore not the next lever. Without beats, the beat model is
+  still as good as the control (onset 0.310 vs 0.307, bar 0.610 vs 0.572), so MIDI input loses
+  nothing.
+- **The model still uses the beats far less than the beat-snap baseline does.** Even with the
+  annotated beats and the true previous bars (oracle mode), `sf_base_reg_cab` reaches onset F1 0.586
+  on clean input and 0.585 on the real transcriptions, against the beat-snap + XGBoost baseline's
+  0.718 and 0.738 with the same beats (B2, below). The beats are an input feature
+  the model weighs, not a grid its onsets are placed on; that gap is where the remaining onset
+  errors are.
+- **`piece` mode does not beat `meter`.** Over all 17 runs on the four full test sets it is better on
+  onset F1 in 22 / 68 cases (mean -0.007) and on bar F1 in 27 / 68 (mean -0.003); time signature
+  accuracy is a wash (38 / 68, mean +0.009). Meter stays the default.
+
+`real_unseen_audio` (the 3 `real` performances whose audio Transkun never trained on, 62 windows) is
+reported in `outputs/compare/` but too small to decide anything (time signature accuracy is 0.000 for
+6 runs, and 0.000 to 0.500 between runs).
 
 ## Demo: audio in, score out
 
@@ -779,11 +835,12 @@ score model writes the score window by window in meter mode, the best in the eva
 decoding: each window's context is the model's own previous output, and degenerate windows are
 redone without it; plus time signatures kept consistent along the piece; the page can also switch
 to guarded only, plain chained or no context), and the page shows the engraved score with playback
-and downloads. The default checkpoint is the best model, `sf_base_reg_ca`.
+and downloads. The default checkpoint is the best model, `sf_base_reg_cab`, which also takes the
+beats Beat This! finds in the audio.
 
 ```bash
 pip install fastapi uvicorn python-multipart        # once (also listed in environment.yml)
-python demo/app.py --ckpt outputs/runs/sf_base_reg_ca/best.pt
+python demo/app.py --ckpt outputs/runs/sf_base_reg_cab/best.pt
 # open http://127.0.0.1:7860 and drop in a WAV / MP3 / FLAC (or a .mid to skip transcription)
 ```
 
@@ -795,7 +852,7 @@ and the MIDI players use html-midi-player, both loaded from a CDN. Each job's fi
 `result.json`. The same pipeline from the command line:
 
 ```bash
-python scripts/audio_to_score.py recording.wav --ckpt outputs/runs/sf_base_reg_ca/best.pt
+python scripts/audio_to_score.py recording.wav --ckpt outputs/runs/sf_base_reg_cab/best.pt
 ```
 
 For a model trained with `--beats`, the demo tracks the uploaded audio with Beat This! (`final0`;

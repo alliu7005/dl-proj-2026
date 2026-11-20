@@ -10,8 +10,8 @@ per-window output budget. Modes:
   meter    (default) guarded, plus consistent time signatures: a window whose time signature
            disagrees with a clear majority of its neighbours is decoded again with that one forced,
            and the piece re-decoded from there (decoding.decode_pieces_meter). The best mode in the
-           evaluation (outputs/compare/summary.md): for sf_base_reg_ca it beats guarded on onset and
-           bar F1 on every full test set
+           evaluation (outputs/compare/summary.md): for sf_base_reg_cab (the default model) it beats
+           guarded on bar F1 on every full test set (+0.003 to +0.015), onset F1 within 0.006
   guarded  each window's context is the model's own previous output, but a window whose output
            clearly disagrees with its input notes (a degenerate window) is replaced by the window
            decoded without context, so one bad window cannot derail the rest of the piece

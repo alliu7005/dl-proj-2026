@@ -1,7 +1,7 @@
 """Web demo: upload a piano recording, get the transcribed score back.
 
-    python demo/app.py --ckpt outputs/runs/sf_base_reg_ca/best.pt          # then open http://127.0.0.1:7860
-    python demo/app.py --ckpt outputs/runs/sf_base_reg_ca/best.pt --device cpu --port 8000
+    python demo/app.py --ckpt outputs/runs/sf_base_reg_cab/best.pt         # then open http://127.0.0.1:7860
+    python demo/app.py --ckpt outputs/runs/sf_base_reg_cab/best.pt --device cpu --port 8000
 
 Everything runs in this process (Transkun + the score model, on the GPU if there is one, else the
 CPU); the page only uploads the file and shows the result. Jobs run one at a time in a background
@@ -129,7 +129,7 @@ def create_app(pipe: ScorePipeline, out_root: Path) -> FastAPI:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ckpt", default="outputs/runs/sf_base_reg_ca/best.pt")
+    ap.add_argument("--ckpt", default="outputs/runs/sf_base_reg_cab/best.pt")
     ap.add_argument("--vocab", default=None, help="default: next to the checkpoint, else data/processed")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to allow other machines on the network")

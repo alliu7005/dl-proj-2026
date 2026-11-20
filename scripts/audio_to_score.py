@@ -2,7 +2,7 @@
 web demo (demo/app.py): Transkun V2, then the score model decoding window by window.
 
     python scripts/audio_to_score.py recording.wav                       # -> outputs/demo/recording/
-    python scripts/audio_to_score.py recording.mp3 --ckpt outputs/runs/sf_base_reg_ca/best.pt --out my_dir
+    python scripts/audio_to_score.py recording.mp3 --ckpt outputs/runs/sf_base_reg_cab/best.pt --out my_dir
     python scripts/audio_to_score.py performance.mid --mode chained      # skip transcription; unguarded context
 
 Writes transcription.mid, tokens.txt, score.musicxml, score.mid and result.json (timings, counts).
@@ -20,7 +20,7 @@ from src.pipeline import GUARD_MARGIN, MODES, ScorePipeline  # noqa: E402
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("input", help="audio file (wav, mp3, flac, ...) or .mid")
-    ap.add_argument("--ckpt", default="outputs/runs/sf_base_reg_ca/best.pt")
+    ap.add_argument("--ckpt", default="outputs/runs/sf_base_reg_cab/best.pt")
     ap.add_argument("--vocab", default=None, help="default: next to the checkpoint, else data/processed")
     ap.add_argument("--out", default=None, help="default: outputs/demo/<input name>")
     ap.add_argument("--mode", default=MODES[0], choices=list(MODES),
