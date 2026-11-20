@@ -224,6 +224,31 @@ untracked `configs/beat_noise.json` beattrack wrote first), then restart the bea
 resume with the errors they started with), so cancel their jobs and `rm -rf` them first. The
 training log's first line names the run (`run: <name>`).
 
+## 4g. Time-signature search
+
+```bash
+bash pace/tsearch.sh               # the new decoding modes on the best models + 3 runs
+```
+
+| job / run | what | starts |
+|---|---|---|
+| `eval_<run>@<condition>` | `ts_true`, `tsearch`, `tsearch_beat` (README: time-signature search) for `sf_base_reg_cab` and `s2s_m_cab` on real, clean, PERiScoPe, real_gt_beats: one job per test set (`PER_CONDITION=1 bash pace/reevaluate.sh`, 3 h each) | at once |
+| `sf_base_reg_cab_s1` | the best recipe, seed 1: how much one run differs from the next | queued after those |
+| `sf_base_reg_cabx` | the best recipe with exact beats in training, the real transcriptions too | " |
+| `sf_base_reg_cab_c128` | the best recipe with 128 / 64 context notes | " |
+| `eval_<run>@<condition>` | the remaining test sets of both, and `ts_true` / `tsearch` for `sf_base_reg_ca` (no beats) | once the trainings have started |
+
+Each training evaluates itself afterwards with every mode; whatever its 8 h does not reach, and a
+run that has to be resubmitted to finish training, the next morning:
+
+```bash
+PER_CONDITION=1 bash pace/reevaluate.sh sf_base_reg_cab_s1 sf_base_reg_cabx sf_base_reg_cab_c128
+```
+
+(A training that stopped at the time limit: resubmit it with the same NAME / ARGS as in
+`pace/tsearch.sh`; it resumes from `last.pt`.) Compare with `python3 scripts/compare_runs.py`: the new
+"Time-signature search per test set" tables put meter, ts_true, tsearch and tsearch_beat side by side.
+
 ## 5. Compare the runs and bring results back
 
 ```bash

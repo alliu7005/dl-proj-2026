@@ -173,11 +173,12 @@ class Score2Seq(nn.Module):
 
     @torch.no_grad()
     def generate(self, notes, note_mask, prefix: list[torch.Tensor], eos_id: int, max_new: int = 1200,
-                 banned: torch.Tensor | None = None):
+                 banned: torch.Tensor | None = None, return_logp: bool = False):
         """Greedy decoding with a KV cache. ``prefix[b]`` = <bos> [prompt <sep>] for item b.
         Prefixes are LEFT-padded so every row's next token sits at the same column; padded
         positions are masked out as keys and position ids count real tokens only.
-        Returns, per item, the generated token ids after the prefix (without <eos>)."""
+        Returns, per item, the generated token ids after the prefix (without <eos>); with
+        ``return_logp`` also their log-probabilities (src.scoreformer.Scoreformer.generate)."""
         B, dev = len(prefix), notes.device
         ban = banned.to(dev) if banned is not None else None  # bool [B, vocab]: never generate
         memory = self.encoder(notes, note_mask)
@@ -202,6 +203,7 @@ class Score2Seq(nn.Module):
         logits = self.head(self.out_norm(h[:, -1]))
         max_new = min(max_new, self.cfg.max_tokens - int(valid.sum(1).max()))
         out = torch.zeros(B, max_new, dtype=torch.long, device=dev)
+        lp = torch.zeros(B, max_new, dtype=torch.float32, device=dev) if return_logp else None
         done = torch.zeros(B, dtype=torch.bool, device=dev)
         n_out = 0
         cur_pos = pos[:, -1]
@@ -210,6 +212,8 @@ class Score2Seq(nn.Module):
                 logits = logits.masked_fill(ban, float("-inf"))
             nxt = logits.argmax(-1)
             nxt = torch.where(done, torch.zeros_like(nxt), nxt)
+            if lp is not None:
+                lp[:, step] = logits.float().log_softmax(-1).gather(1, nxt[:, None])[:, 0]
             out[:, step] = nxt
             n_out = step + 1
             done |= nxt == eos_id
@@ -225,11 +229,8 @@ class Score2Seq(nn.Module):
                 new_caches.append(c)
             caches = new_caches
             logits = self.head(self.out_norm(h[:, -1]))
-        res = []
-        for b in range(B):
-            g = out[b, :n_out].tolist()
-            res.append(g[:g.index(eos_id)] if eos_id in g else g)
-        return res
+        from .scoreformer import finish_generation
+        return finish_generation(out, lp, n_out, eos_id)
 
     @torch.no_grad()
     def generate_naive(self, notes, note_mask, prefix: list[torch.Tensor], eos_id: int, max_new: int = 1200):

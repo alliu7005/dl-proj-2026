@@ -41,13 +41,17 @@ SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed",
 BEATS = {"clean": "sim", "synthetic": "sim", "real": "tracked", "real_kong": "sim", "periscope": "sim",
          "clean_gt_beats": "gt", "real_gt_beats": "gt", "real_no_beats": "none"}
 BEAT_ONLY = ("clean_gt_beats", "real_gt_beats", "real_no_beats")  # identical to another condition without beats
-DEFAULT_MODES = "oracle,chained,none,guarded,meter,piece"
+DEFAULT_MODES = "oracle,chained,none,guarded,meter,piece,ts_true,tsearch,tsearch_beat"
 DEFAULT_CONDITIONS = "clean,synthetic,real,real_kong,periscope,clean_gt_beats,real_gt_beats,real_no_beats"
 DEFAULT_BEAT_NOISE = "configs/beat_noise.json"
 # results derived from another condition's decoding, never requested on their own
 DERIVED = {"real_unseen_audio": "real"}
-DECODED = ("chained", "guarded", "meter", "piece")  # modes decoded piece by piece (src/decoding.py)
-GUARDED = ("guarded", "meter", "piece")  # modes with a guard margin
+# modes decoded piece by piece (src/decoding.py), in decoding order: ts_true (each window's true
+# time signature forced: the most a time-signature choice can give), tsearch / tsearch_beat (one
+# time-signature search; candidates kept by the model's probability / by the tracked beats)
+DECODED = ("chained", "guarded", "meter", "piece", "ts_true", "tsearch", "tsearch_beat")
+GUARDED = DECODED[1:]  # modes with a guard margin
+TSEARCH = ("tsearch", "tsearch_beat")  # decoded together (one search), kept by different rules
 # piece: meter with no limit on the length of a run that is smoothed away, so a piece keeps one
 # time signature unless it really changes for a stretch at least as long as the rest
 PIECE_MAX_BLIP = 10 ** 6

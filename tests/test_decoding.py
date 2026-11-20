@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import math
 
-from src.decoding import (decode_pieces, decode_pieces_meter, input_agreement, pedal_down, smooth_meters, stitch,
+from src.decoding import (FALLBACK_TS, Scored, decode_pieces, decode_pieces_meter, decode_pieces_tsearch,
+                          forced_starts, input_agreement, pedal_down, smooth_meters, stitch, ts_candidates,
                           window_meter)
 from src.preprocessing.segment import prompt_from_output
 
@@ -242,6 +243,105 @@ def test_meter_reuses_first_pass():
     first = decode_pieces({"a": steady}, FakeModel(), guard_margin=0.05, pitches=pitches)
     assert decode_pieces_meter({"a": steady}, model, guard_margin=0.05, pitches=pitches, first_pass=first)[3] == {}
     assert model.calls == []
+
+
+class ScoringModel(FakeModel):
+    """FakeModel that also scores its outputs like a real model: generated tokens cost 1 nat each
+    in the window's right meter (``best``, default its ``ts``) and 2 in any other, so the right
+    meter is the more probable reading."""
+
+    def __call__(self, windows, contexts, starts):
+        out = []
+        for w, o, st in zip(windows, super().__call__(windows, contexts, starts), starts):
+            n = len(o) - len(st)
+            per = 1.0 if window_meter(o) == w.get("best", w["ts"]) else 2.0
+            out.append(Scored(o, -per * n, n))
+        return out
+
+
+def piece_of(n, ts, best, **kw):
+    return [dict(window(60 + k, 64 + k, ts=ts), best=best, **kw) for k in range(n)]
+
+
+def guarded_first(pieces, model):
+    alone = {}
+    first = decode_pieces(pieces, model, guard_margin=0.0, pitches=pitches, alone=alone)
+    return first, alone
+
+
+def test_ts_candidates_and_forced_starts():
+    outs = {("a", 0): ["bar", "ts_3/4", "pos_0"], ("a", 1): ["ts_3/4", "pos_1"], ("a", 2): ["bar", "ts_6/8"]}
+    alone = {("a", 0): ["bar", "ts_6/8"], ("a", 1): ["ts_2/4"], ("a", 2): ["bar", "ts_3/4"]}
+    pieces = {"a": [0, 1, 2]}
+    # 3/4 three times, 6/8 twice, 2/4 once: the most frequent first; ties alphabetical
+    assert ts_candidates(pieces, (outs, alone), 3) == {"a": ["ts_3/4", "ts_6/8", "ts_2/4"]}
+    # fewer distinct ones than asked: topped up with FALLBACK_TS, without repeats
+    assert ts_candidates({"b": [0]}, ({("b", 0): ["ts_4/4"]},), 3) == {"b": ["ts_4/4", "ts_3/4", "ts_6/8"]}
+    assert ts_candidates({"c": [0]}, ({("c", 0): ["pos_0"]},), 2) == {"c": list(FALLBACK_TS[:2])}
+    # forced: [bar] only where the first-pass output opened with a bar line
+    st = forced_starts(pieces, outs, lambda p, j: "ts_4/4" if j < 2 else None)
+    assert st == {("a", 0): ["bar", "ts_4/4"], ("a", 1): ["ts_4/4"]}
+
+
+def test_tsearch_picks_the_probable_meter():
+    """The windows' greedy guess is 3/4, but the notes read better in 4/4 (the model scores them
+    higher): tsearch writes the whole piece in 4/4; a piece whose guess is right keeps it."""
+    m = ScoringModel()
+    pieces = {"wrong": piece_of(4, "ts_3/4", "ts_4/4"), "right": piece_of(3, "ts_6/8", "ts_6/8")}
+    first, alone = guarded_first(pieces, m)
+    res, cands = decode_pieces_tsearch(pieces, m, guard_margin=0.0, pitches=pitches, first_pass=first, alone=alone)
+    assert cands["wrong"][0] == "ts_3/4" and "ts_4/4" in cands["wrong"], cands  # 4/4 from FALLBACK_TS
+    outs, hist, fbs, chosen = res["tsearch"]
+    assert chosen == {"wrong": "ts_4/4", "right": "ts_6/8"}, chosen
+    assert all(window_meter(outs[("wrong", j)]) == "ts_4/4" for j in range(4))
+    assert all(window_meter(outs[("right", j)]) == "ts_6/8" for j in range(3))
+    assert hist["wrong"].count("ts_4/4") == 4 and not fbs
+    # without beat scores, tsearch_beat is tsearch
+    assert res["tsearch_beat"][3] == chosen
+
+
+def test_tsearch_beat_rule():
+    """tsearch_beat follows the beat agreement when every candidate is rated (the model only breaks
+    ties), and falls back to the model's choice when the beats cannot rate every candidate."""
+    m = ScoringModel()
+    pieces = {"p": piece_of(3, "ts_3/4", "ts_3/4", beat="ts_6/8"), "q": piece_of(2, "ts_3/4", "ts_3/4")}
+    first, alone = guarded_first(pieces, m)
+
+    def beat_score(w, tokens):
+        if "beat" not in w:
+            return None  # no beats for this piece
+        return 1.0 if window_meter(tokens) == w["beat"] else 0.4
+    res, _ = decode_pieces_tsearch(pieces, m, guard_margin=0.0, pitches=pitches, first_pass=first, alone=alone,
+                                   beat_score=beat_score)
+    assert res["tsearch"][3] == {"p": "ts_3/4", "q": "ts_3/4"}          # the model's preference
+    assert res["tsearch_beat"][3] == {"p": "ts_6/8", "q": "ts_3/4"}     # the beats decide p; q has none
+    # equal beat agreement for every candidate: the model's probability decides
+    res, _ = decode_pieces_tsearch(pieces, m, guard_margin=0.0, pitches=pitches, first_pass=first, alone=alone,
+                                   beat_score=lambda w, t: 0.7)
+    assert res["tsearch_beat"][3] == res["tsearch"][3]
+
+
+def test_tsearch_without_scores():
+    """A decode returning plain lists gives every candidate the same score: the first one, the
+    piece's most frequent time signature, is kept."""
+    m = FakeModel()
+    pieces = {"a": piece_of(3, "ts_3/4", "ts_4/4")}
+    first, alone = guarded_first(pieces, m)
+    res, cands = decode_pieces_tsearch(pieces, m, guard_margin=0.0, pitches=pitches, first_pass=first, alone=alone)
+    assert res["tsearch"][3] == {"a": cands["a"][0]} == {"a": "ts_3/4"}
+
+
+def test_tsearch_keeps_guarding():
+    """Forced time signatures do not switch the guard off: a window that degenerates with a
+    context still falls back to its no-context output in every candidate's decoding."""
+    m = ScoringModel()
+    ws = piece_of(3, "ts_3/4", "ts_4/4")
+    ws[1]["fail"] = "loop"
+    pieces = {"a": ws}
+    first, alone = guarded_first(pieces, m)
+    res, _ = decode_pieces_tsearch(pieces, m, guard_margin=0.0, pitches=pitches, first_pass=first, alone=alone)
+    outs, _, fbs, chosen = res["tsearch"]
+    assert ("a", 1) in fbs and chosen == {"a": "ts_4/4"} and "p_61" in outs[("a", 1)]
 
 
 def main():

@@ -320,6 +320,9 @@ class ScoreSegmentDataset(Dataset):
         if beats is not None and beats not in BEAT_SOURCES:
             raise ValueError(f"beats must be one of {BEAT_SOURCES} or None, not {beats!r}")
         self.beats, self.beat_noise, self.beat_dropout = beats, beat_noise, float(beat_dropout)
+        # evaluation: also return each item's raw note onsets (window seconds) / pitches and its beat
+        # list ("raw_onsets", "raw_pitches", "beat_t", "beat_d"), e.g. for src/beats.py grid_agreement
+        self.keep_raw = False
         self._beats = {}
         if beats in ("gt", "tracked"):
             path = beats_path(split_dir, beats)
@@ -530,6 +533,9 @@ class ScoreSegmentDataset(Dataset):
             feats = np.concatenate([feats, beat_features(notes[:, 1], bt, bd)], axis=1)
         item = {"notes": torch.from_numpy(feats), "roles": torch.from_numpy(roles),
                 "target": torch.from_numpy(target), "prompt_len": len(head)}
+        if self.keep_raw:  # rows follow "notes" / "roles"
+            item.update(raw_onsets=notes[:, 1].astype(np.float64), raw_pitches=notes[:, 0].astype(np.int64),
+                        beat_t=np.asarray(bt, np.float64), beat_d=np.asarray(bd, bool))
         if lab is not None:
             lab = np.where((roles <= ROLE_CARRIED)[:, None] & (notes[:, 1] >= 0)[:, None], lab, -1)
             item["downbeat"] = torch.from_numpy(lab[:, 0].astype(np.int64))

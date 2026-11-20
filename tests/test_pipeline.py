@@ -113,8 +113,15 @@ def test_modes_end_to_end():
             st = saved["stats"]
             assert st["mode"] == mode and st["windows"] == len(wins) and st["notes"] == len(notes)
             assert st["bars"] == res.tokens.count("bar") and st["tokens"] == len(res.tokens)
-            assert 0 <= st["guard_fallbacks"] <= len(wins) and (mode in ("guarded", "meter") or st["guard_fallbacks"] == 0)
-            assert 0 <= st["meter_fixes"] <= len(wins) and (mode == "meter" or st["meter_fixes"] == 0)
+            guarded = ("guarded", "meter", "piece", "tsearch", "tsearch_beat")
+            assert 0 <= st["guard_fallbacks"] <= len(wins) and (mode in guarded or st["guard_fallbacks"] == 0)
+            assert 0 <= st["meter_fixes"] <= len(wins) and (mode in ("meter", "piece") or st["meter_fixes"] == 0)
+            if mode.startswith("tsearch"):  # one time signature kept out of three tried, in every window
+                assert len(st["ts_candidates"]) == 3 and st["time_signature"] in st["ts_candidates"], st
+                written = {t for t in res.tokens if t.startswith("ts_")}
+                assert written <= {"ts_" + st["time_signature"]}, (written, st["time_signature"])
+            else:
+                assert "time_signature" not in st
         assert budgets and all(n <= cap for n, cap in budgets), max(budgets)
 
         # none: each window decoded on its own, stitched

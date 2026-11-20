@@ -75,6 +75,21 @@ def build(runs):
              {"arch": "scoreformer", "params": 44.6e6, "args": {"size": "base"}, "model": {}})  # no data / log
     make_run(runs, "sf_busy", full(0.1, ("clean",)), cfg(44.6e6, arch="scoreformer"), [(0.3, 300)],
              {"phase": "cooldown"})
+    # beat runs (low scores: they never take a bold value from the runs above) with the
+    # time-signature search modes on clean and real
+    ts = full(0.05, ("clean", "real"))
+    for c in ts:
+        ts[c]["ts_true"] = metrics(0.4, fallback_rate=0.4, ts_switch_rate=0.3, guard_margin=0.0)
+        ts[c]["tsearch"] = metrics(0.2, fallback_rate=0.4, ts_switch_rate=0.25, guard_margin=0.0)
+        ts[c]["tsearch_beat"] = metrics(0.21, fallback_rate=0.4, ts_switch_rate=0.27, guard_margin=0.0)
+    beat_cfg = cfg(44.6e6, arch="scoreformer", cb=64, ca=32, aux=True)
+    beat_cfg["model"]["beat_features"] = True
+    beat_cfg["data"]["beats"] = {"noise": "configs/beat_noise.json", "train_transcribed": "tracked"}
+    make_run(runs, "sf_cab", ts, beat_cfg, [(0.31, 1180)], {"phase": "done", "stopped_early": True})
+    exact = json.loads(json.dumps(beat_cfg))
+    exact["data"]["beats"] = {"noise": "none", "train_transcribed": "gt"}
+    exact["args"]["seed"] = 1
+    make_run(runs, "sf_cabx", full(0.04, ("clean",)), exact, [(0.32, 1100)], {"phase": "done", "stopped_early": True})
     make_run(runs, "smoke", full(0.9))     # excluded by default
     make_run(runs, "_test_x", full(0.9))   # excluded by default
 
@@ -96,8 +111,14 @@ def test_tables():
         assert "full" in line["s2s"] and "20.0" in line["s2s"] and "15.6" in line["s2s_ca"]
         assert "Scoreformer base" in line["sf_old"] and "44.6M" in line["sf_old"]
         hdr_sep = runs_tbl.strip().splitlines()[1].split("|")[1:-1]  # alignment row: text left, numbers right
-        assert [c.startswith(":") for c in hdr_sep] == [True, True, False, True, True, False, False, False,
-                                                        False, False, True, True], hdr_sep
+        # run, model, params, context, aux, beats, dropout, wd, lr, seed, val loss, epochs, ended, real
+        assert [c.startswith(":") for c in hdr_sep] == [True, True, False, True, True, True, False, False, False,
+                                                        False, False, False, True, True], hdr_sep
+        beats = {r: [c.strip() for c in line[r].split("|")][6] for r in ("s2s", "s2s_ca")}
+        assert beats == {"s2s": compare_runs.DASH, "s2s_ca": compare_runs.DASH}, beats
+        cab = next(ln for ln in runs_tbl.splitlines() if ln.startswith("| sf_cab "))
+        cabx = next(ln for ln in runs_tbl.splitlines() if ln.startswith("| sf_cabx "))
+        assert "tracker errors" in cab and "exact, all" in cabx and [c.strip() for c in cabx.split("|")][10] == "1"
         assert "training (cooldown)" in line["sf_busy"]
         assert line["sf_old"].count(compare_runs.DASH) >= 5  # no data record, no log, no status
 
@@ -117,6 +138,16 @@ def test_tables():
         assert old.count(compare_runs.DASH) == 8 and "0.510" in old and "**" not in old  # 4 modes x 2 metrics
         ca = next(ln for ln in modes.splitlines() if ln.startswith("| s2s_ca "))
         assert "**0.560**" in ca  # the best oracle onset F1 on clean
+
+        # time-signature search: the runs with those modes, per test set; meter alongside
+        tsec = s.split("## Time-signature search per test set")[1]
+        clean_ts = tsec.split("### clean: ")[1].split("###")[0]
+        assert "| sf_cab " in clean_ts and "| s2s " not in clean_ts and "sf_cabx" not in clean_ts
+        row = next(ln for ln in clean_ts.splitlines() if ln.startswith("| sf_cab "))
+        cells = [c.strip().strip("*") for c in row.split("|")[1:-1]]
+        # onset: meter, ts_true, tsearch, tsearch_beat; then bar, ts; then the share tsearch changed
+        assert cells[1:5] == ["0.180", "0.410", "0.210", "0.220"] and cells[-1] == "25%", cells
+        assert "### real: " in tsec and "### synthetic: " not in tsec
 
         # margin sweeps: only s2s, rows ordered by margin, chained / none as the two references
         assert "## s2s" in m and "s2s_ca" not in m
@@ -138,7 +169,7 @@ def test_tables():
 
         with open(out / "results.csv", newline="") as f:
             rows = list(csv.DictReader(f))
-        assert len(rows) == 5 * 9 + 3 * 5 + 2 + 5, len(rows)  # s2s sweep, s2s_ca, sf_old, sf_busy
+        assert len(rows) == 5 * 9 + 3 * 5 + 2 + 5 + 2 * 8 + 5, len(rows)  # s2s sweep, s2s_ca, sf_old, sf_busy, sf_cab, sf_cabx
         r = next(x for x in rows if x["run"] == "s2s" and x["condition"] == "real" and x["mode"] == "meter@-0.05")
         assert float(r["guard_margin"]) == -0.05 and float(r["meter_fix_rate"]) == 0.05
 

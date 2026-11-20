@@ -36,11 +36,12 @@ def full_results(names, margins, version=EVAL_VERSION, limit=0, conds=("clean", 
 
 
 def test_mode_names_and_passes():
-    assert decode_passes(ALL, 0.0, []) == [("chained", "chained", 0.0), ("guarded", "guarded", 0.0),
-                                           ("meter", "meter", 0.0), ("piece", "piece", 0.0)]
+    assert decode_passes(ALL, 0.0, []) == [(k, k, 0.0) for k in ("chained", "guarded", "meter", "piece", "ts_true",
+                                                                 "tsearch", "tsearch_beat")]
     passes = decode_passes(ALL, 0.0, [-0.05, 0.0, 0.05])  # an extra equal to the main margin is dropped
-    assert [p[0] for p in passes] == ["chained", "guarded", "guarded@-0.05", "guarded@0.05",
-                                      "meter", "meter@-0.05", "meter@0.05", "piece", "piece@-0.05", "piece@0.05"]
+    assert [p[0] for p in passes] == ["chained"] + [n for k in ("guarded", "meter", "piece", "ts_true", "tsearch",
+                                                                "tsearch_beat")
+                                                    for n in (k, k + "@-0.05", k + "@0.05")]
     assert dict((n, m) for n, _, m in passes)["meter@-0.05"] == -0.05
     assert mode_names(["none", "guarded"], 0.0, [0.1]) == ["none", "guarded", "guarded@0.1"]
     assert mode_names(["oracle", "chained"], 0.0, [0.1]) == ["oracle", "chained"]  # chained has no margin
@@ -51,7 +52,7 @@ def test_mode_names_and_passes():
 def test_missing_rules():
     names = mode_names(ALL, 0.0, [])
     margins = plan.margins_of(ALL, 0.0, [])
-    assert set(margins) == {"guarded", "meter", "piece"}
+    assert set(margins) == {"guarded", "meter", "piece", "ts_true", "tsearch", "tsearch_beat"}
     yes = lambda c: True  # noqa: E731
     conds = ["clean", "real", "periscope"]
     res = full_results(names, margins)
@@ -69,7 +70,8 @@ def test_missing_rules():
     # a margin sweep's file (guarded / meter at several margins, no oracle / none / chained)
     sweep = {c: {n: r for n, r in legacy[c].items() if n.split("@")[0] in ("guarded", "meter")}
              for c in legacy}
-    assert missing(sweep, ["real"], names, margins, yes) == {"real": ["oracle", "none", "chained", "piece"]}
+    assert missing(sweep, ["real"], names, margins, yes) == {"real": ["oracle", "none", "chained", "piece", "ts_true",
+                                                                      "tsearch", "tsearch_beat"]}
     # a recorded unseen-audio margin is still compared
     bad = json.loads(json.dumps(res))
     bad["real_unseen_audio"]["meter"]["guard_margin"] = 0.05
@@ -90,7 +92,9 @@ def test_missing_rules():
     # extra margins: only the new modes are missing
     n2 = mode_names(ALL, 0.0, [-0.02])
     m2 = plan.margins_of(ALL, 0.0, [-0.02])
-    assert missing(res, ["clean"], n2, m2, yes) == {"clean": ["guarded@-0.02", "meter@-0.02", "piece@-0.02"]}
+    assert missing(res, ["clean"], n2, m2, yes) == {"clean": [k + "@-0.02" for k in ("guarded", "meter", "piece",
+                                                                                     "ts_true", "tsearch",
+                                                                                     "tsearch_beat")]}
 
 
 def test_arguments():
@@ -129,7 +133,8 @@ def test_command_line():
         (run / "eval_pieces_best.json").write_text(json.dumps(res))
         assert run_plan("--run", "r", *dirs) == (plan.NOTHING_MISSING, "nothing missing")
         code, out = run_plan("--run", "r", "--conditions", "real", "--extra-margins", "-0.05", *dirs)
-        assert code == plan.MISSING and out == "real: guarded@-0.05,meter@-0.05,piece@-0.05", out
+        assert code == plan.MISSING and out == "real: " + ",".join(
+            k + "@-0.05" for k in ("guarded", "meter", "piece", "ts_true", "tsearch", "tsearch_beat")), out
         (run / "status.json").write_text(json.dumps({"phase": "cooldown", "step": 5}))
         assert run_plan("--run", "r", *dirs) == (plan.TRAINING, "training not finished (phase cooldown)")
         (run / "status.json").write_text(json.dumps({"phase": "done", "step": 9}))
@@ -239,6 +244,22 @@ def test_only_missing_end_to_end():
 
         out = evaluate(tmp, "--modes", "none,guarded,meter", "--extra-margins", "0.05", "--only-missing")
         assert "to compute: nothing" in out and "done" not in out, out
+        # the time-signature modes, on their own (guarded's first pass is decoded again for them)
+        out = evaluate(tmp, "--modes", "ts_true,tsearch_beat,tsearch", "--only-missing")
+        assert "to compute: clean ts_true,tsearch,tsearch_beat" in out, out
+        # their guarded first pass is not decoded again: the saved guarded / none predictions are reused
+        assert "clean: reusing the saved guarded and none predictions" in out, out
+        res = json.loads((tmp / "q" / "eval_pieces_best.json").read_text())
+        for m in ("ts_true", "tsearch", "tsearch_beat"):
+            r = res["clean"][m]
+            assert r["guard_margin"] == 0.0 and 0.0 <= r["ts_switch_rate"] <= 1.0 and "fallback_rate" in r, (m, r)
+        modes = {json.loads(x)["mode"] for x in open(tmp / "q" / "pred_pieces_best_clean.jsonl")}
+        assert {"ts_true", "tsearch", "tsearch_beat", "meter"} <= modes
+        # results are merged per condition under a lock: a second writer adds, never overwrites
+        from scripts.evaluate_pieces import merge_results
+        merged = merge_results(tmp / "q" / "eval_pieces_best.json", {"periscope": {"none": {"note_f1": 0.1}}})
+        assert set(merged["clean"]) >= {"none", "guarded", "tsearch"} and merged["periscope"]["none"]["note_f1"] == 0.1
+        assert not (tmp / "q" / "eval_pieces_best.json.tmp").exists()
         # the same request on all performances is not the same result: computed again
         code, text = run_plan("--run", "q", "--runs-dir", str(tmp), "--conditions", "clean", "--modes", "none")
         assert code == plan.MISSING and text == "clean: none", text

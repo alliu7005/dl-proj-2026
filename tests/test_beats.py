@@ -26,7 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from src.beats import (BEAT_FEATURES, DOWN, EXTRA, FACTORS, HALF, N_BEAT_FEATURES, OTHER, PHASE_BINS,  # noqa: E402
                        BeatNoise, bar_classes, bar_length, beat_features, beat_layout, octave_stretch,
-                       beats_path, compare, f_measure, fit_noise, load_beats, merge_performance, save_beats)
+                       beats_path, compare, f_measure, fit_noise, grid_agreement, load_beats, merge_performance,
+                       save_beats)
 
 D = ROOT / "data" / "processed"
 ANN = ROOT / "data" / "raw" / "asap_bd" / "asap_annotations.json"
@@ -300,6 +301,47 @@ def test_noise_matches_tracker():
     assert abs(share(sim) - share(real)) < 0.05, (share(sim), share(real))
 
 
+def test_grid_agreement():
+    """tsearch_beat's score: a reading whose written beats fall on the tracked beats scores higher
+    than one at the wrong beat level (the same notes written in eighths) or with the wrong bar
+    length (3/4: right beats, wrong downbeats)."""
+    n = 32
+    on = 0.5 * np.arange(n)                                  # quarter notes, 120 bpm, 8 bars of 4/4
+    pitch = 60 + (np.arange(n) * 5) % 12
+    bt, bd = on.copy(), np.arange(n) % 4 == 0                # what the tracker found
+
+    def tokens(ts, per_bar, step):
+        toks, k = [], 0
+        while k < n:
+            toks += ["bar", ts]
+            for b in range(per_bar):
+                if k >= n:
+                    break
+                q = b * step
+                toks += [f"pos_{int(q)}"] + ([f"sub_{q - int(q):g}".replace("0.5", "1/2")] if q != int(q) else [])
+                toks += [f"p_{pitch[k]}", "d_1/2" if step < 1 else "d_1"]
+                k += 1
+        return toks
+    right = grid_agreement(on, pitch, tokens("ts_4/4", 4, 1.0), bt, bd)
+    eighths = grid_agreement(on, pitch, tokens("ts_4/4", 8, 0.5), bt, bd)
+    three = grid_agreement(on, pitch, tokens("ts_3/4", 3, 1.0), bt, bd)
+    assert right > 1.45 and right > three > eighths, (right, three, eighths)
+    assert abs(three - (1.0 + 0.5 * three_down(n))) < 0.1, three
+    # without tracked downbeats only the beats count (every reading is judged the same way)
+    assert grid_agreement(on, pitch, tokens("ts_3/4", 3, 1.0), bt, np.zeros(n, bool)) > 0.95
+    # nothing to tell: no beats, too few notes, notes before the window only
+    assert grid_agreement(on, pitch, tokens("ts_4/4", 4, 1.0), np.zeros(0), np.zeros(0, bool)) is None
+    assert grid_agreement(on[:2], pitch[:2], tokens("ts_4/4", 4, 1.0)[:8], bt, bd) is None
+    assert grid_agreement(on - 100, pitch, tokens("ts_4/4", 4, 1.0), bt, bd) is None
+
+
+def three_down(n):
+    """Downbeat F of bar lines every 3 quarters against true ones every 4, over n quarters."""
+    true = set(range(0, n, 4))
+    est = set(range(0, n, 3))
+    return 2 * len(true & est) / (len(true) + len(est))
+
+
 def test_storage():
     with tempfile.TemporaryDirectory() as tmp:
         b = {"a/x.mid": grid(10), "b/y.mid": grid(3, t0=5.0), "c/empty.mid": (np.zeros(0), np.zeros(0, bool))}
@@ -428,11 +470,13 @@ def test_training_with_beats():
             "--warmup", "2", "--eval-every", "3", "--eval-loss-windows", "8", "--eval-decode-windows", "1",
             "--workers", "0", "--batch-tokens", "2048", "--max-steps", "6", "--patience", "0"]
     try:
-        r = subprocess.run(base + ["--beats", "--beat-noise", "none"], cwd=ROOT, capture_output=True, text=True)
+        r = subprocess.run(base + ["--beats", "--beat-noise", "none", "--transcribed-beats", "gt"], cwd=ROOT,
+                           capture_output=True, text=True)
         assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-2500:]
         cfg = json.loads((run / "config.json").read_text())
         assert cfg["model"]["beat_features"] is True and cfg["model"]["n_features"] == 15
-        assert cfg["data"]["beats"]["noise"] == "none"
+        assert cfg["data"]["beats"]["noise"] == "none" and cfg["data"]["beats"]["train_transcribed"] == "gt"
+        assert cfg["args"]["transcribed_beats"] == "gt"
         ck = torch.load(run / "last.pt", map_location="cpu", weights_only=False)
         ck["phase"], ck["step"] = "train", 3
         torch.save(ck, run / "last.pt")
@@ -488,12 +532,15 @@ def test_evaluation_conditions():
         (tmp / "b" / "config.json").write_text(json.dumps({"model": cfg}))
         BeatNoise().to_json(tmp / "noise.json")
         r = subprocess.run([sys.executable, "scripts/evaluate_pieces.py", "--run", "b", "--runs-dir", str(tmp),
-                            "--device", "cpu", "--normal-priority", "--limit-perfs", "1", "--modes", "none,guarded,piece",
+                            "--device", "cpu", "--normal-priority", "--limit-perfs", "1", "--modes",
+                            "none,guarded,piece,tsearch_beat",
                             "--conditions", "clean,clean_gt_beats,real", "--beat-noise", str(tmp / "noise.json")],
                            cwd=ROOT, capture_output=True, text=True)
         assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-3000:]
         res = json.loads((tmp / "b" / "eval_pieces_best.json").read_text())
-        assert set(res) >= {"clean", "clean_gt_beats"} and set(res["clean"]) == {"none", "guarded", "piece"}
+        assert set(res) >= {"clean", "clean_gt_beats"} and set(res["clean"]) == {"none", "guarded", "piece",
+                                                                                 "tsearch_beat"}
+        assert 0.0 <= res["clean_gt_beats"]["tsearch_beat"]["ts_switch_rate"] <= 1.0
         assert res["clean"]["piece"]["guard_margin"] == 0.0 and "meter_fix_rate" in res["clean"]["piece"]
         if not (D / "test_transcribed" / "beats_tracked.npz").exists():
             assert "skip real:" in r.stdout, r.stdout

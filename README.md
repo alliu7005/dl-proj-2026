@@ -546,9 +546,15 @@ checkpoint (so evaluation and the demo follow it automatically):
 | `none` | nothing | robustness check |
 | `guarded` | chained, with degenerate windows redone without context (below) | **the system's real performance** (the demo's default) |
 | `meter` | guarded, plus consistent time signatures along each piece (below) | guarded, with the meter fixed |
+| `piece` | meter, with one time signature per piece unless it changes for a long stretch | |
+| `ts_true` | guarded with each window's true time signature forced (below) | the most a time-signature choice can give |
+| `tsearch` | each piece decoded under its 3 likeliest time signatures, keeping the most probable (below) | |
+| `tsearch_beat` | the same candidates, keeping the one whose beats agree with the tracked beats (below) | |
 
-All five score each window against its ground truth with `src/eval/metrics.py`, so they compare
-directly with the baselines. `--musicxml N` writes the stitched prediction and ground truth of the
+All modes score each window against its ground truth with `src/eval/metrics.py`, so they compare
+directly with the baselines. Results are merged into `eval_pieces_best.json` after every test set
+(under a lock: `PER_CONDITION=1 bash pace/reevaluate.sh <run>` runs one job per test set, and a job cut
+off by its time limit keeps the test sets it finished). `--musicxml N` writes the stitched prediction and ground truth of the
 first N pieces as MusicXML (for figures and for MUSTER / MV2H). Running the script with a subset of
 `--modes` adds those modes to an earlier evaluation's files instead of replacing them.
 
@@ -625,6 +631,42 @@ its own `ts_4/4` right after a forced `ts_3/4`). The whole piece is then decoded
 so the windows after a corrected one see the corrected context. Meter mode reuses guarded mode's
 outputs as its first pass and costs nothing when no window needs fixing; the evaluation reports the
 share of windows corrected (`meter_fix_rate`) and `ts_acc`.
+
+**Time-signature search** (`--modes ts_true,tsearch,tsearch_beat`, on by default; `pace/tsearch.sh`).
+Without the true context the best model gets only 33-41% of its windows' time signatures right,
+even when it is given the annotated beats and downbeats, and with the true context 98%: onset F1
+then roughly doubles (real: 0.319 with no context, 0.577 with the true one). The model picks a
+window's time signature as its first token, by argmax, before it has written a single note, and a
+wrong one mis-sizes every bar after it. Meter mode only fixes isolated windows; a piece whose
+windows mostly guess wrong stays wrong (`piece` mode does not help: the majority is wrong too).
+
+- `tsearch`: each piece is decoded once per candidate time signature, forced in every window
+  (guarded decoding, so degenerate windows still fall back), and the candidate the model finds most
+  probable is kept: the mean log-probability of the tokens it generated over the whole piece
+  (`generate(return_logp=True)`, `decoding.Scored`). The candidates are the piece's 3 most frequent
+  time signatures in its guarded and no-context outputs, topped up with the commonest ones of the
+  training targets (`decoding.FALLBACK_TS`: 4/4, 3/4, 6/8, 2/4, 12/8, 2/2). All pieces' candidate
+  ranks share the batches, so it costs 3 guarded decodings.
+- `tsearch_beat`: the same candidates, keeping the one whose written beats agree best with the
+  condition's beats (`src/beats.py grid_agreement`): the window's notes are aligned to the
+  performed ones (`window_grid`), which times its written beats (`beat_layout`: a 6/8 reading puts
+  them on dotted quarters, a 3/4 one on quarters) and bar lines; score = beat F-measure against the
+  tracked beats + 0.5 x downbeat F-measure (bar lines against the tracked downbeats), averaged over
+  the piece's windows. The model's probability breaks ties and decides where there are no beats
+  (models trained without them, MIDI input).
+- `ts_true` (diagnostic): guarded with each window's true time signature forced, the most any choice
+  of time signature can give.
+
+Results report `ts_switch_rate`, the share of windows whose time signature the mode changed from
+guarded decoding. The demo offers both searches ("Meter search", "Meter search by beats");
+`tests/test_decoding.py` checks the search with a stand-in model that scores its outputs.
+
+**Tried and dropped: regularizing the tracker's downbeats.** A metrical HMM over Beat This!'s beats
+(states: bar length 2 / 3 / 4 and position in the bar; emissions: the fitted downbeat rates per
+position; transitions allowing missed / extra beats and meter changes) makes its downbeats regular,
+but never more accurate: downbeat F on train / val _transcribed 0.646 raw, 0.54-0.64 over 12
+settings. Beat This! marks 38% of half-bar beats as downbeats, so the regular reading it settles on
+is often the half bar.
 
 ### Beats as an input (`--beats`)
 
@@ -824,6 +866,13 @@ comparable with the runs above.)
   onset F1 in 22 / 68 cases (mean -0.007) and on bar F1 in 27 / 68 (mean -0.003); time signature
   accuracy is a wash (38 / 68, mean +0.009). Meter stays the default.
 
+**Next: the time-signature batch (`pace/tsearch.sh`).** The decoding modes above on the two best
+models (one job per test set), and three runs on the best recipe: `sf_base_reg_cab_s1` (another
+seed: how much a single run varies, which every comparison above needs), `sf_base_reg_cabx` (exact
+beats everywhere in training, `--beat-noise none --transcribed-beats gt`: can the model use beats
+when they are right? its `real_gt_beats` against `sf_base_reg_cab`'s) and `sf_base_reg_cab_c128`
+(128 / 64 context notes: more bars to read the meter from).
+
 `real_unseen_audio` (the 3 `real` performances whose audio Transkun never trained on, 62 windows) is
 reported in `outputs/compare/` but too small to decide anything (time signature accuracy is 0.000 for
 6 runs, and 0.000 to 0.500 between runs).
@@ -836,7 +885,8 @@ decoding: each window's context is the model's own previous output, and degenera
 redone without it; plus time signatures kept consistent along the piece; the page can also switch
 to guarded only, plain chained or no context), and the page shows the engraved score with playback
 and downloads. The default checkpoint is the best model, `sf_base_reg_cab`, which also takes the
-beats Beat This! finds in the audio.
+beats Beat This! finds in the audio. The page also offers the time-signature searches ("Meter
+search": 3 decodings of the piece, so about 3 times slower).
 
 ```bash
 pip install fastapi uvicorn python-multipart        # once (also listed in environment.yml)
@@ -1025,14 +1075,17 @@ scripts/track_beats.py           Beat This! on the MAESTRO audio (held-out folds
 scripts/fit_beat_noise.py        tracker vs ground truth -> configs/beat_noise.json
 scripts/compare_runs.py          tables of every evaluated run -> outputs/compare/{summary,margins}.md, results.csv
 pace/train.sbatch                PACE GPU job: train + evaluate
+pace/reevaluate.sh               evaluate finished runs: what is missing, one job per run or per test set
+pace/beats.sh                    the beat batch (ground-truth beats, Beat This!, 3 beat runs)
+pace/tsearch.sh                  the time-signature batch (search modes on the best models, 3 runs)
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
-tests/test_decoding.py           chained / guarded decoding with a stand-in model
+tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model
 tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
 tests/test_context_notes.py      context notes: exact neighbours, unchanged window notes, both models
 tests/test_metrical.py           metrical labels: synthetic precision / recall, coverage, the aux head
 tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume, status.json, atomic saves
 tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --only-missing end to end
-tests/test_reevaluate.py         pace/reevaluate.sh: what it submits / skips (stand-in squeue / sbatch)
+tests/test_reevaluate.py         pace/reevaluate.sh (per run / per test set), pace/beats.sh, pace/tsearch.sh: what they submit
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
 tests/test_beats.py              beats vs ASAP annotations, features, tracker errors (bar classes, octave stretches, profiles, fit, vs Beat This!), tracker folds, train / eval / demo
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes

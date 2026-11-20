@@ -202,6 +202,10 @@ def main():
                     help="tracker errors to simulate (scripts/fit_beat_noise.py); 'none' = exact beats")
     ap.add_argument("--beat-dropout", type=float, default=0.15,
                     help="share of training windows without beats (input without a tracker)")
+    ap.add_argument("--transcribed-beats", default="tracked", choices=["tracked", "gt"],
+                    help="beats of the real-transcription windows: the tracker's own (beats_tracked.npz), or the "
+                         "ground truth with --beat-noise like the clean data (with --beat-noise none: exact "
+                         "beats everywhere, the ceiling of what beats can give)")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--eval-every", type=int, default=2000)
     ap.add_argument("--eval-loss-windows", type=int, default=400)
@@ -243,6 +247,8 @@ def main():
         if beats_on and beat_rec:  # the same tracker noise and dropout as when it started
             args.beat_noise, args.beat_dropout = beat_rec.get("noise", args.beat_noise), beat_rec.get("dropout", args.beat_dropout)
             recorded_noise = beat_rec.get("noise_values")
+            if beat_rec.get("train_transcribed") in ("tracked", "gt"):  # kept even if the file is gone now
+                args.transcribed_beats = beat_rec["train_transcribed"]
     n_ctx = notes_ctx["context_before"] + notes_ctx["context_after"]
     notes_ctx_m = {**notes_ctx, "metrical": aux_on}  # dataset arguments
     # beats: ground truth + fitted tracker noise; the real transcriptions use the tracker's own beats
@@ -262,13 +268,16 @@ def main():
                if recorded_noise is not None else f"tracker errors from {args.beat_noise}")
         print(f"beats: {src}" + ("" if bn is None else f" (fitted: {bn.fitted}; p_double {bn.p_double:.3f}, "
                                  f"miss {bn.miss:.3f}, down_hit {bn.down_hit:.3f})"), flush=True)
-        for split in ("train", "val"):
+        gt_splits = ["train", "val"] + ([s for s in ("train_transcribed", "val_transcribed") if has_split(s)]
+                                        if args.transcribed_beats == "gt" else [])
+        for split in gt_splits:
             if not beats_path(D / split, "gt").exists():
                 raise SystemExit(f"{beats_path(D / split, 'gt')} missing: run scripts/build_beats.py first")
 
         def split_beats(split, dropout):
-            """Tracked beats where they exist (real errors already), else ground truth + noise."""
-            if beats_path(D / split, "tracked").exists():
+            """Tracked beats where they exist (real errors already), else ground truth + noise;
+            the ground truth + noise always with --transcribed-beats gt."""
+            if args.transcribed_beats == "tracked" and beats_path(D / split, "tracked").exists():
                 return {"beats": "tracked", "beat_noise": None, "beat_dropout": dropout}
             return {"beats": "gt", "beat_noise": bn, "beat_dropout": dropout}
         beat_args = {"beats": "gt", "beat_noise": bn, "beat_dropout": args.beat_dropout}

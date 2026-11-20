@@ -7,8 +7,9 @@ Reads outputs/runs/<run>/eval_pieces_best.json (scripts/evaluate_pieces.py), con
 log.csv, and writes to outputs/compare/:
 
   summary.md    the runs (size, settings, validation loss, how training ended), then per test set
-                the system output (meter mode: what the demo runs) and onset / bar F1 in every
-                context mode. Bold = best in its column.
+                the system output (meter mode: what the demo runs), onset / bar F1 in every
+                context mode, and the time-signature search (meter vs ts_true vs tsearch /
+                tsearch_beat: onset F1, bar F1, time signature). Bold = best in its column.
   margins.md    the guard-margin sweeps (runs evaluated with --extra-margins), per test set
   results.csv   every number: one row per run, test set and mode, for a spreadsheet
 
@@ -35,6 +36,12 @@ CONDITIONS = [  # (key in the results, description)
 ]
 MODES = ["oracle", "chained", "none", "guarded", "meter", "piece"]
 SYSTEM = "meter"  # the mode the demo runs (guarded + time-signature consistency)
+TS_MODES = ["meter", "ts_true", "tsearch", "tsearch_beat"]  # the time-signature search table
+TS_HELP = ("ts_true = guarded with each window's true time signature forced (the most a time-signature "
+           "choice can give); tsearch = the whole piece decoded under its 3 likeliest time signatures, keeping "
+           "the one the model finds most probable; tsearch_beat = the same candidates, keeping the one whose "
+           "written beats agree best with the tracked beats (models trained with beats; otherwise as tsearch); "
+           "changed = share of windows whose time signature tsearch changed from guarded decoding")
 METRICS = [("note_f1", "note F1"), ("onset_f1", "onset F1"), ("onset_shift_f1", "onset-shift F1"),
            ("duration_acc", "duration"), ("staff_acc", "staff"), ("bar_f1", "bar F1"), ("ts_acc", "time sig")]
 MODE_HELP = ("oracle = the true score before each window (upper bound); chained = the model's own "
@@ -136,7 +143,20 @@ def run_info(d):
         "epochs": "{:.1f}".format(last / spe) if last is not None and spe else DASH,
         "ended": ended,
         "real_train": DASH if tt is None else ("yes" if tt else "no"),
+        "beats": beats_label(model, cfg.get("data", {}).get("beats") or {}),
+        "seed": args.get("seed", 0),
     }
+
+
+def beats_label(model, rec):
+    """How a run was given beats: - (none), tracker errors (simulated on the ground truth, the
+    tracker's own beats on the real transcriptions), or exact (the ground truth; "exact, all" when
+    the real transcriptions got the ground truth too)."""
+    if not model.get("beat_features"):
+        return DASH
+    if rec.get("noise") == "none":
+        return "exact, all" if rec.get("train_transcribed") == "gt" else "exact"
+    return "tracker errors"
 
 
 def find_runs(runs_dir, only, exclude):
@@ -157,12 +177,12 @@ def summary(runs, res, info, now):
            "better, except validation loss. **Bold** = best in its column; {} = not evaluated."
            .format(now, DASH), "",
            "## Runs", ""]
-    hdr = ["run", "model", "params", "context notes", "aux head", "dropout", "wd", "lr", "best val loss",
-           "epochs", "ended", "trained on real transcriptions"]
-    rows = [[r, info[r]["model"], info[r]["params"], info[r]["context"], info[r]["aux"], info[r]["dropout"],
-             info[r]["wd"], info[r]["lr"], num(info[r]["best_val"], digits=4),
+    hdr = ["run", "model", "params", "context notes", "aux head", "beats", "dropout", "wd", "lr", "seed",
+           "best val loss", "epochs", "ended", "trained on real transcriptions"]
+    rows = [[r, info[r]["model"], info[r]["params"], info[r]["context"], info[r]["aux"], info[r]["beats"],
+             info[r]["dropout"], info[r]["wd"], info[r]["lr"], info[r]["seed"], num(info[r]["best_val"], digits=4),
              info[r]["epochs"], info[r]["ended"], info[r]["real_train"]] for r in runs]
-    out += [table(hdr, rows, {8: "min"}), ""]
+    out += [table(hdr, rows, {10: "min"}), ""]
 
     out += ["## System output ({} mode) per test set".format(SYSTEM), "",
             "The decoding the demo runs. fallback = share of windows where the no-context output was kept; "
@@ -190,6 +210,18 @@ def summary(runs, res, info, now):
                 + [num(res[r][cond].get(m, {}).get("bar_f1")) for m in MODES] for r in have]
         out += ["### {}: {}".format(cond, desc), "",
                 table(hdr, rows, {k + 1: "max" for k in range(2 * len(MODES))}), ""]
+
+    out += ["## Time-signature search per test set", "", TS_HELP + ".", ""]
+    keys = [("onset_f1", "onset"), ("bar_f1", "bar"), ("ts_acc", "ts")]
+    for cond, desc in CONDITIONS:
+        have = [r for r in runs if any(m in res[r].get(cond, {}) for m in TS_MODES[1:])]
+        if not have:
+            continue
+        hdr = ["run"] + ["{} {}".format(label, m) for _, label in keys for m in TS_MODES] + ["changed"]
+        rows = [[r] + [num(res[r][cond].get(m, {}).get(k)) for k, _ in keys for m in TS_MODES]
+                + [num(res[r][cond].get("tsearch", {}).get("ts_switch_rate"), True)] for r in have]
+        out += ["### {}: {}".format(cond, desc), "",
+                table(hdr, rows, {k + 1: "max" for k in range(len(keys) * len(TS_MODES))}), ""]
     return "\n".join(out)
 
 

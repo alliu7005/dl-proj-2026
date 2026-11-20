@@ -14,6 +14,10 @@
 #                                                    # since PACE caps a user's running walltime x GPUs)
 #   AFTER=after:123:124 bash pace/reevaluate.sh      # a Slurm dependency for every job (e.g. start only
 #                                                    # once these training jobs have started)
+#   PER_CONDITION=1 bash pace/reevaluate.sh s2s      # one job per test set still missing results
+#                                                    # (eval_<run>@<condition>), for long evaluations
+#                                                    # such as the time-signature search; default
+#                                                    # walltime 1.5 h under 15M parameters, else 3 h
 #
 # For each run, `python3 -m src.eval.plan` (standard library only) lists what is missing from
 # outputs/runs/<run>/eval_pieces_best.json for the requested conditions and modes: a result counts
@@ -22,7 +26,8 @@
 # skipped when nothing is missing, when its training has not finished (status.json, written by
 # scripts/train_model.py; a training job's best.pt exists long before the run is done), or when an
 # evaluation of it is already queued. Submitted jobs get --only-missing, so they compute exactly
-# what was listed and merge it into the run's results.
+# what was listed and merge it into the run's results (after each condition, under a lock, so
+# several jobs of one run can add theirs).
 set -euo pipefail
 GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}  # node features: whichever of these GPUs frees up first
 G=(--gres=gpu:1 "--constraint=$GPUS")
@@ -30,6 +35,11 @@ ARGS=${ARGS:-}
 TIME=${TIME:-}
 FORCE=${FORCE:-0}
 AFTER=${AFTER:-}
+PER_CONDITION=${PER_CONDITION:-0}
+if [ "$FORCE" = 1 ] && [ "$PER_CONDITION" = 1 ]; then  # FORCE recomputes what exists: no list of conditions
+  echo "FORCE=1 and PER_CONDITION=1 do not combine: name the conditions in ARGS (--conditions ...) instead"
+  exit 1
+fi
 DEP=()
 [ -n "$AFTER" ] && DEP=("--dependency=$AFTER")
 RUNS=("$@")
@@ -46,10 +56,13 @@ for r in "${RUNS[@]}"; do
     echo "  skip $r: outputs/runs/$r/best.pt not found"
     continue
   fi
-  # two evaluations of one run would both rewrite its result files: never queue a second one
-  busy=$(squeue -h -u "$USER" -o "%i %j" | awk -v a="eval_$r" -v b="guard_$r" '$2 == a || $2 == b {print $1}')
-  if [ -n "$busy" ]; then
-    echo "  skip $r: already being evaluated (job $busy)"
+  # an evaluation of a whole run rewrites all of its results: never queue a second one; one job
+  # per condition (PER_CONDITION=1) only adds its own, so other conditions can still be queued
+  queued=$(squeue -h -u "$USER" -o "%i %j")
+  whole=$(echo "$queued" | awk -v a="eval_$r" -v b="guard_$r" '$2 == a || $2 == b {print $1}' | tr '\n' ' ' | sed 's/ $//')
+  parts=$(echo "$queued" | awk -v a="eval_$r@" 'index($2, a) == 1 {print $1}' | tr '\n' ' ' | sed 's/ $//')
+  if [ -n "$whole" ] || { [ -n "$parts" ] && [ "$PER_CONDITION" != 1 ]; }; then
+    echo "  skip $r: already being evaluated (job ${whole:-$parts})"
     continue
   fi
   # what is missing (exit 0), nothing (3), training not finished (4); $ARGS unquoted on purpose:
@@ -69,10 +82,33 @@ for r in "${RUNS[@]}"; do
   if [ -z "$t" ]; then  # by model size (config.json "params"; unknown -> the larger limit)
     params=$(python3 -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("params", 0)))' \
              "outputs/runs/$r/config.json" 2>/dev/null || echo 0)
-    if [ "$params" -gt 0 ] && [ "$params" -lt 15000000 ]; then t=2:30:00; else t=4:00:00; fi
+    small=0
+    if [ "$params" -gt 0 ] && [ "$params" -lt 15000000 ]; then small=1; fi
+    if [ "$PER_CONDITION" = 1 ]; then
+      if [ "$small" = 1 ]; then t=1:30:00; else t=3:00:00; fi
+    else
+      if [ "$small" = 1 ]; then t=2:30:00; else t=4:00:00; fi
+    fi
   fi
   args="$ARGS"
   [ "$FORCE" = 1 ] || args="$args --only-missing"
+  if [ "$PER_CONDITION" = 1 ]; then  # one job per condition still missing something
+    while IFS= read -r line; do
+      c=${line%%:*}
+      [ -n "$c" ] || continue
+      job=$(echo "$queued" | awk -v n="eval_$r@$c" '$2 == n {print $1}' | head -1)
+      if [ -n "$job" ]; then
+        echo "  skip $r@$c: already being evaluated (job $job)"
+        continue
+      fi
+      # $ARGS may name conditions too: the last --conditions wins (argparse), so this one
+      id=$(NAME="$r" ARGS="$args --conditions $c" sbatch --parsable "${G[@]}" ${DEP[@]+"${DEP[@]}"} -t "$t" \
+           -J "eval_$r@$c" --export=ALL pace/evaluate.sbatch)
+      submitted=$((submitted + 1))
+      echo "  $r@$c: job $id  ($t) computes: ${line#*: }"
+    done <<< "$todo"
+    continue
+  fi
   # NAME / ARGS travel as environment variables (--export=ALL): the --export=ALL,ARGS=... form
   # splits on commas, which would break arguments like --modes guarded,meter
   id=$(NAME="$r" ARGS="$args" sbatch --parsable "${G[@]}" ${DEP[@]+"${DEP[@]}"} -t "$t" -J "eval_$r" --export=ALL pace/evaluate.sbatch)

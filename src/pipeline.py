@@ -19,6 +19,10 @@ per-window output budget. Modes:
            for a stretch as long as the rest
   chained  the model's own previous output as context, unguarded
   none     every window decoded on its own
+  tsearch  the piece decoded under its 3 likeliest time signatures (forced in every window, guarded),
+           keeping the one the model finds most probable (decoding.decode_pieces_tsearch)
+  tsearch_beat  the same candidates, keeping the one whose written beats agree best with Beat This!'s
+           beats (src/beats.py grid_agreement); as tsearch without beats (MIDI input, non-beat model)
 
 Beats: a model trained with beat features (src/beats.py) gets the beats of the recording from
 Beat This! (scripts/track_beats.py Tracker, checkpoint final0) after transcription. MIDI input, or
@@ -37,8 +41,9 @@ import numpy as np
 import torch
 
 from .dataset import assemble_notes, note_features
-from .beats import beat_features, window_beats
-from .decoding import DEFAULT_GUARD_MARGIN, decode_pieces, decode_pieces_meter, max_new_tokens
+from .beats import beat_features, grid_agreement, window_beats
+from .decoding import (DEFAULT_GUARD_MARGIN, Scored, decode_pieces, decode_pieces_meter, decode_pieces_tsearch,
+                       max_new_tokens)
 from .eval.plan import PIECE_MAX_BLIP
 from .preprocessing.performance import OFFSET, ONSET, load_performance
 from .preprocessing.segment import SegmentConfig, cut_windows
@@ -47,7 +52,7 @@ from .scoreformer import load_model
 
 AUDIO_EXT = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".aiff", ".aif"}
 MIDI_EXT = {".mid", ".midi"}
-MODES = ("meter", "piece", "guarded", "chained", "none")  # the first is the default
+MODES = ("meter", "piece", "tsearch", "tsearch_beat", "guarded", "chained", "none")  # the first is the default
 GUARD_MARGIN = DEFAULT_GUARD_MARGIN  # the same default as scripts/evaluate_pieces.py
 CARRY_MIN_SEC = 0.125  # training uses 1/4 quarter note past the cut; ~0.125 s at 120 bpm
 
@@ -196,9 +201,10 @@ class ScorePipeline:
 
     @torch.no_grad()
     def decode_window(self, feats: torch.Tensor, prefix: torch.Tensor, n_notes: int | None = None,
-                      ban_ts: bool = False) -> list[str]:
+                      ban_ts: bool = False) -> Scored:
         """``n_notes``: the window's own notes (without context notes), for the output budget.
-        ``ban_ts``: generate no time signature (the window's own was forced in the prefix)."""
+        ``ban_ts``: generate no time signature (the window's own was forced in the prefix). The
+        output carries the log-probability of its generated tokens (tsearch ranks by it)."""
         notes = feats[None].to(self.device)
         mask = torch.ones(1, len(feats), dtype=torch.bool, device=self.device)
         max_new = max_new_tokens(len(feats) if n_notes is None else n_notes, len(prefix), self.cfg.max_tokens)
@@ -207,26 +213,46 @@ class ScorePipeline:
             banned = torch.zeros(1, len(self.vocab.itos), dtype=torch.bool)
             banned[0, [i for i, t in enumerate(self.vocab.itos) if t.startswith("ts_")]] = True
         with torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.amp):
-            ids = self.model.generate(notes, mask, [prefix], self.eos, max_new=max_new, banned=banned)[0]
-        ids = ids.tolist() if torch.is_tensor(ids) else list(ids)
-        return self.vocab.decode(ids[:max_new])
+            ids, lps = self.model.generate(notes, mask, [prefix], self.eos, max_new=max_new, banned=banned,
+                                           return_logp=True)
+        ids, lp = list(ids[0]), lps[0]
+        lp = lp[:max_new] if len(ids) > max_new else lp
+        return Scored(self.vocab.decode(ids[:max_new]), sum(lp), len(lp))
 
     def decode(self, windows: list[dict], mode: str = MODES[0], progress: Progress = _noop,
                guard_margin: float = GUARD_MARGIN) -> tuple[list[str], dict]:
         """Decode a piece window by window (see the module docstring for the modes). Returns the
         stitched tokens and {"guard_fallbacks": windows replaced by their no-context output,
-        "meter_fixes": windows whose time signature meter mode corrected}."""
+        "meter_fixes": windows whose time signature meter mode corrected, and for tsearch modes
+        "time_signature": the one kept and "ts_candidates": the ones tried}."""
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
 
         def decode(ws, contexts, starts):
-            return [list(s) + self.decode_window(self.features(w), self.prefix(c, s), len(w["notes"]),
-                                                 ban_ts=any(t.startswith("ts_") for t in s))
-                    for w, c, s in zip(ws, contexts, starts)]
+            out = []
+            for w, c, s in zip(ws, contexts, starts):
+                o = self.decode_window(self.features(w), self.prefix(c, s), len(w["notes"]),
+                                       ban_ts=any(t.startswith("ts_") for t in s))
+                out.append(Scored(list(s) + o, o.logp, o.n))
+            return out
 
         kw = dict(contiguous=(lambda prev, w: mode != "none"), pitches=lambda w: w["notes"][:, 0].tolist(),
                   progress=lambda j, total: progress("score", j / total, f"window {j} of {total}"))
         forced = {}
+        if mode in ("tsearch", "tsearch_beat"):
+            alone = {}
+            first = decode_pieces({0: windows}, decode, guard_margin=guard_margin, alone=alone, **kw)
+
+            def beat_score(w, tokens):
+                if len(w.get("beat_t", ())) < 2:
+                    return None
+                return grid_agreement(w["notes"][:, 1], w["notes"][:, 0], tokens, w["beat_t"], w["beat_d"])
+            res, cands = decode_pieces_tsearch({0: windows}, decode, guard_margin=guard_margin, first_pass=first,
+                                               alone=alone, beat_score=beat_score, **kw)
+            _, history, fallbacks, chosen = res[mode]
+            return history[0], {"guard_fallbacks": len(fallbacks), "meter_fixes": 0,
+                                "time_signature": chosen[0].replace("ts_", ""),
+                                "ts_candidates": [c.replace("ts_", "") for c in cands[0]]}
         if mode in ("meter", "piece"):
             _, history, fallbacks, forced = decode_pieces_meter(
                 {0: windows}, decode, guard_margin=guard_margin,

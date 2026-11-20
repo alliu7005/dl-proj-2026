@@ -283,12 +283,14 @@ class Scoreformer(nn.Module):
     # ---- inference
     @torch.no_grad()
     def generate(self, notes, note_mask, prefix: list[torch.Tensor], eos_id: int, max_new: int = 1200,
-                 banned: torch.Tensor | None = None):
+                 banned: torch.Tensor | None = None, return_logp: bool = False):
         """Greedy decoding with a KV cache. ``prefix[b]`` = <bos> [prompt <sep>] for item b.
         Prefixes are left-padded; padded positions are masked as keys and rotary positions count
         real tokens only. ``banned``: optional bool [B, vocab] of tokens row b may not generate
         (e.g. a second time signature after a forced one). Returns, per item, the generated ids
-        after the prefix (without <eos>)."""
+        after the prefix (without <eos>); with ``return_logp`` also, per item, the log-probability
+        of each generated token under the (ban-renormalized) distribution it was drawn from: one
+        per id, plus a last one for <eos> when the item ended (for scoring candidate outputs)."""
         B, dev = len(prefix), notes.device
         ban = banned.to(dev) if banned is not None else None
         memory, mm = self.encode(notes, note_mask)
@@ -311,6 +313,7 @@ class Scoreformer(nn.Module):
         logits = self.head(self.out_norm(h[:, -1]))
         max_new = max(0, min(max_new, self.cfg.max_tokens - int(valid.sum(1).max())))
         out = torch.zeros(B, max_new, dtype=torch.long, device=dev)
+        lp = torch.zeros(B, max_new, dtype=torch.float32, device=dev) if return_logp else None
         done = torch.zeros(B, dtype=torch.bool, device=dev)
         cur = pos[:, -1]
         n_out = 0
@@ -318,6 +321,8 @@ class Scoreformer(nn.Module):
             if ban is not None:
                 logits = logits.masked_fill(ban, float("-inf"))
             nxt = torch.where(done, torch.zeros_like(done, dtype=torch.long), logits.argmax(-1))
+            if lp is not None:
+                lp[:, step] = logits.float().log_softmax(-1).gather(1, nxt[:, None])[:, 0]
             out[:, step] = nxt
             n_out = step + 1
             done |= nxt == eos_id
@@ -331,11 +336,7 @@ class Scoreformer(nn.Module):
             for i, (layer, kv) in enumerate(zip(self.dec, mem_kv)):
                 h, caches[i] = layer(h, cos, sin, kv, mm, self_mask=sm, cache=caches[i])
             logits = self.head(self.out_norm(h[:, -1]))
-        res = []
-        for b in range(B):
-            g = out[b, :n_out].tolist()
-            res.append(g[:g.index(eos_id)] if eos_id in g else g)
-        return res
+        return finish_generation(out, lp, n_out, eos_id)
 
     @torch.no_grad()
     def generate_naive(self, notes, note_mask, prefix: list[torch.Tensor], eos_id: int, max_new: int = 1200):
@@ -352,6 +353,19 @@ class Scoreformer(nn.Module):
                 seq = torch.cat([seq, torch.tensor([[nxt]], device=seq.device)], 1)
             res.append(gen)
         return res
+
+
+def finish_generation(out: torch.Tensor, lp: torch.Tensor | None, n_out: int, eos_id: int):
+    """Per row: the generated ids up to (not including) <eos>; with ``lp`` (per-step log-probs)
+    also their log-probs, plus the <eos> one when the row ended. Shared by both architectures."""
+    res, lps = [], []
+    for b in range(out.shape[0]):
+        g = out[b, :n_out].tolist()
+        n = g.index(eos_id) if eos_id in g else len(g)
+        res.append(g[:n])
+        if lp is not None:
+            lps.append(lp[b, :min(n + 1, n_out)].tolist())
+    return (res, lps) if lp is not None else res
 
 
 # ---------------------------------------------------------------------------------------------

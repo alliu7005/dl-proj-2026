@@ -481,6 +481,39 @@ def f_measure(ref: np.ndarray, est: np.ndarray, tol: float = MATCH_TOL) -> float
     return 2 * m / (len(ref) + len(est))
 
 
+DOWNBEAT_WEIGHT = 0.5  # grid_agreement: the tracker's downbeats are less reliable than its beats
+
+
+def grid_agreement(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str], beat_t: np.ndarray,
+                   beat_d: np.ndarray) -> float | None:
+    """How well a decoded window's beats agree with the beats the tracker found: the window's
+    written beats (``beat_layout`` of each bar's time signature, so a 6/8 reading puts its beats
+    on dotted quarters and a 3/4 one on quarters) timed through the alignment of its notes to the
+    performed ones (``window_grid``), against the tracked beats, over the span of the window's
+    notes: beat F-measure + DOWNBEAT_WEIGHT x downbeat F-measure (bar lines vs tracked downbeats).
+    None when it cannot be told (no beats there, too few aligned notes). Window frame seconds;
+    ``onsets`` / ``pitches`` = the window's own notes (carried-over ones have onsets < 0)."""
+    beat_t, beat_d = np.asarray(beat_t, np.float64), np.asarray(beat_d, bool)
+    on = np.asarray(onsets, np.float64)
+    live = on[on >= 0]
+    if len(live) < MIN_PAIRS or len(beat_t) < 2:
+        return None
+    lo, hi = float(live.min()) - MATCH_TOL, float(live.max()) + MATCH_TOL
+    inside = (beat_t >= lo) & (beat_t <= hi)
+    if inside.sum() < 2:
+        return None
+    grid = window_grid(on, np.asarray(pitches), tokens)
+    if grid is None:
+        return None
+    g_in = (grid["t"] >= lo) & (grid["t"] <= hi)
+    gt_, gd = grid["t"][g_in], (grid["beat"] == 0)[g_in]
+    tt, td = beat_t[inside], beat_d[inside]
+    score = f_measure(tt, gt_)
+    if td.any():  # no tracked downbeats here: the bar lines cannot be checked (same for every reading)
+        score += DOWNBEAT_WEIGHT * f_measure(tt[td], gt_[gd])
+    return float(score)
+
+
 def compare(gt_t, gt_d, tr_t, tr_d) -> dict:
     """How a tracked beat list differs from the ground truth, in BeatNoise's terms: the tempo octave
     (and its factor), how often each kind of beat (bar_classes; spurious ones too) was marked as a
