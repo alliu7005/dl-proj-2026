@@ -35,7 +35,7 @@ absolute performance time (seconds), the frame of the stored notes plus ``perf_t
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 import numpy as np
@@ -239,92 +239,219 @@ def window_beats(times: np.ndarray, down: np.ndarray, t0: float, lo: float, hi: 
 # tracker errors
 # ---------------------------------------------------------------------------------------------
 
+DOWN, HALF, OTHER, EXTRA = 0, 1, 2, 3  # a beat's place in its bar (bar_classes); EXTRA: not a true beat
+PHASE_BINS = 10               # histogram of where spurious beats fall between two true beats
+PROFILE = ("miss", "extra", "offset", "jitter", "down_hit", "down_half", "down_other", "down_extra")
+FACTORS = (2, 3, 4)           # tempo octave errors: beats k times too fast / too slow
+
+
+def bar_length(down: np.ndarray) -> int:
+    """Median beats per bar of a beat list (0: fewer than two downbeats)."""
+    d = np.nonzero(np.asarray(down, bool))[0]
+    return int(np.median(np.diff(d))) if len(d) >= 2 else 0
+
+
+def bar_classes(down: np.ndarray) -> np.ndarray:
+    """Each beat's place in its bar: DOWN (a downbeat), HALF (the middle beat of a bar with an even
+    number of beats: beat 3 in 4/4, beat 2 in 2/4) or OTHER. A bar runs from one downbeat to the
+    next; before the first and after the last, the median bar length is assumed. Without
+    downbeats every beat is OTHER."""
+    down = np.asarray(down, bool)
+    n = len(down)
+    out = np.full(n, OTHER, np.int64)
+    d = np.nonzero(down)[0]
+    if not len(d):
+        return out
+    out[d] = DOWN
+    med = int(np.median(np.diff(d))) if len(d) >= 2 else 0
+    i = np.arange(n)
+    p = np.searchsorted(d, i, side="right") - 1          # the bar's downbeat (-1: before the first)
+    after = p >= 0
+    k = np.where(after, i - d[np.maximum(p, 0)], med - (d[0] - i))  # beats since the downbeat
+    nxt = np.minimum(p + 1, len(d) - 1)
+    bar = np.where(after & (p + 1 < len(d)), d[nxt] - d[np.maximum(p, 0)], med)
+    half = ~down & (bar > 0) & (bar % 2 == 0) & (k == bar // 2)
+    out[half] = HALF
+    return out
+
+
 @dataclass
 class BeatNoise:
     """The errors a beat tracker makes, applied to a ground-truth beat list (training, and the
-    simulated-tracker test condition). Probabilities are per beat list (a window, or a piece when
-    fitted); fitted by scripts/fit_beat_noise.py from Beat This! against the ground truth.
-      p_double / p_half   tempo octave errors: every half beat / every other beat
-      p_offbeat           beats on the off-beats (half a period late)
-      miss, extra         share of beats missed / spurious beats added (as a share of the beats)
-      jitter              timing error of the beats it finds (seconds, standard deviation)
-      p_no_downbeats      no downbeats at all
-      p_downbeat_shift    the right bar length, downbeats on the wrong beat of the bar
-      p_meter             the wrong bar length (downbeats every 2 / 3 / 4 beats instead)"""
-    p_double: float = 0.05
-    p_half: float = 0.10
-    p_offbeat: float = 0.05
-    miss: float = 0.08
-    extra: float = 0.05
+    simulated-tracker test condition). Fitted by scripts/fit_beat_noise.py from Beat This! against
+    the ASAP annotations (``compare`` per performance, ``fit_noise``).
+      p_double / p_half   tempo octave errors, per beat list: too fast (k beats per true beat) /
+                          too slow (every k-th beat) over one stretch of the list. With
+                          octave_profiles (fitted: one per real wrong-tempo performance, its kind,
+                          factor k, the fraction of the piece it covers, its miss rate and its
+                          four downbeat rates below) a random profile of that kind is replayed,
+                          with no spurious beats on top (they are the error); without, k is
+                          drawn from double_k / half_k (probabilities of k = FACTORS; Beat This!
+                          also tracks the eighth notes of compound meters, k = 3), over the whole
+                          list, with the octave_down rates
+      p_offbeat           beats on the off-beats (half a period late), per beat list
+      miss                share of the true beats it misses
+      extra               share of its beats that are spurious; they fall between two true beats
+                          at a phase drawn from ``extra_phase`` (PHASE_BINS probabilities; None =
+                          uniform): Beat This! adds them mostly mid-beat, i.e. local subdivision
+      offset, jitter      timing of the beats it finds: mean and standard deviation (seconds)
+      down_hit            chance a true downbeat is marked as a downbeat
+      down_half           ... a half-bar beat (beat 3 of 4, 2 of 2)    } Beat This! (without its
+      down_other          ... any other beat                           } DBN) imposes no bar
+      down_extra          ... a spurious beat                          } length: each is its own peak
+      octave_down         the same four rates when the tempo octave is wrong (None: as above). It
+                          keeps finding true downbeats then; each beat is classed by the true bar,
+                          and the beats a too-fast tracker adds count as spurious
+      octave_profiles     see p_double / p_half (None: not fitted)
+      profiles            per-performance values of PROFILE (the fitted right-tempo
+                          performances, with their bar length "bar"), or None. When set, each beat
+                          list draws one profile for all of the above but the octave errors, from
+                          the performances with its bar length if there are any, so a simulated
+                          tracker is as good or as bad on a piece as the real one was (the rates
+                          vary a lot between pieces, and with the meter); the scalars are then the
+                          profiles' means. Octave profiles are drawn the same way."""
+    p_double: float = 0.18
+    p_half: float = 0.06
+    double_k: list = field(default_factory=lambda: [1.0, 0.0, 0.0])
+    half_k: list = field(default_factory=lambda: [1.0, 0.0, 0.0])
+    p_offbeat: float = 0.0
+    miss: float = 0.12
+    extra: float = 0.13
+    offset: float = 0.0
     jitter: float = 0.02
-    p_no_downbeats: float = 0.05
-    p_downbeat_shift: float = 0.15
-    p_meter: float = 0.10
+    down_hit: float = 0.88
+    down_half: float = 0.38
+    down_other: float = 0.20
+    down_extra: float = 0.34
+    octave_down: list | None = None
+    octave_profiles: list | None = None
+    extra_phase: list | None = None
+    profiles: list | None = None
     fitted: bool = False
-    note: str = "defaults (typical Beat This! errors on classical piano), not fitted"
+    note: str = "defaults (Beat This! on ASAP / MAESTRO, rounded), not fitted"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "BeatNoise":
+        names = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in names})
 
     @classmethod
     def from_json(cls, path) -> "BeatNoise":
-        d = json.loads(Path(path).read_text())
-        names = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in d.items() if k in names})
+        return cls.from_dict(json.loads(Path(path).read_text()))
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
     def to_json(self, path, extra: dict | None = None):
         d = asdict(self)
         d.update(extra or {})
         Path(path).write_text(json.dumps(d, indent=1))
 
+    @staticmethod
+    def _factor(probs, rng) -> int:
+        p = np.asarray(probs if probs else [1.0], np.float64)
+        return int(FACTORS[int(rng.choice(len(p), p=p / p.sum()))])
+
+    @staticmethod
+    def _pick(profiles: list, bar: int, rng):
+        """A random profile, from those of this bar length if there are any."""
+        same = [q for q in profiles if q.get("bar") == bar]
+        pool = same or profiles
+        return pool[int(rng.integers(len(pool)))]
+
+    def _octave(self, kind: str, bar: int, rng):
+        """Factor, fraction of the list, downbeat rates and miss rate of one tempo octave error
+        (rates / miss None: the right-tempo ones)."""
+        profs = [q for q in (self.octave_profiles or []) if q.get("octave") == kind]
+        if profs:
+            q = self._pick(profs, bar, rng)
+            return (int(q["factor"]), float(q["frac"]),
+                    [float(q[k]) for k in ("down_hit", "down_half", "down_other", "down_extra")],
+                    float(q.get("miss", 0.0)))
+        return self._factor(self.double_k if kind == "double" else self.half_k, rng), 1.0, self.octave_down, None
+
+    def rates(self, rng: np.random.Generator, bar: int = 0) -> dict:
+        """The PROFILE values for one beat list of ``bar`` beats per bar: a random fitted profile
+        (of that bar length if there is one), or the scalars."""
+        if self.profiles:
+            prof = self._pick(self.profiles, bar, rng)
+            return {k: float(prof.get(k, getattr(self, k))) for k in PROFILE}
+        return {k: float(getattr(self, k)) for k in PROFILE}
+
     def __call__(self, times: np.ndarray, down: np.ndarray, rng: np.random.Generator):
         times = np.asarray(times, np.float64).copy()
         down = np.asarray(down, bool).copy()
         if len(times) < 3:
             return times, down
+        bar = bar_length(down)
+        r = self.rates(rng, bar)
+        p_class = np.array([r["down_hit"], r["down_half"], r["down_other"], r["down_extra"]], np.float64)
+        cls = bar_classes(down)  # each beat's place in the true bar, carried through the tempo errors
         u = rng.random()
-        if u < self.p_double:  # a beat between every two
-            mid = (times[:-1] + times[1:]) / 2
-            times = np.insert(times, np.arange(1, len(times)), mid)
-            down = np.insert(down, np.arange(1, len(down)), False)
-        elif u < self.p_double + self.p_half:  # every other beat; a dropped downbeat moves to the next kept beat
-            r = int(rng.integers(2))
-            keep = np.arange(r, len(times), 2)
-            moved = np.zeros(len(keep), bool)
-            if r == 1:
-                moved |= down[keep - 1]
-            nxt = keep + 1
-            moved |= np.where(nxt < len(down), down[np.minimum(nxt, len(down) - 1)], False) & (r == 0)
-            times, down = times[keep], down[keep] | moved
+        kind = "double" if u < self.p_double else "half" if u < self.p_double + self.p_half else None
+        if kind is not None:
+            k, frac, rates, miss = self._octave(kind, bar, rng)
+            times, cls = octave_stretch(times, cls, kind, k, frac, rng)
+            if rates is not None:
+                p_class = np.asarray(rates, np.float64)
+            if miss is not None:  # a replayed wrong-tempo performance: its own misses, and its
+                r["miss"], r["extra"] = miss, 0.0  # spurious beats are the octave error itself
         if len(times) >= 3 and rng.random() < self.p_offbeat:
             times = (times[:-1] + times[1:]) / 2
-            down = down[:-1]
-        d = np.nonzero(down)[0]
-        bar_len = int(np.median(np.diff(d))) if len(d) >= 2 else 0
-        u = rng.random()
-        if u < self.p_no_downbeats:
-            down[:] = False
-        elif u < self.p_no_downbeats + self.p_downbeat_shift and bar_len >= 2:
-            s = int(rng.integers(1, bar_len))
-            down = np.roll(down, s)
-            down[:s] = False
-        elif u < self.p_no_downbeats + self.p_downbeat_shift + self.p_meter:
-            new = int(rng.choice([m for m in (2, 3, 4) if m != bar_len]))
-            off = int(rng.integers(new))
-            down = (np.arange(len(times)) - off) % new == 0
-        if self.miss > 0 and len(times) > 2:
-            keep = rng.random(len(times)) >= self.miss
+            cls = np.full(len(times), EXTRA)
+            if self.octave_down:
+                p_class = np.asarray(self.octave_down, np.float64)
+        # downbeats: each beat marked independently, by its place in the true bar
+        down = rng.random(len(times)) < p_class[cls]
+        if r["miss"] > 0 and len(times) > 2:
+            keep = rng.random(len(times)) >= r["miss"]
             if keep.sum() >= 2:
                 times, down = times[keep], down[keep]
-        if self.extra > 0 and len(times) >= 2:
-            n = int(rng.binomial(len(times), min(self.extra, 1.0)))
+        if r["extra"] > 0 and len(times) >= 2:
+            e = min(r["extra"], 0.9)
+            n = int(rng.binomial(len(times), e / (1 - e)))  # so that a share `extra` of the beats is spurious
             if n:
-                new_t = rng.uniform(times[0], times[-1], n)
-                times = np.concatenate([times, new_t])
-                down = np.concatenate([down, np.zeros(n, bool)])
-        if self.jitter > 0:
-            times = times + rng.normal(0, self.jitter, len(times))
+                j = rng.integers(len(times) - 1, size=n)
+                if self.extra_phase:
+                    p = np.asarray(self.extra_phase, np.float64)
+                    b = rng.choice(len(p), size=n, p=p / p.sum())
+                    phase = (b + rng.random(n)) / len(p)
+                else:
+                    phase = rng.random(n)
+                gap = times[j + 1] - times[j]
+                edge = np.minimum(0.5, 0.051 / np.maximum(gap, 1e-9))  # never within 50 ms of a beat
+                phase = np.clip(phase, edge, 1 - edge)
+                times = np.concatenate([times, times[j] + phase * gap])
+                down = np.concatenate([down, rng.random(n) < p_class[EXTRA]])
+        times = times + r["offset"]
+        if r["jitter"] > 0:
+            times = times + rng.normal(0, r["jitter"], len(times))
         order = np.argsort(times, kind="stable")
         times, down = times[order], down[order]
         keep = np.concatenate([[True], np.diff(times) > 0.05])  # no two beats within 50 ms
         return times[keep], down[keep]
+
+
+def octave_stretch(times: np.ndarray, cls: np.ndarray, kind: str, k: int, frac: float, rng):
+    """A tempo octave error over one contiguous stretch covering ``frac`` of the beat intervals:
+    "double" puts k - 1 more beats evenly into each interval (class EXTRA), "half" keeps every k-th
+    beat. Returns the new times and classes, in time order."""
+    n = len(times)
+    if n < 2:
+        return times, cls
+    m = int(np.clip(round(frac * (n - 1)), 1, n - 1))   # intervals affected
+    a = int(rng.integers(0, n - m)) if n - m > 0 else 0
+    if kind == "double":
+        seg = times[a:a + m + 1]
+        new = (seg[:-1, None] + (np.arange(1, k) / k) * np.diff(seg)[:, None]).ravel()
+        times = np.concatenate([times, new])
+        cls = np.concatenate([cls, np.full(len(new), EXTRA)])
+        order = np.argsort(times, kind="stable")
+        return times[order], cls[order]
+    keep = np.ones(n, bool)
+    idx = np.arange(a, a + m + 1)
+    keep[idx[(idx - a) % k != 0]] = False
+    return times[keep], cls[keep]
 
 
 def match(ref: np.ndarray, est: np.ndarray, tol: float = MATCH_TOL) -> list[tuple[int, int]]:
@@ -354,16 +481,20 @@ def f_measure(ref: np.ndarray, est: np.ndarray, tol: float = MATCH_TOL) -> float
     return 2 * m / (len(ref) + len(est))
 
 
-def _bar_length(times, down) -> int:
-    d = np.nonzero(down)[0]
-    return int(np.median(np.diff(d))) if len(d) >= 2 else 0
-
-
 def compare(gt_t, gt_d, tr_t, tr_d) -> dict:
-    """How a tracked beat list differs from the ground truth, in BeatNoise's terms."""
+    """How a tracked beat list differs from the ground truth, in BeatNoise's terms: the tempo octave
+    (and its factor), how often each kind of beat (bar_classes; spurious ones too) was marked as a
+    downbeat ("down": class -> [marked, count]), and at the right tempo missed / spurious beats,
+    timing errors and where the spurious beats fall. Only the tracked beats within the annotated span count:
+    an ASAP performance can be one piece of a longer MAESTRO recording (101 of the 418 hold two or
+    more, e.g. a prelude and its fugue), and the tracker hears all of it."""
     gt_t, tr_t = np.asarray(gt_t, np.float64), np.asarray(tr_t, np.float64)
     gt_d, tr_d = np.asarray(gt_d, bool), np.asarray(tr_d, bool)
-    out = {"beat_f": f_measure(gt_t, tr_t), "downbeat_f": f_measure(gt_t[gt_d], tr_t[tr_d])}
+    if len(gt_t):
+        span = (tr_t >= gt_t[0] - MATCH_TOL) & (tr_t <= gt_t[-1] + MATCH_TOL)
+        tr_t, tr_d = tr_t[span], tr_d[span]
+    out = {"beat_f": f_measure(gt_t, tr_t), "downbeat_f": f_measure(gt_t[gt_d], tr_t[tr_d]),
+           "bar": bar_length(gt_d)}
     if len(gt_t) < 3 or len(tr_t) < 3:
         out["octave"] = "none"
         return out
@@ -375,14 +506,26 @@ def compare(gt_t, gt_d, tr_t, tr_d) -> dict:
         out["octave"] = "none"
         return out
     ratio = float(np.median(np.diff(tr_t)) / np.median(np.diff(gt_t)))
-    out["ratio"] = ratio
+    out["ratio"], out["density"] = ratio, len(tr_t) / len(gt_t)
+    pairs = match(gt_t, tr_t)
+    out["found"] = len(pairs) / len(gt_t)  # share of the true beats it has a beat on (any octave)
+    cls = bar_classes(gt_d)
+    counts = {"hit": [0, 0], "half": [0, 0], "other": [0, 0], "extra": [0, 0]}
+    for a, b in pairs:
+        c = counts[("hit", "half", "other")[cls[a]]]
+        c[0] += int(tr_d[b])
+        c[1] += 1
+    matched = np.zeros(len(tr_t), bool)
+    matched[[b for _, b in pairs]] = True
+    spurious = np.nonzero(~matched)[0]
+    counts["extra"] = [int(tr_d[spurious].sum()), int(len(spurious))]
+    out["down"] = counts
     if ratio < 0.7:
-        out["octave"] = "double"
+        out["octave"], out["factor"] = "double", int(np.clip(np.floor(1 / ratio + 0.5), FACTORS[0], FACTORS[-1]))
         return out
     if ratio > 1.4:
-        out["octave"] = "half"
+        out["octave"], out["factor"] = "half", int(np.clip(np.floor(ratio + 0.5), FACTORS[0], FACTORS[-1]))
         return out
-    pairs = match(gt_t, tr_t)
     mids = (gt_t[:-1] + gt_t[1:]) / 2
     if len(pairs) < 0.5 * len(gt_t) and len(match(mids, tr_t)) >= 0.5 * len(mids):
         out["octave"] = "offbeat"
@@ -391,36 +534,88 @@ def compare(gt_t, gt_d, tr_t, tr_d) -> dict:
     out["miss"] = 1 - len(pairs) / len(gt_t)
     out["extra"] = 1 - len(pairs) / len(tr_t)
     out["errors"] = [float(tr_t[b] - gt_t[a]) for a, b in pairs]
-    gl, tl = _bar_length(gt_t, gt_d), _bar_length(tr_t, tr_d)
-    if not tr_d.any():
-        out["downbeats"] = "none"
-    elif gl and tl and tl != gl:
-        out["downbeats"] = "meter"
-    else:
-        hit = len(match(gt_t[gt_d], tr_t[tr_d]))
-        out["downbeats"] = "correct" if hit >= 0.5 * max(tr_d.sum(), 1) else "shift"
+    j = np.searchsorted(gt_t, tr_t[spurious]) - 1
+    ok = (j >= 0) & (j + 1 < len(gt_t))
+    j, ts = j[ok], tr_t[spurious][ok]
+    out["extra_phase"] = [float(x) for x in (ts - gt_t[j]) / (gt_t[j + 1] - gt_t[j])]
+    return out
+
+
+def downbeat_rates(comparisons: list[dict]) -> dict:
+    """Pooled downbeat rates of these comparisons: how often a true downbeat, a half-bar beat,
+    another beat and a spurious beat were marked as downbeats (None: no such beats)."""
+    out = {}
+    for key, name in (("hit", "down_hit"), ("half", "down_half"), ("other", "down_other"), ("extra", "down_extra")):
+        m = sum(c["down"][key][0] for c in comparisons if "down" in c)
+        n = sum(c["down"][key][1] for c in comparisons if "down" in c)
+        out[name] = m / n if n else None
     return out
 
 
 def fit_noise(comparisons: list[dict], note: str = "") -> BeatNoise:
-    """BeatNoise from ``compare`` results, one per performance: the share of performances with
-    each kind of error, and the beat-level rates and jitter pooled over the normal ones."""
+    """BeatNoise from ``compare`` results, one per performance: the share of performances with each
+    tempo octave error and its factors, the pooled downbeat rates at a wrong tempo, one octave
+    profile per wrong-tempo performance (kind, factor, the fraction of the piece it covers from
+    the beat density, its downbeat rates), one profile per
+    right-tempo performance (its miss / extra rates, timing and downbeat rates; a downbeat rate it
+    has no beats for -> the pooled rate), the scalars as the profiles' means, and the pooled phase
+    histogram of the spurious beats."""
     n = len(comparisons)
     if n == 0:
         raise ValueError("no performances to fit the beat noise on")
-    cnt = lambda key, val: sum(c.get(key) == val for c in comparisons) / n  # noqa: E731
+    cnt = lambda val: sum(c.get("octave") == val for c in comparisons) / n  # noqa: E731
     normal = [c for c in comparisons if c.get("octave") == "normal"]
+    pooled = {k: (0.0 if v is None else v) for k, v in downbeat_rates(normal).items()}
+    wrong = downbeat_rates([c for c in comparisons if c.get("octave") in ("double", "half", "offbeat")])
+    octave_down = None
+    if any(v is not None for v in wrong.values()):
+        octave_down = [round(float(pooled[k] if wrong[k] is None else wrong[k]), 5)
+                       for k in ("down_hit", "down_half", "down_other", "down_extra")]
     errs = np.concatenate([np.asarray(c["errors"]) for c in normal]) if normal else np.zeros(0)
-    nd = max(len(normal), 1)
+    jit = float(np.std(errs)) if len(errs) > 1 else 0.0
+    profiles = []
+    for c in normal:
+        e = np.asarray(c["errors"])
+        prof = {"bar": int(c.get("bar", 0)), "miss": c["miss"], "extra": c["extra"],
+                "offset": float(e.mean()) if len(e) else 0.0, "jitter": float(e.std()) if len(e) > 1 else jit}
+        for key, name in (("hit", "down_hit"), ("half", "down_half"), ("other", "down_other"),
+                          ("extra", "down_extra")):
+            m, k = c["down"][key]
+            prof[name] = m / k if k else pooled[name]
+        profiles.append({k: v if k == "bar" else round(float(v), 5) for k, v in prof.items()})
+    mean = {k: float(np.mean([p[k] for p in profiles])) if profiles else 0.0 for k in PROFILE}
+    phases = np.concatenate([np.asarray(c.get("extra_phase", []), np.float64) for c in normal]) if normal else []
+    hist = np.histogram(phases, bins=PHASE_BINS, range=(0, 1))[0].astype(np.float64) if len(phases) else None
+    def factors(octave):
+        ks = [c.get("factor", 2) for c in comparisons if c.get("octave") == octave]
+        return [round(ks.count(k) / len(ks), 5) for k in FACTORS] if ks else [1.0, 0.0, 0.0]
+    octave_profiles = []
+    for c in comparisons:
+        if c.get("octave") not in ("double", "half") or "down" not in c:
+            continue
+        # beats per true beat: (1 - miss) + (k - 1) f too fast (the true beats it missed are its
+        # misses); 1 - (1 - 1/k) f too slow (the true beats it drops are the error itself)
+        k, dens = c["factor"], c["density"]
+        if c["octave"] == "double":
+            miss = 1 - c["found"]
+            frac = (dens - (1 - miss)) / (k - 1)
+        else:
+            miss, frac = 0.0, (1 - dens) / (1 - 1 / k)
+        q = {"octave": c["octave"], "bar": int(c.get("bar", 0)), "factor": int(k),
+             "frac": round(float(np.clip(frac, 0.05, 1.0)), 5),
+             "miss": round(float(np.clip(miss, 0.0, 0.9)), 5)}
+        for key, name in (("hit", "down_hit"), ("half", "down_half"), ("other", "down_other"),
+                          ("extra", "down_extra")):
+            m_, n_ = c["down"][key]
+            fallback = octave_down[("down_hit", "down_half", "down_other", "down_extra").index(name)] \
+                if octave_down else pooled[name]
+            q[name] = round(m_ / n_, 5) if n_ else fallback
+        octave_profiles.append(q)
     return BeatNoise(
-        p_double=cnt("octave", "double"), p_half=cnt("octave", "half"), p_offbeat=cnt("octave", "offbeat"),
-        miss=float(np.mean([c["miss"] for c in normal])) if normal else 0.0,
-        extra=float(np.mean([c["extra"] for c in normal])) if normal else 0.0,
-        jitter=float(np.std(errs)) if len(errs) > 1 else 0.0,
-        p_no_downbeats=sum(c.get("downbeats") == "none" for c in normal) / nd,
-        p_downbeat_shift=sum(c.get("downbeats") == "shift" for c in normal) / nd,
-        p_meter=sum(c.get("downbeats") == "meter" for c in normal) / nd,
-        fitted=True, note=note or f"fitted on {n} performances")
+        p_double=cnt("double"), p_half=cnt("half"), double_k=factors("double"), half_k=factors("half"),
+        p_offbeat=cnt("offbeat"), **mean, octave_down=octave_down, octave_profiles=octave_profiles or None,
+        extra_phase=[round(float(x), 5) for x in hist / hist.sum()] if hist is not None and hist.sum() else None,
+        profiles=profiles or None, fitted=True, note=note or f"fitted on {n} performances")
 
 
 # ---------------------------------------------------------------------------------------------

@@ -36,7 +36,7 @@ def main():
     names = [s for s in ("train", "val", "test", "train_transcribed", "val_transcribed", "test_transcribed",
                           "train_transcribed_kong", "val_transcribed_kong", "test_transcribed_kong",
                           "test_periscope")
-             if (D / s).exists()]
+             if (D / s / "index.npy").exists()]  # built splits (a folder can hold only beats_*.npz)
     st = {s: SegmentStore(D / s) for s in names}
 
     print("leakage")

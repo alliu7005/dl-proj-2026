@@ -24,7 +24,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from src.beats import (BEAT_FEATURES, N_BEAT_FEATURES, BeatNoise, beat_features, beat_layout,  # noqa: E402
+from src.beats import (BEAT_FEATURES, DOWN, EXTRA, FACTORS, HALF, N_BEAT_FEATURES, OTHER, PHASE_BINS,  # noqa: E402
+                       BeatNoise, bar_classes, bar_length, beat_features, beat_layout, octave_stretch,
                        beats_path, compare, f_measure, fit_noise, load_beats, merge_performance, save_beats)
 
 D = ROOT / "data" / "processed"
@@ -113,54 +114,190 @@ def test_features():
     assert np.all(beat_features(on, np.zeros(0), np.zeros(0, bool)) == 0)
 
 
+EXACT = dict(p_double=0, p_half=0, p_offbeat=0, miss=0, extra=0, offset=0, jitter=0, down_hit=1.0, down_half=0.0,
+             down_other=0.0, down_extra=0.0)
+
+
+def only(**k):
+    """A tracker that makes only the given errors (no profiles: the scalars apply)."""
+    return BeatNoise(**{**EXACT, **k})
+
+
+def test_bar_classes():
+    assert bar_classes(np.arange(8) % 4 == 0).tolist() == [DOWN, OTHER, HALF, OTHER] * 2          # 4/4
+    assert bar_classes(np.arange(6) % 3 == 0).tolist() == [DOWN, OTHER, OTHER] * 2               # 3/4: no middle
+    assert bar_classes(np.arange(4) % 2 == 0).tolist() == [DOWN, HALF] * 2                       # 2/4
+    pickup = np.arange(9) % 4 == 1                                                              # a one-beat pickup
+    assert bar_classes(pickup).tolist() == [OTHER, DOWN, OTHER, HALF, OTHER, DOWN, OTHER, HALF, OTHER]
+    two = np.arange(10) % 4 == 3                                                                # three-beat pickup
+    assert bar_classes(two)[1] == HALF and bar_classes(two)[0] == OTHER
+    assert set(bar_classes(np.zeros(5, bool)).tolist()) == {OTHER}                             # no downbeats
+    mixed = np.zeros(12, bool)
+    mixed[[0, 4, 7, 11]] = True                                                                 # 4/4, 3/4, 4/4
+    assert bar_classes(mixed)[[2, 5, 6, 9]].tolist() == [HALF, OTHER, OTHER, HALF]
+    assert bar_length(np.arange(12) % 3 == 0) == 3 and bar_length(np.zeros(4, bool)) == 0
+
+
 def test_noise_model():
     rng = lambda s: np.random.default_rng(s)  # noqa: E731
     t, d = grid(200)
-    exact = BeatNoise(p_double=0, p_half=0, p_offbeat=0, miss=0, extra=0, jitter=0, p_no_downbeats=0,
-                      p_downbeat_shift=0, p_meter=0)
-    t2, d2 = exact(t, d, rng(0))
+    t2, d2 = only()(t, d, rng(0))
     assert np.allclose(t2, t) and np.array_equal(d2, d)
-    only = lambda **k: BeatNoise(**{**exact.__dict__, **k})  # noqa: E731
-    t2, d2 = only(p_double=1)(t, d, rng(1))
-    assert len(t2) == 2 * len(t) - 1 and d2.sum() == d.sum() and compare(t, d, t2, d2)["octave"] == "double"
-    t2, d2 = only(p_half=1)(t, d, rng(2))
-    assert len(t2) == len(t) // 2 and compare(t, d, t2, d2)["octave"] == "half"
-    assert abs(int(d2.sum()) - int(d.sum())) <= 1  # dropped downbeats move to the next kept beat
+    for k in FACTORS:  # too fast / too slow by k over the whole list (no octave profiles)
+        onehot = [float(k == f) for f in FACTORS]
+        t2, d2 = only(p_double=1, double_k=onehot)(t, d, rng(k))
+        c = compare(t, d, t2, d2)
+        assert len(t2) == (len(t) - 1) * k + 1 and d2.sum() == d.sum(), (k, len(t2))
+        assert c["octave"] == "double" and c["factor"] == k and abs(c["density"] - k) < 0.05, c
+        t2, d2 = only(p_half=1, half_k=onehot)(t, d, rng(10 + k))
+        c = compare(t, d, t2, d2)
+        assert c["octave"] == "half" and c["factor"] == k and abs(len(t2) - len(t) / k) <= 1, c
     t2, d2 = only(p_offbeat=1)(t, d, rng(3))
     assert compare(t, d, t2, d2)["octave"] == "offbeat"
-    t2, d2 = only(p_downbeat_shift=1)(t, d, rng(4))
+    # downbeats: each beat marked by its class; at a wrong tempo with the octave_down rates
+    t2, d2 = only(down_half=1.0)(t, d, rng(4))
     c = compare(t, d, t2, d2)
-    assert c["octave"] == "normal" and c["downbeats"] == "shift" and np.median(np.diff(np.nonzero(d2)[0])) == 4
-    t2, d2 = only(p_meter=1)(t, d, rng(5))
-    assert compare(t, d, t2, d2)["downbeats"] == "meter"
-    t2, d2 = only(p_no_downbeats=1)(t, d, rng(6))
-    assert not d2.any() and compare(t, d, t2, d2)["downbeats"] == "none"
-    t2, d2 = only(miss=0.2, jitter=0.01)(t, d, rng(7))
+    assert c["octave"] == "normal" and c["down"]["hit"][0] == c["down"]["hit"][1] == 50
+    assert c["down"]["half"] == [50, 50] and c["down"]["other"][0] == 0, c["down"]
+    t2, d2 = only(p_double=1, octave_down=[1.0, 0.0, 0.0, 1.0])(t, d, rng(5))  # every added beat marked
     c = compare(t, d, t2, d2)
-    assert c["octave"] == "normal" and 0.12 < c["miss"] < 0.28 and c["downbeats"] == "correct", c
-    assert 0.005 < np.std(c["errors"]) < 0.015
-    a, b = BeatNoise()(t, d, rng(8)), BeatNoise()(t, d, rng(8))
+    assert c["down"]["extra"] == [199, 199] and c["down"]["other"][0] == 0, c["down"]
+    t2, d2 = only(down_hit=0.0)(t, d, rng(6))
+    assert not d2.any() and compare(t, d, t2, d2)["downbeat_f"] == 0
+    # misses, timing, spurious beats where extra_phase puts them
+    t2, d2 = only(miss=0.2, offset=0.01, jitter=0.01)(t, d, rng(7))
+    c = compare(t, d, t2, d2)
+    assert c["octave"] == "normal" and 0.12 < c["miss"] < 0.28, c
+    assert 0.005 < np.std(c["errors"]) < 0.015 and 0.007 < np.mean(c["errors"]) < 0.013
+    phase = [0.0] * PHASE_BINS
+    phase[5] = 1.0
+    t2, d2 = only(extra=0.2, down_extra=1.0)(*grid(1000), rng(8))
+    c = compare(*grid(1000), t2, d2)
+    assert abs(c["extra"] - 0.2) < 0.03 and c["down"]["extra"][0] == c["down"]["extra"][1], c["extra"]
+    t2, d2 = only(extra=0.2, extra_phase=phase)(*grid(1000), rng(9))
+    ph = np.asarray(compare(*grid(1000), t2, d2)["extra_phase"])
+    assert len(ph) > 100 and np.all((ph >= 0.5) & (ph < 0.6)), ph.min()
+    a, b = BeatNoise()(t, d, rng(10)), BeatNoise()(t, d, rng(10))
     assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])  # reproducible from the seed
+
+
+def test_compare_annotated_span():
+    """The tracker hears the whole MAESTRO recording, which can hold more than this ASAP piece (a
+    prelude and its fugue): its beats outside the annotated span are not errors."""
+    t, d = grid(100)
+    other_piece = t[-1] + 5 + 0.37 * np.arange(300)
+    tr_t = np.concatenate([t[0] - 30 + 0.41 * np.arange(60), t, other_piece])
+    tr_d = np.concatenate([np.zeros(60, bool), d, np.arange(300) % 3 == 0])
+    c = compare(t, d, tr_t, tr_d)
+    assert c["beat_f"] == 1.0 and c["downbeat_f"] == 1.0 and c["extra"] == 0.0 and c["octave"] == "normal", c
+
+
+def test_octave_stretch():
+    t, d = grid(201)
+    cls = bar_classes(d)
+    rng = np.random.default_rng(0)
+    for frac in (0.25, 0.5, 1.0):
+        t2, c2 = octave_stretch(t, cls, "double", 2, frac, rng)
+        assert len(t2) == len(t) + round(frac * 200) and np.all(np.diff(t2) > 0), (frac, len(t2))
+        assert (c2 == EXTRA).sum() == round(frac * 200) and np.array_equal(c2[c2 != EXTRA], cls)
+        added = np.nonzero(c2 == EXTRA)[0]
+        assert np.all(np.diff(added) == 2)  # one contiguous stretch
+        t3, c3 = octave_stretch(t, cls, "half", 2, frac, rng)
+        assert abs(len(t3) - (len(t) - frac * 200 / 2)) <= 1 and set(c3.tolist()) <= {DOWN, HALF, OTHER}
+    # a replayed wrong-tempo profile: its factor, stretch, misses and downbeat rates; no extras on top
+    prof = {"octave": "double", "bar": 4, "factor": 3, "frac": 0.5, "miss": 0.0, "down_hit": 1.0,
+            "down_half": 0.0, "down_other": 0.0, "down_extra": 0.0}
+    noise = BeatNoise(**{**EXACT, "extra": 0.5, "miss": 0.5, "p_double": 1.0, "octave_profiles": [prof]})
+    t2, d2 = noise(t, d, rng)
+    c = compare(t, d, t2, d2)
+    assert abs(c["density"] - 2.0) < 0.02 and c["found"] == 1.0 and c["downbeat_f"] == 1.0, c
+
+
+def test_profiles():
+    """Fitted profiles: one per list, drawn from the same bar length when there is one."""
+    base = {"extra": 0.0, "offset": 0.0, "jitter": 0.0, "down_hit": 1.0, "down_half": 0.0, "down_other": 0.0,
+            "down_extra": 0.0}
+    noise = BeatNoise(**{**EXACT, "profiles": [{**base, "bar": 3, "miss": 0.0}, {**base, "bar": 4, "miss": 0.3}]})
+    rng = np.random.default_rng(0)
+    for bar, want in ((3, 0.0), (4, 0.3)):
+        t, d = grid(400, bar=bar)
+        misses = [compare(t, d, *noise(t, d, rng))["miss"] for _ in range(5)]
+        assert all(abs(m - want) < 0.07 for m in misses), (bar, misses)
+    t, d = grid(400, bar=2)  # no profile of this bar length: any of them
+    misses = [compare(t, d, *noise(t, d, rng))["miss"] for _ in range(20)]
+    near = [min((0.0, 0.3), key=lambda w: abs(m - w)) for m in misses]
+    assert all(abs(m - w) < 0.08 for m, w in zip(misses, near)) and set(near) == {0.0, 0.3}, misses
+    # the files written before this model (p_meter, ...) still load; unknown keys are ignored
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "old.json").write_text(json.dumps({"p_double": 0.2, "p_meter": 0.7, "p_no_downbeats": 0.0}))
+        old = BeatNoise.from_json(Path(tmp) / "old.json")
+        assert old.p_double == 0.2 and old.profiles is None
 
 
 def test_fit_recovers_rates():
     """Simulate a tracker with known errors on 300 pieces, classify, fit: the rates come back."""
-    true = BeatNoise(p_double=0.1, p_half=0.2, p_offbeat=0.05, miss=0.1, extra=0.05, jitter=0.02,
-                     p_no_downbeats=0.1, p_downbeat_shift=0.2, p_meter=0.1)
+    phase = [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.1, 0.05, 0.05, 0.0]
+    true = BeatNoise(p_double=0.1, double_k=[0.7, 0.3, 0.0], p_half=0.1, half_k=[1.0, 0.0, 0.0], p_offbeat=0.05,
+                     miss=0.1, extra=0.1, offset=0.01, jitter=0.015, down_hit=0.9, down_half=0.4, down_other=0.2,
+                     down_extra=0.3, octave_down=[0.85, 0.5, 0.4, 0.25], extra_phase=phase)
     rng = np.random.default_rng(0)
     cs = []
     for k in range(300):
-        t, d = grid(int(rng.integers(80, 200)), ibi=float(rng.uniform(0.35, 0.8)), bar=int(rng.choice([3, 4])))
+        t, d = grid(int(rng.integers(80, 200)), ibi=float(rng.uniform(0.35, 0.8)), bar=int(rng.choice([2, 3, 4])))
         cs.append(compare(t, d, *true(t, d, rng)))
     fit = fit_noise(cs)
     assert fit.fitted
-    for name, tol in (("p_double", 0.05), ("p_half", 0.06), ("p_offbeat", 0.04), ("miss", 0.03), ("extra", 0.03),
-                      ("jitter", 0.006), ("p_no_downbeats", 0.06), ("p_downbeat_shift", 0.08), ("p_meter", 0.07)):
+    for name, tol in (("p_double", 0.05), ("p_half", 0.05), ("p_offbeat", 0.04), ("miss", 0.03), ("extra", 0.03),
+                      ("offset", 0.003), ("jitter", 0.004), ("down_hit", 0.04), ("down_half", 0.06),
+                      ("down_other", 0.04), ("down_extra", 0.05)):
         assert abs(getattr(fit, name) - getattr(true, name)) < tol, (name, getattr(fit, name), getattr(true, name))
+    assert abs(fit.double_k[0] - 0.7) < 0.2 and fit.half_k[0] == 1.0, (fit.double_k, fit.half_k)
+    assert abs(fit.octave_down[0] - 0.85) < 0.08, fit.octave_down
+    assert int(np.argmax(fit.extra_phase)) == 5 and abs(sum(fit.extra_phase) - 1) < 1e-3
+    normal = sum(c["octave"] == "normal" for c in cs)
+    assert len(fit.profiles) == normal and {p["bar"] for p in fit.profiles} == {2, 3, 4}
+    assert len(fit.octave_profiles) == sum(c["octave"] in ("double", "half") for c in cs)
+    assert np.mean([q["frac"] for q in fit.octave_profiles]) > 0.85  # these errors span the whole list
     with tempfile.TemporaryDirectory() as tmp:
         fit.to_json(Path(tmp) / "n.json", {"fit_on": {"performances": 300}})
         back = BeatNoise.from_json(Path(tmp) / "n.json")
         assert back == fit
+    # the fitted model, simulated and fitted again, gives the same rates (profiles replayed faithfully)
+    cs2 = []
+    for k in range(300):
+        t, d = grid(int(rng.integers(80, 200)), ibi=float(rng.uniform(0.35, 0.8)), bar=int(rng.choice([2, 3, 4])))
+        cs2.append(compare(t, d, *fit(t, d, rng)))
+    again = fit_noise(cs2)
+    for name, tol in (("miss", 0.03), ("extra", 0.03), ("down_hit", 0.04), ("down_other", 0.04), ("p_double", 0.05)):
+        assert abs(getattr(again, name) - getattr(fit, name)) < tol, (name, getattr(again, name), getattr(fit, name))
+
+
+def test_noise_matches_tracker():
+    """On the real data (skipped without Beat This!'s beats): the fitted model, replayed on the
+    ground truth, tracks like Beat This! did. Beat F matches; downbeat F is a little pessimistic
+    (wrong-tempo lists especially), measured at ~0.05."""
+    splits = ["train_transcribed", "val_transcribed"]
+    if not all(beats_path(D / s, "tracked").exists() and beats_path(D / s, "gt").exists() for s in splits):
+        print("  (skipped: no beats_tracked.npz; scripts/track_beats.py)")
+        return
+    real, sim = [], []
+    rng = np.random.default_rng(0)
+    for s in splits:
+        gt, tr = load_beats(beats_path(D / s, "gt")), load_beats(beats_path(D / s, "tracked"))
+        for p in sorted(set(gt) & set(tr)):
+            real.append(compare(*gt[p], *tr[p]))
+    fit = fit_noise(real)
+    for s in splits:
+        gt = load_beats(beats_path(D / s, "gt"))
+        for p in sorted(gt):
+            for _ in range(2):
+                sim.append(compare(*gt[p], *fit(*gt[p], rng)))
+    mean = lambda cs, k: float(np.mean([c[k] for c in cs]))  # noqa: E731
+    assert abs(mean(sim, "beat_f") - mean(real, "beat_f")) < 0.03, (mean(sim, "beat_f"), mean(real, "beat_f"))
+    assert -0.08 < mean(sim, "downbeat_f") - mean(real, "downbeat_f") < 0.01, (mean(sim, "downbeat_f"),
+                                                                             mean(real, "downbeat_f"))
+    share = lambda cs: np.mean([c["octave"] != "normal" for c in cs])  # noqa: E731
+    assert abs(share(sim) - share(real)) < 0.05, (share(sim), share(real))
 
 
 def test_storage():
@@ -302,12 +439,27 @@ def test_training_with_beats():
         r = subprocess.run(base + ["--resume"], cwd=ROOT, capture_output=True, text=True)  # no --beats: kept
         assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-2500:]
         assert torch.load(run / "last.pt", map_location="cpu", weights_only=False)["config"]["beat_features"] is True
+        # a resumed beat run keeps the tracker errors it started with, even if the file was refitted
+        shutil.rmtree(run, ignore_errors=True)
+        noise = run.parent / "_test_beats_noise.json"
+        BeatNoise(p_double=0.11).to_json(noise)
+        r = subprocess.run(base + ["--beats", "--beat-noise", str(noise)], cwd=ROOT, capture_output=True, text=True)
+        assert r.returncode == 0 and f"tracker errors from {noise}" in r.stdout, r.stdout[-1500:] + r.stderr[-2500:]
+        assert json.loads((run / "config.json").read_text())["data"]["beats"]["noise_values"]["p_double"] == 0.11
+        BeatNoise(p_double=0.99).to_json(noise)
+        ck = torch.load(run / "last.pt", map_location="cpu", weights_only=False)
+        ck["phase"], ck["step"] = "train", 3
+        torch.save(ck, run / "last.pt")
+        r = subprocess.run(base + ["--resume"], cwd=ROOT, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-2500:]
+        assert "the tracker errors recorded when this run started (fitted: False; p_double 0.110" in r.stdout,             r.stdout[-1500:]
         r = subprocess.run(base + ["--name", "_test_beats_missing", "--beats", "--beat-noise", "no/such.json"],
                            cwd=ROOT, capture_output=True, text=True)
         assert r.returncode != 0 and "fit_beat_noise" in (r.stdout + r.stderr)
     finally:
         shutil.rmtree(run, ignore_errors=True)
         shutil.rmtree(ROOT / "outputs" / "runs" / "_test_beats_missing", ignore_errors=True)
+        (run.parent / "_test_beats_noise.json").unlink(missing_ok=True)
 
 
 def test_evaluation_conditions():

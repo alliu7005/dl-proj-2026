@@ -22,6 +22,7 @@ set -euo pipefail
 source pace/common.sh
 NAME=${NAME:-sf_base}
 ARGS=${ARGS:-}
+echo "run: $NAME  args: $ARGS"  # which run this job trains (squeue shows every training as scoreformer)
 nvidia-smi --query-gpu=name,memory.total --format=csv
 RESUME=""
 [ -f "outputs/runs/$NAME/last.pt" ] && RESUME="--resume"

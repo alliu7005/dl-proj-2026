@@ -197,7 +197,9 @@ ARGS="--conditions real" bash pace/reevaluate.sh
 ## 4f. Beats as an input
 
 ```bash
-bash pace/beats.sh               # ground-truth beats + tests (CPU), Beat This! + noise fit (GPU), 3 runs
+bash pace/beats.sh                   # ground-truth beats + tests (CPU), Beat This! + noise fit (GPU), 3 runs
+STAGE=beat-runs bash pace/beats.sh   # only the two beat runs, from scratch, on the beats and the
+                                     # configs/beat_noise.json already there (after a refit)
 ```
 
 | job / run | what | waits for |
@@ -210,9 +212,17 @@ bash pace/beats.sh               # ground-truth beats + tests (CPU), Beat This! 
 | `eval_<run>` | the new `piece` mode for every finished run (`pace/reevaluate.sh`) | the three trainings have started |
 
 `sf_base_reg_cab` vs `sf_base_reg_ca_r` is the effect of the beats alone (same data, same recipe);
-`sf_base_reg_ca_r` vs `sf_base_reg_ca` the effect of the real-transcription data. Afterwards, copy
-`configs/beat_noise.json` back and commit it (`scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/configs/beat_noise.json configs/`).
-Compare everything with `python3 scripts/compare_runs.py` (it shows the beat-only conditions too).
+`sf_base_reg_ca_r` vs `sf_base_reg_ca` the effect of the real-transcription data. Compare everything
+with `python3 scripts/compare_runs.py` (it shows the beat-only conditions too).
+
+`configs/beat_noise.json` is committed (fitted from the first beattrack run's beats). A refit after
+a change to the error model needs no GPU: copy the beats back
+(`tar czf ~/scratch/beats_files.tgz data/processed/*_transcribed/beats_*` on PACE, scp, `tar xzf`),
+run `python scripts/fit_beat_noise.py` and commit the file; on PACE, `git pull` (remove the
+untracked `configs/beat_noise.json` beattrack wrote first), then restart the beat runs with
+`STAGE=beat-runs bash pace/beats.sh`: it refuses while their run directories exist (they would
+resume with the errors they started with), so cancel their jobs and `rm -rf` them first. The
+training log's first line names the run (`run: <name>`).
 
 ## 5. Compare the runs and bring results back
 

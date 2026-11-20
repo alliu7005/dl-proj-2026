@@ -646,18 +646,42 @@ the beats per bar, and a "has beats" flag (all zero where there are no beats).
   --check`): median beat F-measure 0.92 (train), 0.90 (val), 0.85 (test); where it is right it is
   exact (median error 1 ms), and it is weakest around pickup bars (written left-aligned in our
   tokens) and on beats where nothing is played. That is better than the tracker it stands in for
-  (Beat This!: beat F 0.76 on ASAP in its paper), and training adds tracker errors on top.
+  (below: beat F 0.81 / 0.71), and training adds tracker errors on top.
 - **No leakage from the tracker.** Beat This! was trained on ASAP, so each performance is tracked by
   the authors' cross-validation model that never saw it (their `asap/8-folds.split`: fold k ->
   checkpoint `fold<k>`; tracks outside the split -> `final0`). Its beats are shifted onto the ASAP
   timeline by the same offset as the transcription.
+- **How good Beat This! is on our audio** (`scripts/fit_beat_noise.py`, held-out fold models, scored
+  within each piece's annotated span: 101 of the 418 MAESTRO recordings hold more than one ASAP
+  piece, e.g. a prelude and its fugue, and the tracker hears the whole recording):
+
+  | | beat F | downbeat F | wrong tempo octave |
+  |---|---|---|---|
+  | train / val _transcribed (107 performances, fitted on) | 0.81 | 0.65 | 23% (19 too fast, 6 too slow) |
+  | test_transcribed (24, never fitted on) | 0.71 | 0.60 | 33% (8 too fast) |
+  | the Beat This! paper, ASAP | 0.76 | 0.61 | |
+
+  At the right tempo it misses 12% of the beats and adds 13% spurious ones (mostly mid-beat: local
+  subdivision), 7 ms late on average with 18 ms jitter. Downbeats: without its DBN (`dbn=False`,
+  what we run) Beat This! imposes no bar length, every downbeat is its own peak: it marks 87% of
+  the true downbeats, but also 38% of the half-bar beats (beat 3 of 4/4), 22% of the other beats
+  and 34% of its spurious ones, and how often varies a lot between pieces (false downbeats on
+  "other" beats: 9% to 40% between the quartiles). Too-fast tracking is often partial (a stretch of
+  the piece) and sometimes by 3 (the eighth notes of a compound meter).
 - **Tracker errors are fitted, not guessed** (`scripts/fit_beat_noise.py` -> `configs/beat_noise.json`):
-  Beat This! vs the annotations on train / val _transcribed (never test), per performance: tempo
-  octave (double / half), off-beat tracking, missed / extra beats, timing jitter, and downbeat
-  errors (none, shifted, wrong bar length). `BeatNoise` applies them to the ground truth in training
-  (`--beat-noise`), and `--beat-dropout` (0.15) of the windows get no beats, so the model also
-  works on MIDI input without a tracker. On the real transcriptions it trains on the tracker's own
-  beats.
+  Beat This! vs the annotations on train / val _transcribed (never test), one performance at a
+  time (`compare`). `BeatNoise` replays them on the ground truth: each beat list draws one fitted
+  performance profile (from the same bar length; its miss / extra rates, timing, and downbeat rates
+  by the beat's place in the bar), and with the fitted probability a tempo octave error replayed
+  from one of the real wrong-tempo performances (its kind, factor, the stretch of the piece it
+  covered, its downbeat rates). Replayed on the same ground truth it tracks like Beat This!: beat F
+  0.82 vs 0.81 (right tempo 0.87 vs 0.87, too fast 0.64 vs 0.62, too slow 0.70 vs 0.64), downbeat F
+  0.60 vs 0.65 (a little pessimistic, the wrong-tempo lists most); on test, never fitted on,
+  downbeat F 0.60 vs 0.60
+  (`tests/test_beats.py test_noise_matches_tracker`). Training applies it (`--beat-noise`; a run
+  records the values it started with in config.json and resumes with them), and `--beat-dropout`
+  (0.15) of the windows get no beats, so the model also works on MIDI input without a tracker. On
+  the real transcriptions it trains on the tracker's own beats.
 
 Beat models are evaluated with the beats each condition would really have (`src/eval/plan.py BEATS`):
 
@@ -953,7 +977,7 @@ tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume, 
 tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --only-missing end to end
 tests/test_reevaluate.py         pace/reevaluate.sh: what it submits / skips (stand-in squeue / sbatch)
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
-tests/test_beats.py              beats vs ASAP annotations, features, noise fit, tracker folds, train / eval / demo
+tests/test_beats.py              beats vs ASAP annotations, features, tracker errors (bar classes, octave stretches, profiles, fit, vs Beat This!), tracker folds, train / eval / demo
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes
 scripts/analyze_chained.py       why chained decoding loses notes (from saved predictions)
 scripts/simulate_guard.py        guarded decoding estimated offline, per guard margin

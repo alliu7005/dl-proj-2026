@@ -232,6 +232,7 @@ def main():
     # context notes: a resumed run keeps the inputs it was started with (config.json)
     notes_ctx = {"context_before": args.context_before, "context_after": args.context_after}
     aux_on, beats_on = args.aux_metrical, args.beats
+    recorded_noise = None  # a resumed beat run: the tracker errors it started with, as values
     if args.resume and (run / "config.json").exists():
         rec = json.loads((run / "config.json").read_text())
         started = rec.get("model", {})
@@ -241,6 +242,7 @@ def main():
         beat_rec = (rec.get("data") or {}).get("beats") or {}
         if beats_on and beat_rec:  # the same tracker noise and dropout as when it started
             args.beat_noise, args.beat_dropout = beat_rec.get("noise", args.beat_noise), beat_rec.get("dropout", args.beat_dropout)
+            recorded_noise = beat_rec.get("noise_values")
     n_ctx = notes_ctx["context_before"] + notes_ctx["context_after"]
     notes_ctx_m = {**notes_ctx, "metrical": aux_on}  # dataset arguments
     # beats: ground truth + fitted tracker noise; the real transcriptions use the tracker's own beats
@@ -249,11 +251,17 @@ def main():
     if beats_on:
         if args.beat_noise == "none":
             bn = None
+        elif recorded_noise is not None:  # not the file, which may have been refitted since
+            bn = BeatNoise.from_dict(recorded_noise)
         elif Path(args.beat_noise).exists():
             bn = BeatNoise.from_json(args.beat_noise)
         else:
             raise SystemExit(f"{args.beat_noise} not found: fit it with scripts/fit_beat_noise.py "
                              f"(pace/beats.sh does), or pass --beat-noise none for exact beats")
+        src = ("exact beats" if bn is None else "the tracker errors recorded when this run started"
+               if recorded_noise is not None else f"tracker errors from {args.beat_noise}")
+        print(f"beats: {src}" + ("" if bn is None else f" (fitted: {bn.fitted}; p_double {bn.p_double:.3f}, "
+                                 f"miss {bn.miss:.3f}, down_hit {bn.down_hit:.3f})"), flush=True)
         for split in ("train", "val"):
             if not beats_path(D / split, "gt").exists():
                 raise SystemExit(f"{beats_path(D / split, 'gt')} missing: run scripts/build_beats.py first")
@@ -268,6 +276,7 @@ def main():
         val_beats = {"beats": "gt", "beat_noise": bn}
         val_real_beats = split_beats("val_transcribed", 0.0)
         beat_record = {"noise": args.beat_noise, "fitted": bool(bn is not None and bn.fitted),
+                       "noise_values": bn.to_dict() if bn is not None else None,
                        "dropout": args.beat_dropout, "train_transcribed": real_beat_args["beats"],
                        "val_transcribed": val_real_beats["beats"]}
     if args.no_noise:

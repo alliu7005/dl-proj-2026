@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.beats import beats_path, f_measure, load_beats, save_beats  # noqa: E402
+from src.beats import beats_path, compare, load_beats, save_beats  # noqa: E402
 
 D = Path("data/processed")
 FOLDS_URL = "https://raw.githubusercontent.com/CPJKU/beat_this_annotations/main/asap/8-folds.split"
@@ -134,11 +134,9 @@ def main():
             t = t - float(r["offset_s"])  # onto the ASAP timeline, like the transcription
             beats[perf] = (t, d)
             row = {"performance": perf, "checkpoint": ck, "beats": int(len(t)), "downbeats": int(d.sum())}
-            if perf in gt:
-                gt_t, gt_d = gt[perf]
-                lo, hi = max(gt_t[0], t[0]), min(gt_t[-1], t[-1])
-                g_in, t_in = (gt_t >= lo) & (gt_t <= hi), (t >= lo) & (t <= hi)
-                row.update(beat_f=f_measure(gt_t[g_in], t[t_in]), downbeat_f=f_measure(gt_t[g_in & gt_d], t[t_in & d]))
+            if perf in gt:  # within the annotated span (the recording can hold other pieces too)
+                c = compare(*gt[perf], t, d)
+                row.update(beat_f=c["beat_f"], downbeat_f=c["downbeat_f"], octave=c["octave"])
             rows.append(row)
             print(f"  {split} {k + 1}/{len(report)} {perf}: {ck}, {len(t)} beats"
                   + (f", beat F {row['beat_f']:.3f}, downbeat F {row['downbeat_f']:.3f}" if "beat_f" in row else ""),

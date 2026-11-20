@@ -166,6 +166,36 @@ def test_beats_batch():
         assert {j[1] for j in evals} == {"no_real", "big_no_real"}, [j[1] for j in evals]
         assert "skip done_all: nothing missing" in r.stdout and "skip training: training not finished" in r.stdout
 
+        # STAGE=beat-runs: only the two beat runs, from scratch, with the same arguments, no dependency
+        def stage(**env):
+            out = tmp / f"stage_{len(list(tmp.glob('stage_*')))}.txt"
+            e = {**os.environ, "USER": "me", "SUBMITS": str(out), "STAGE": "beat-runs", **env}
+            r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/beats.sh'],
+                               cwd=tmp, env=e, capture_output=True, text=True)
+            return r, [ln.split("	") for ln in out.read_text().splitlines()] if out.exists() else []
+        r, sub = stage()
+        assert r.returncode != 0 and "beats_gt.npz missing" in r.stdout and not sub, r.stdout
+        for s_, kind in (("train", "gt"), ("val", "gt"), ("train_transcribed", "tracked"), ("val_transcribed", "tracked")):
+            (tmp / "data" / "processed" / s_).mkdir(parents=True, exist_ok=True)
+            (tmp / "data" / "processed" / s_ / f"beats_{kind}.npz").write_bytes(b"")
+        (tmp / "configs").mkdir(exist_ok=True)
+        (tmp / "configs" / "beat_noise.json").write_text(json.dumps({"fitted": True, "p_meter": 0.7}))  # the old model
+        r, sub = stage()
+        assert r.returncode != 0 and "not the current fitted model" in (r.stdout + r.stderr) and not sub, r.stdout
+        (tmp / "configs" / "beat_noise.json").write_text(json.dumps({"fitted": True, "profiles": [{}] * 82,
+                                                                     "octave_profiles": [{}] * 25}))
+        (tmp / "outputs" / "runs" / "s2s_m_cab").mkdir(parents=True)  # started on the old model: would resume
+        r, sub = stage()
+        assert r.returncode != 0 and "rm -rf outputs/runs/s2s_m_cab" in r.stdout and not sub, r.stdout
+        (tmp / "outputs" / "runs" / "s2s_m_cab").rmdir()
+        r, sub = stage()
+        assert r.returncode == 0 and "82 right-tempo + 25 wrong-tempo profiles" in r.stdout, r.stdout + r.stderr
+        assert [j[1] for j in sub] == ["sf_base_reg_cab", "s2s_m_cab"], sub
+        for j in sub:
+            assert j[2] == train[j[1]][2] and "--dependency" not in j[3] and "train.sbatch" in j[3], (j, train[j[1]])
+        r, _ = stage(STAGE="nope")
+        assert r.returncode != 0 and "unknown STAGE" in r.stdout
+
 
 def main():
     tests = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
