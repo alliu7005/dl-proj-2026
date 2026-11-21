@@ -65,6 +65,11 @@ if ref:
     r = muster(ref[0], ref[0])
     print("MUSTER of a score against itself:", {k: r[k] for k in ("PitchER", "OnsetER", "MeanER")})
     assert r["MeanER"] is not None and r["MeanER"] < 1e-6, r
-print("Beyer & Dai environment ready")
+print("their code and MUSTER work")
 EOF
-echo "next: bash pace/system_eval.sh"
+# the scoring path of scripts/beyer_dai.py (MUSTER on the files, score similarity on chord-split
+# scores): a reference against itself must score 0 everywhere (needs the inputs' manifest)
+if [ -f outputs/system_eval/manifest.json ]; then
+  python scripts/beyer_dai.py selftest --repo "$BD/MIDI2ScoreTransformer"
+fi
+echo "Beyer & Dai environment ready.  next: bash pace/system_eval.sh"

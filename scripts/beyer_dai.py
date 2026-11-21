@@ -13,14 +13,21 @@ Inputs: outputs/system_eval/manifest.json (scripts/system_inputs.py): every ASAP
 ``utils.quantize_path`` with its defaults) and returns a music21 score, written with
 makeNotation=False as their code says.
 
-Scoring follows their evaluation (midi2scoretransformer/evaluation/run_eval.py, utils.eval): each
-predicted score is read back, cleaned with their ``postprocess_score`` (every system's, so all are
-treated alike), then
-  muster(est, reference)                                    MUSTER error rates: pitch, missing,
-                                                            extra, onset, offset, mean (%)
+Scoring follows their evaluation (midi2scoretransformer/evaluation/run_eval.py, utils.eval), the
+same way for every system:
+  muster(est file, reference file)                          MUSTER error rates: pitch, missing,
+                                                            extra, onset, offset, mean (%): their
+                                                            programs read the MusicXML files as
+                                                            they are (chords included)
   score_similarity_normalized(est, reference, full=False)   score-similarity error rates per note:
                                                             deletion, insertion, duration, staff,
                                                             stem direction, spelling (x 100)
+score_similarity's alignment refuses chords (score_transformer: "Chords are not supported"), so for
+it both scores are parsed and every chord is split into its notes at the same offset (``split_chords``:
+pitch, duration, tie, stem, articulations and expressions kept), for every system and the reference
+alike. Their ``postprocess_score`` is not applied on reading back: their predictions went through
+it before they were written (``quantize_path``), and it cannot read chords (``n.pitch``).
+``selftest`` scores a reference against itself through exactly this path (expects no errors).
 and the per-performance values are averaged without weighting (their aggregation), skipping a
 performance whose metric failed (None). Each table row says how many performances it averages;
 rows over the performances every system scored ("common") compare like with like. Their paper's
@@ -87,9 +94,33 @@ def predict(args) -> None:
 
 
 # --------------------------------------------------------------------------------------- score
+def split_chords(score):
+    """Replace every chord by its notes at the chord's offset in the same container (in place;
+    returns the score): each note keeps its pitch, tie and notehead from the chord's note, and
+    the chord's duration, stem direction, articulations and expressions. score_similarity's
+    alignment needs single notes; the notation it rates (pitch, duration, staff, stem, spelling)
+    is unchanged."""
+    import copy
+    from music21 import chord
+    for c in list(score.recurse().getElementsByClass(chord.Chord)):
+        site, off = c.activeSite, c.offset
+        if site is None:
+            continue
+        for cn in c.notes:
+            n = copy.deepcopy(cn)
+            n.duration = copy.deepcopy(c.duration)
+            if c.stemDirection not in (None, "unspecified"):
+                n.stemDirection = c.stemDirection
+            n.articulations = [copy.deepcopy(a) for a in c.articulations]
+            n.expressions = [copy.deepcopy(e) for e in c.expressions]
+            site.insert(off, n)
+        site.remove(c)
+    return score
+
+
 def rate(job: tuple) -> dict:
     """Their metrics for one predicted score (in a worker process): {muster: {...}, sim: {...}}, a
-    metric that failed -> None, a missing prediction -> both None."""
+    metric that failed -> None (its error in "error"), a missing prediction -> both None."""
     repo, est_path, ref_path = job
     their_code(repo)
     out = {"muster": None, "sim": None, "error": None}
@@ -98,23 +129,47 @@ def rate(job: tuple) -> dict:
         return out
     from music21 import converter
     from muster import muster
-    from score_utils import postprocess_score
     from utils import score_similarity_normalized
+    errors = []
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        try:
-            est = postprocess_score(converter.parse(est_path), inPlace=False)
-        except Exception as ex:  # noqa: BLE001
-            out["error"] = f"parse: {type(ex).__name__}: {ex}"
-            return out
-        for key, fn in (("muster", lambda: muster(est, ref_path)),
-                        ("sim", lambda: score_similarity_normalized(est, ref_path, full=False))):
+
+        def sim():
+            est = split_chords(converter.parse(est_path, forceSource=True))
+            ref = split_chords(converter.parse(ref_path, forceSource=True))
+            return score_similarity_normalized(est, ref, full=False)
+        for key, fn in (("muster", lambda: muster(str(est_path), str(ref_path))), ("sim", sim)):
             try:
                 r = fn()
-                out[key] = {k: (float(v) if isinstance(v, (int, float)) else None) for k, v in r.items()}
+                vals = {k: (float(v) if isinstance(v, (int, float)) else None) for k, v in r.items()}
+                if all(v is None for v in vals.values()):  # muster's silent failure: EMPTY_SCORE
+                    raise RuntimeError("every value is None")
+                out[key] = vals
             except Exception as ex:  # noqa: BLE001
-                out["error"] = f"{key}: {type(ex).__name__}: {ex}"
+                errors.append(f"{key}: {type(ex).__name__}: {ex}")
+    out["error"] = "; ".join(errors) or None
     return out
+
+
+def selftest(args) -> None:
+    """A reference score against itself through ``rate``: every error rate must be 0. Then, if
+    any predictions exist, one of each system, to show that they can be read and scored."""
+    entries = load_manifest(args.manifest, "clean,real")
+    ref = entries[0]["reference"]
+    r = rate((args.repo, ref, ref))
+    print(f"{ref} against itself: {r}")
+    assert r["error"] is None, r["error"]
+    worst = max(abs(v) for d in (r["muster"], r["sim"]) for k, v in d.items()
+                if v is not None and k in dict(MUSTER_KEYS) | dict(SIM_KEYS))
+    assert worst < 1e-6, f"a score against itself has error rate {worst}"
+    out = Path(args.out)
+    for d in sorted(p for p in out.iterdir() if p.is_dir() and p.name != "inputs") if out.exists() else []:
+        e = next((e for e in entries if pred_path(out, d.name, e).exists()), None)
+        if e is not None:
+            r = rate((args.repo, str(pred_path(out, d.name, e)), e["reference"]))
+            print(f"{d.name} {e['condition']} {e['performance']}: error {r['error']}; MUSTER onset "
+                  f"{(r['muster'] or {}).get('OnsetER')}; sim duration {(r['sim'] or {}).get('NoteDuration')}")
+    print("selftest ok")
 
 
 def mean_over(values: list) -> float | None:
@@ -201,7 +256,7 @@ def load_manifest(path: str, conditions: str) -> list[dict]:
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("predict", "score"):
+    for name in ("predict", "score", "selftest"):
         p = sub.add_parser(name)
         p.add_argument("--repo", required=True, help="the MIDI2ScoreTransformer checkout")
         p.add_argument("--manifest", default="outputs/system_eval/manifest.json")
@@ -212,7 +267,7 @@ def main(argv=None):
                                       help="comma-separated folders under --out (beyer_dai, <run>_<mode>, ...)")
     sub.choices["score"].add_argument("--jobs", type=int, default=8)
     args = ap.parse_args(argv)
-    predict(args) if args.cmd == "predict" else score(args)
+    {"predict": predict, "score": score, "selftest": selftest}[args.cmd](args)
 
 
 if __name__ == "__main__":

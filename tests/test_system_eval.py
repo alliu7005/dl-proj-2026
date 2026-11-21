@@ -183,6 +183,55 @@ def test_system_eval_batch():
         sc = by["sysscore"][1]
         assert f"--dependency=afterany:{dep}" in sc and "conda activate bd311" in sc
         assert "--systems beyer_dai,sf_base_reg_cab_meter,sf_base_reg_cab_tsearch_beat" in sc, sc
+        # ONLY=bd / ONLY=score: no inputs, none of our systems; Beyer & Dai (bd only), then the scoring
+        (tmp / "jobs.txt").unlink()
+        env2 = dict(env, ONLY="score")
+        r = subprocess.run(cmd, cwd=tmp, env=env2, capture_output=True, text=True)
+        assert r.returncode != 0 and "manifest.json missing" in r.stdout and not (tmp / "jobs.txt").exists()
+        (tmp / "outputs" / "system_eval").mkdir(parents=True)
+        (tmp / "outputs" / "system_eval" / "manifest.json").write_text("[]")
+        for only, names in (("score", ["sysscore"]), ("bd", ["bdpredict", "sysscore"])):
+            if (tmp / "jobs.txt").exists():
+                (tmp / "jobs.txt").unlink()
+            r = subprocess.run(cmd, cwd=tmp, env=dict(env, ONLY=only, RUNS="sf_base_reg_cab:meter s2s_m_cab:meter"),
+                               capture_output=True, text=True)
+            assert r.returncode == 0, r.stdout + r.stderr
+            jobs = [ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()]
+            assert [j[1].split("-J ")[1].split()[0] for j in jobs] == names, jobs
+            sc = jobs[-1][1]
+            assert "--systems beyer_dai,sf_base_reg_cab_meter,s2s_m_cab_meter" in sc, sc
+            if only == "score":
+                assert "--dependency" not in sc
+            else:
+                assert "--dependency" not in jobs[0][1] and f"--dependency=afterany:{jobs[0][0]}" in sc
+        r = subprocess.run(cmd, cwd=tmp, env=dict(env, ONLY="nope"), capture_output=True, text=True)
+        assert r.returncode != 0 and "unknown ONLY" in r.stdout
+
+
+def test_split_chords():
+    """score_similarity needs single notes: every chord becomes its notes at the same offset, each
+    keeping its pitch and tie and the chord's duration, stem and articulations; nothing else moves."""
+    from music21 import articulations, chord, meter, note, stream, tie
+    m = stream.Measure()
+    m.append(meter.TimeSignature("4/4"))
+    c = chord.Chord(["C4", "E4", "G4"], quarterLength=2.0)
+    c.stemDirection = "down"
+    c.articulations.append(articulations.Staccato())
+    c[1].tie = tie.Tie("start")
+    m.insert(0, c)
+    m.insert(2.0, note.Note("A4", quarterLength=1.0))
+    m.insert(3.0, chord.Chord(["D5", "F5"], quarterLength=1.0))
+    sc = stream.Score([stream.Part([m])])
+    beyer_dai.split_chords(sc)
+    assert not list(sc.recurse().getElementsByClass(chord.Chord))
+    got = sorted((float(n.getOffsetInHierarchy(sc)), n.pitch.nameWithOctave, float(n.duration.quarterLength))
+                 for n in sc.recurse().notes)
+    assert got == [(0.0, "C4", 2.0), (0.0, "E4", 2.0), (0.0, "G4", 2.0), (2.0, "A4", 1.0), (3.0, "D5", 1.0),
+                   (3.0, "F5", 1.0)], got
+    first = [n for n in sc.recurse().notes if float(n.getOffsetInHierarchy(sc)) == 0.0]
+    assert all(n.stemDirection == "down" and any(isinstance(a, articulations.Staccato) for a in n.articulations)
+               for n in first)
+    assert [n.pitch.name for n in first if n.tie is not None and n.tie.type == "start"] == ["E"]
 
 
 def test_cli():
