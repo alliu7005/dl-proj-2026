@@ -9,7 +9,12 @@ compare directly with scripts/evaluate_pieces.py (the seq2seq models) and script
 
 Grid (where each note sits in the bars, the labeller's input): ``true`` = the score's beats timed
 through the note alignment (Phase 1: the labeller given the right grid, as the beat-snap baselines
-are given the annotated beats). The result is stored as mode ``grid_true`` in the run's
+are given the annotated beats); ``meter:<run>`` = the grid a meter model decoded from the tracked
+beats (Phase 3, the real system: scripts/eval_meter.py --run <run> saves it per performance; clean
+and synthetic use its grids of the clean test performances with the simulated tracker, real its
+grids of the transcriptions with Beat This!'s beats), each window's bars, time signatures and key
+signature taken from it (src/notelabels.py window_frame), so nothing comes from the score. The
+result is stored as mode ``grid_true`` / ``grid_meter_<run>`` in the run's
 eval_pieces_<ckpt>.json, next to the other systems' modes, so scripts/compare_runs.py tables it;
 per-head accuracies are kept with it. Conditions: clean (ASAP test, clean MIDI), synthetic (the
 same with the fixed synthetic noise draw), real (Transkun transcriptions), periscope; a split
@@ -33,11 +38,20 @@ from src.dataset import ScoreSegmentDataset  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.eval.plan import stamp  # noqa: E402
 from src.labeller import head_counts, load_labeller, predict_windows  # noqa: E402
-from src.notelabels import LABEL_FILE, score_notes  # noqa: E402
+from src.notelabels import LABEL_FILE, score_notes, window_frame  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 
 SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed", "periscope": "test_periscope"}
-GRIDS = ("true",)
+METER_GRIDS = {"clean": "clean", "synthetic": "clean", "real": "real"}  # condition -> eval_meter.py's grids
+
+
+def grid_mode(grid: str) -> str:
+    """--grid -> the result's mode name: true -> grid_true, meter:<run> -> grid_meter_<run>."""
+    if grid == "true":
+        return "grid_true"
+    if grid.startswith("meter:") and grid[6:]:
+        return "grid_meter_" + grid[6:]
+    raise SystemExit(f"--grid must be 'true' or 'meter:<run>', not {grid!r}")
 
 
 def main(argv=None):
@@ -45,7 +59,7 @@ def main(argv=None):
     ap.add_argument("--run", required=True)
     ap.add_argument("--ckpt", default="best.pt")
     ap.add_argument("--conditions", default="clean,synthetic,real,periscope")
-    ap.add_argument("--grid", default="true", choices=list(GRIDS))
+    ap.add_argument("--grid", default="true", help="true, or meter:<run> (a meter model's decoded grids)")
     ap.add_argument("--limit-perfs", type=int, default=0)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", default="auto")
@@ -62,7 +76,7 @@ def main(argv=None):
     cfg = model.cfg
     ctx = {"context_before": cfg.context_before, "context_after": cfg.context_after}
     coll = TruncatingCollate(cfg.max_notes, 10 ** 9)
-    mode = f"grid_{args.grid}"
+    mode = grid_mode(args.grid)
     out_file = run / f"eval_pieces_{Path(args.ckpt).stem}.json"
     nm = NoiseModel.from_json("configs/noise_stats.json")
     nm.cfg.clean_prob = 0.0
@@ -76,17 +90,34 @@ def main(argv=None):
             continue
         kw = dict(noise=nm, seed=12345, prompt_dropout=0.0) if cond == "synthetic" else {}
         ds = ScoreSegmentDataset(str(data / split), str(data / "vocab.json"), notelabels=True, **ctx, **kw)
+        grids = None
+        if args.grid != "true":
+            gfile = Path(args.runs_dir) / args.grid[6:] / f"grids_{METER_GRIDS.get(cond, '')}.pkl"
+            if cond not in METER_GRIDS or not gfile.exists():
+                print(f"skip {cond}: no meter grids ({gfile}: scripts/eval_meter.py --run {args.grid[6:]})")
+                continue
+            import pickle
+            grids = pickle.load(open(gfile, "rb"))
         perfs = defaultdict(list)
         for i, m in enumerate(ds.store.meta):
             perfs[m["performance"]].append(i)
         names = sorted(perfs)
         if args.limit_perfs and len(names) > args.limit_perfs:
             names = sorted(np.random.default_rng(0).choice(names, args.limit_perfs, replace=False).tolist())
+        if grids is not None:
+            names = [p for p in names if p in grids]
         windows = [i for p in names for i in sorted(perfs[p], key=lambda i: ds.store.meta[i]["win"])]
+        frames = {}
+        if grids is not None:  # each window's grid, bars and key from the decoded grid, nothing from the score
+            for i in windows:
+                m = ds.store.meta[i]
+                g = grids[m["performance"]]
+                frames[i] = window_frame(g, float(m["perf_t0"]), ds.store.get(i)[0][:, 1], int(g.get("key", 0)))
+            ds.grid_override = frames
         items = [ds[i] for i in windows]
         gts = [ds.vocab.decode(it["target"][it["prompt_len"]:-1].tolist()) for it in items]
-        preds = predict_windows(model, items, [score_notes(g)[1] for g in gts], coll, device, amp, ds.label_space,
-                                args.batch_size)
+        wins = [frames[i][2] for i in windows] if frames else [score_notes(g)[1] for g in gts]
+        preds = predict_windows(model, items, wins, coll, device, amp, ds.label_space, args.batch_size)
         acc, acc_unseen = Accumulator(), Accumulator()
         for i, g, p in zip(windows, gts, preds):
             acc.add(g, p)

@@ -345,6 +345,9 @@ class ScoreSegmentDataset(Dataset):
                 raise FileNotFoundError(f"{split_dir}/notelabels.npz missing or out of date: run "
                                         f"scripts/build_notelabels.py first")
             self.label_space = LabelSpace(self.vocab.itos)
+        # evaluation with an estimated grid: {window index: (grid_t, grid_q, src.notelabels.Window)}
+        # replaces the stored true grid and the target's bars (scripts/eval_labeller.py --grid meter:...)
+        self.grid_override: dict | None = None
         self.metrical = bool(metrical)
         self._mfile = None
         self._mcache: dict = {}
@@ -560,10 +563,14 @@ class ScoreSegmentDataset(Dataset):
         extra = {}
         if nl is not None:
             from .notelabels import grid_features, score_notes, targets
-            g0, g1 = self._nl["grid_index"][i]
-            win = score_notes(self.vocab.decode(tokens.tolist()))[1]
-            gf, bar_est, pos_est = grid_features(notes[:, 1], self._nl["grid_t"][g0:g1] * tempo,
-                                                 self._nl["grid_q"][g0:g1], win)
+            if self.grid_override is not None and i in self.grid_override:
+                g_t, g_q, win = self.grid_override[i]
+                g_t = np.asarray(g_t) * tempo
+            else:
+                g0, g1 = self._nl["grid_index"][i]
+                win = score_notes(self.vocab.decode(tokens.tolist()))[1]
+                g_t, g_q = self._nl["grid_t"][g0:g1] * tempo, self._nl["grid_q"][g0:g1]
+            gf, bar_est, pos_est = grid_features(notes[:, 1], g_t, g_q, win)
             feats = np.concatenate([feats, gf], axis=1)
             tg, fl = targets(nl, bar_est, self.label_space)
             extra = {"labels": torch.from_numpy(tg), "flags": torch.from_numpy(fl),

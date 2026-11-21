@@ -274,6 +274,18 @@ bash pace/labeller.sh        # labelprep (CPU: labels + true grids for every spl
 `grid_true`); resubmitting the same NAME / ARGS resumes from `last.pt`, and a finished run only
 evaluates. The comparison: `python3 scripts/compare_runs.py`, section "Note labeller (v2) per test set".
 
+## 4j. v2 Phases 2 + 3: the meter model, and the labeller on its grids
+
+```bash
+bash pace/meter.sh           # metprep (CPU: whole performances + tests) -> meter_base (GPU: train,
+                             # evaluate, save grids) -> v2_<labeller> (GPU: each labeller on the grids)
+```
+
+The `v2_*` jobs also wait for any `labeller` job still queued or running, so submit this whenever.
+`outputs/runs/meter_base/eval_meter.json` has the grid's beat / downbeat F and time-signature
+accuracy next to Beat This!'s own; `python3 scripts/compare_runs.py` puts each labeller's true-grid
+and meter-grid results side by side ("Note labeller (v2)").
+
 ## 5. Compare the runs and bring results back
 
 ```bash

@@ -58,7 +58,7 @@ class Window:
     bar starts at a bar line, and the position the first bar starts at."""
     bars: list = field(default_factory=list)   # [(ts, key)]
     opens_with_bar: bool = True
-    start_pos: Fraction = Fraction(0)
+    start_pos: Fraction | None = Fraction(0)   # None: the renderer takes the first note's position
 
 
 def score_notes(tokens: list[str]) -> tuple[list[ScoreNote], Window]:
@@ -166,7 +166,11 @@ def render(win: Window, placed: list[Placed]) -> list[str]:
                                                   arpeggio=p.arp and first, ornaments=p.orns if first else ()))
             left -= part
             bar, pos, first = bar + 1, Fraction(0), False
-    start = float(win.start_pos) if not win.opens_with_bar and win.start_pos > 0 else None
+    sp = win.start_pos
+    if not win.opens_with_bar and sp is None:  # an estimated frame: the first labelled note's position
+        first = [p.pos for p in placed if p.bar == 0]
+        sp = min(first) if first else Fraction(0)
+    start = float(sp) if not win.opens_with_bar and sp and sp > 0 else None
     return tokenize_bars(measures, [[j] for j in range(len(measures))], start_pos=start)
 
 
@@ -435,3 +439,53 @@ def targets(rows: np.ndarray, bar_est: np.ndarray, space: LabelSpace) -> tuple[n
         tg[i, 5] = r[6]
         fl[i] = [(int(r[7]) >> b) & 1 for b in range(N_FLAGS)]
     return tg, fl
+
+
+# ---------------------------------------------------------------------------------------------
+# an estimated grid (src/meter.py) in a window's frame, and the key signature from the notes
+# ---------------------------------------------------------------------------------------------
+
+# Krumhansl-Kessler key profiles (C major / C minor), the classic tonal-hierarchy weights
+_KK_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+_KK_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+_FIFTHS = {0: 0, 7: 1, 2: 2, 9: 3, 4: 4, 11: 5, 6: 6, 1: -5, 8: -4, 3: -3, 10: -2, 5: -1}  # tonic pc -> sharps
+
+
+def estimate_key(notes: np.ndarray) -> int:
+    """Key signature (sharps > 0, flats < 0) of a set of notes: the major or minor key whose
+    Krumhansl-Kessler profile correlates best with the duration-weighted pitch-class profile (a
+    minor key takes its relative major's signature). ``notes``: pitch, onset, offset or
+    duration, ... (only pitch and the third column's length are used)."""
+    if len(notes) == 0:
+        return 0
+    w = np.clip(np.abs(notes[:, 2] - notes[:, 1]) if (notes[:, 2] > notes[:, 1]).mean() > 0.5 else notes[:, 2], 0.05, 4.0)
+    prof = np.bincount(notes[:, 0].astype(int) % 12, weights=w, minlength=12)
+    best, key = -np.inf, 0
+    for tonic in range(12):
+        for profile, minor in ((_KK_MAJOR, False), (_KK_MINOR, True)):
+            r = np.corrcoef(prof, np.roll(profile, tonic))[0, 1]
+            if r > best:
+                best, key = r, _FIFTHS[(tonic + 3) % 12] if minor else _FIFTHS[tonic]
+    return int(np.clip(key, -7, 7))
+
+
+def window_frame(grid: dict, perf_t0: float, onsets: np.ndarray, key: int):
+    """A piece's estimated grid (src/meter.py grid_from_states, absolute seconds) in one window's
+    frame: (grid_t [K] window seconds, grid_q [K] quarters from the window's first bar line,
+    Window). The window's first bar is the bar the grid puts its first note in (``onsets``: its
+    own notes, window seconds; carried-over ones, < 0, aside); its bars take the grid's time
+    signatures and ``key``; it opens with a bar line when that note sits on it (within 1/24
+    quarter), else its start position is left to the renderer (the first labelled note's)."""
+    t = np.asarray(grid["t"], np.float64) - perf_t0
+    q = np.asarray(grid["q"], np.float64)
+    if len(t) < 2:
+        return t, q, Window(bars=[("4/4", key)])
+    live = np.asarray(onsets, np.float64)
+    live = live[live >= 0]
+    first = float(live.min()) if len(live) else 0.0
+    qf = float(grid_position(np.array([first]), t, q)[0][0])
+    bq = np.asarray(grid["bar_q"], np.float64)
+    b0 = max(0, int(np.searchsorted(bq, qf + 1e-6, side="right")) - 1)
+    bars = [(ts, key) for ts in grid["bars"][b0:]] or [(grid["bars"][-1], key)]
+    win = Window(bars=bars, opens_with_bar=(qf - bq[b0]) < 1 / 24, start_pos=None)
+    return t, q - bq[b0], win

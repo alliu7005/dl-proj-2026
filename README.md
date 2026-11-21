@@ -920,6 +920,36 @@ baselines are evaluated in. `nl_base` (8 layers, 25.6M parameters) and `nl_large
 on validation, the beat-snap baseline's level. Results: `scripts/eval_labeller.py` -> mode
 `grid_true` in each run's results, tabled by `scripts/compare_runs.py` ("Note labeller (v2)").
 
+**Phase 2: the meter model** (`src/meter.py`, `pace/meter.sh`): the grid from the tracked beats and
+the notes of a whole piece, so the labeller needs nothing from the score. Beat This!'s beats are
+close to the notated ones but not the same (double tempo on 18% of pieces, triplet level on some,
+12% missed, 13% extra, downbeats marked almost independently per beat), so the model works on the
+TRACKED beats. A transformer over the piece's beat sequence (4.75M parameters) predicts for each:
+whether a bar starts on it, how many quarter notes it lasts until the next tracked beat (1/4 to 4:
+this absorbs a doubled or tripled tempo and missed or extra beats), and its bar's time signature,
+from per-beat note features (where notes fall inside the beat, how loud / low / long the notes on
+it are, the change of harmony across it, Beat This!'s own downbeat flag, the beat's length). A
+Viterbi search then picks the most probable CONSISTENT grid over (time signature, position in the
+bar): bars add up to their time signature, which changes only at a bar line. Given the true answers
+it reproduces the annotated grid (validation: beat / downbeat F 0.996, time signature 1.000).
+
+- **Training data** (`scripts/build_meter_data.py`): every aligned ASAP performance (756 train / 102
+  val / 59 test) with its annotated grid (beats with quarter positions, bar starts, time and key
+  signatures), the tracker's errors simulated anew each time (the validated BeatNoise) and synthetic
+  transcription noise on the notes; plus the real-transcription performances with Beat This!'s own
+  beats.
+- **First signal** (1,200 steps on a laptop CPU, batch 8): validation downbeat F 0.615 against the
+  tracker's own 0.578 on the same beats, beat F equal (0.808 vs 0.807), time signature 0.45.
+- **Evaluation** (`scripts/eval_meter.py`): every test performance's grid scored against the
+  annotations (beat F, downbeat F, time signature) next to the tracker's own numbers; the grids are
+  saved with a key signature estimated from the notes (Krumhansl-Kessler profiles: 74% of ASAP
+  pieces' signatures exact, 76% counting 7 sharps = 5 flats, against the seq2seq model's 0.41).
+
+**Phase 3: the whole v2 system** (`scripts/eval_labeller.py --grid meter:<run>`): the labeller on the
+meter model's grid. Each window takes its bars, time signatures and key from the decoded grid
+(`window_frame`: its first bar is the bar the grid puts its first note in), so nothing comes from
+the score: mode `grid_meter_<run>`, next to `grid_true` in the comparison tables.
+
 ## Demo: audio in, score out
 
 A small web app runs the whole system on one recording: Transkun V2 transcribes the audio, the
@@ -1150,7 +1180,11 @@ src/labeller.py                  v2: the note labeller (Scoreformer encoder + pe
 scripts/build_notelabels.py      v2: labels + true grids per split -> <split>/notelabels.npz
 scripts/label_ceiling.py         v2: every window rendered from its true labels (the labeller's ceiling)
 scripts/train_labeller.py        v2: train the note labeller
-scripts/eval_labeller.py         v2: evaluate it on the test sets (mode grid_true)
+scripts/eval_labeller.py         v2: evaluate it on the test sets (true grid: grid_true; a meter model's: grid_meter_<run>)
+src/meter.py                     v2: the meter model (beat features, targets, transformer, consistent Viterbi decoding)
+scripts/build_meter_data.py      v2: whole performances with annotated grids (+ transcriptions, tracked beats)
+scripts/train_meter.py           v2: train the meter model
+scripts/eval_meter.py            v2: score its grids against the annotations, save them for the labeller
 pace/train.sbatch                PACE GPU job: train + evaluate
 pace/reevaluate.sh               evaluate finished runs: what is missing, one job per run or per test set
 pace/beats.sh                    the beat batch (ground-truth beats, Beat This!, 3 beat runs)
@@ -1159,6 +1193,7 @@ pace/bd_setup.sh                 Beyer & Dai's environment, code, forks and chec
 pace/system_eval.sh              system-level comparison: ours vs Beyer & Dai on whole pieces
 pace/labeller.sh                 v2 Phase 1: labels for every split, then two note labellers (true grid)
 pace/train_labeller.sbatch       one note labeller: train + evaluate (resumes from last.pt)
+pace/meter.sh                    v2 Phases 2 + 3: the meter model, then the labellers on its grids
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model
 tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
@@ -1169,6 +1204,7 @@ tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --o
 tests/test_reevaluate.py         pace/reevaluate.sh (per run / per test set), pace/beats.sh, pace/tsearch.sh: what they submit
 tests/test_system_eval.py        system-level comparison: inputs, our pipeline on them, aggregation, job graph
 tests/test_notelabels.py         v2: labels, ties, rendering, grid features, dataset, labeller training / evaluation
+tests/test_meter.py              v2: meter targets, consistent decoding, grid scores, key estimate, end to end
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
 tests/test_beats.py              beats vs ASAP annotations, features, tracker errors (bar classes, octave stretches, profiles, fit, vs Beat This!), tracker folds, train / eval / demo
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes

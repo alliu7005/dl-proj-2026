@@ -218,14 +218,17 @@ def summary(runs, res, info, now):
             "One pass labels every performed note (bar, position, written length, staff, flags, or delete) and "
             "the notes are rendered back to tokens (src/labeller.py, scripts/eval_labeller.py). true grid = given "
             "the score's beats timed through the note alignment (like the beat-snap baselines given the annotated "
-            "beats). The seq2seq models' meter mode is the system they replace.", ""]
+            "beats); meter model <run> = the grid that meter model decoded from the tracked beats, with its bars, "
+            "time signatures and an estimated key signature: nothing from the score (the real system). The "
+            "seq2seq models' meter mode is the system they replace.", ""]
     for cond, desc in CONDITIONS:
         rows = []
         for r in runs:
-            for mode, label in LABELLER_MODES:
-                v = res[r].get(cond, {}).get(mode)
-                if v:
-                    rows.append([r, label] + [num(v.get(k)) for k, _ in METRICS])
+            modes = [(m, dict(LABELLER_MODES).get(m, "meter model " + m[len("grid_meter_"):]))
+                     for m in res[r].get(cond, {}) if m.startswith("grid_")]
+            for mode, label in sorted(modes, key=lambda x: (x[0] != "grid_true", x[0])):
+                v = res[r][cond][mode]
+                rows.append([r, label] + [num(v.get(k)) for k, _ in METRICS])
         if rows:
             out += ["### {}: {}".format(cond, desc), "",
                     table(["run", "grid"] + [m[1] for m in METRICS], rows,
