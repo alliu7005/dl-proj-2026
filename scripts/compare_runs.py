@@ -37,6 +37,8 @@ CONDITIONS = [  # (key in the results, description)
 MODES = ["oracle", "chained", "none", "guarded", "meter", "piece"]
 SYSTEM = "meter"  # the mode the demo runs (guarded + time-signature consistency)
 TS_MODES = ["meter", "ts_true", "tsearch", "tsearch_beat"]  # the time-signature search table
+# note labeller (v2) results, one per grid it was given (scripts/eval_labeller.py)
+LABELLER_MODES = [("grid_true", "true grid")]
 TS_HELP = ("ts_true = guarded with each window's true time signature forced (the most a time-signature "
            "choice can give); tsearch = the whole piece decoded under its 3 likeliest time signatures, keeping "
            "the one the model finds most probable; tsearch_beat = the same candidates, keeping the one whose "
@@ -130,7 +132,8 @@ def run_info(d):
     else:
         ended = DASH
     arch = cfg.get("arch") or args.get("arch") or "score2seq"
-    name = "Score2Seq" if arch == "score2seq" else "Scoreformer {}".format(args.get("size", ""))
+    name = {"score2seq": "Score2Seq", "labeller": "Note labeller {}".format(args.get("size", ""))}.get(
+        arch, "Scoreformer {}".format(args.get("size", "")))
     cb, ca = model.get("context_before", 0), model.get("context_after", 0)
     tt = cfg.get("data", {}).get("train_transcribed")
     return {
@@ -210,6 +213,23 @@ def summary(runs, res, info, now):
                 + [num(res[r][cond].get(m, {}).get("bar_f1")) for m in MODES] for r in have]
         out += ["### {}: {}".format(cond, desc), "",
                 table(hdr, rows, {k + 1: "max" for k in range(2 * len(MODES))}), ""]
+
+    out += ["## Note labeller (v2) per test set", "",
+            "One pass labels every performed note (bar, position, written length, staff, flags, or delete) and "
+            "the notes are rendered back to tokens (src/labeller.py, scripts/eval_labeller.py). true grid = given "
+            "the score's beats timed through the note alignment (like the beat-snap baselines given the annotated "
+            "beats). The seq2seq models' meter mode is the system they replace.", ""]
+    for cond, desc in CONDITIONS:
+        rows = []
+        for r in runs:
+            for mode, label in LABELLER_MODES:
+                v = res[r].get(cond, {}).get(mode)
+                if v:
+                    rows.append([r, label] + [num(v.get(k)) for k, _ in METRICS])
+        if rows:
+            out += ["### {}: {}".format(cond, desc), "",
+                    table(["run", "grid"] + [m[1] for m in METRICS], rows,
+                          {k + 2: "max" for k in range(len(METRICS))}), ""]
 
     out += ["## Time-signature search per test set", "", TS_HELP + ".", ""]
     keys = [("onset_f1", "onset"), ("bar_f1", "bar"), ("ts_acc", "ts")]

@@ -877,6 +877,49 @@ when they are right? its `real_gt_beats` against `sf_base_reg_cab`'s) and `sf_ba
 reported in `outputs/compare/` but too small to decide anything (time signature accuracy is 0.000 for
 6 runs, and 0.000 to 0.500 between runs).
 
+## v2: grid first, then label every note
+
+The seq2seq models write the score token by token, one 128-note window at a time. The evaluations
+above show where that loses: forcing the true time signature lifts onset F1 only from 0.350 to 0.424
+on real audio, while forgiving each window a constant shift lifts it to 0.549, close to the 0.577 it
+gets with the true previous bars. Most of the remaining loss is each window guessing where in the
+bar it starts. And given the true meter, the per-note XGBoost baseline places notes better (onset F1
+0.718 clean / 0.738 real) than the seq2seq model does (0.586), while the seq2seq model writes better
+durations (0.79-0.87 vs 0.53). v2 combines the two: decide the metrical grid once for the whole
+piece, then label every performed note against it.
+
+1. **Grid** (Phase 1: the true one; Phase 2: Beat This! + a meter model): beats with bar numbers and
+   time signatures. Each note's position in the bars is read off it (`src/notelabels.py`
+   `grid_features`: the bar and position it falls at, Fourier features of that position, the local
+   tempo).
+2. **Note labeller** (`src/labeller.py`): the Scoreformer encoder (time rotary attention over onsets
+   in seconds) with per-note heads instead of a decoder: keep or delete (a transcription error, an
+   extra note of a trill), the bar correction (-1 / 0 / +1: notes played just before a bar line), the
+   position as the target grammar writes it (`pos_k` + `sub_x`), the written length with ties, staff,
+   and grace / arpeggio / ornament flags. One parallel pass per window: no generation, so nothing
+   loops, and no window guesses where it starts.
+3. **Rendering** (`src/notelabels.py render`): labelled notes back to tokens; a note held across a
+   bar line becomes the note + its tied continuation, as scores write it. The same metrics then
+   score v2 and every other system.
+
+**Labels** (`scripts/build_notelabels.py` -> `<split>/notelabels.npz`): each window's performed notes
+are aligned to its target (the note alignment of `src/metrical.py`, plus grace notes by pitch and
+time); paired notes get their score labels, the others "delete". Synthetic noise carries the labels
+along (`transfer_rows`: a note the noise adds is a delete), tempo augmentation stretches the grid.
+
+**The label scheme's ceiling** (`scripts/label_ceiling.py`): every window rendered from its own TRUE
+labels, i.e. a perfect labeller. On ASAP test windows: onset F1 0.949, duration 0.998, staff 1.000,
+time signature 1.000. What it cannot reach is score notes no performed note pairs with (9% of the
+sounding notes: mostly notes really not played as written, since 77% of them have no same-pitch
+leftover note within 0.3 s), so a better aligner would add about 0.01. 13% of clean-MIDI performed
+notes are deletes (trill and ornament notes the score writes once).
+
+**Phase 1** (`pace/labeller.sh`): the labeller with the true grid, the setting the beat-snap
+baselines are evaluated in. `nl_base` (8 layers, 25.6M parameters) and `nl_large` (12 layers, d 768,
+85.6M). A 3.3M-parameter labeller trained for 60 steps on a laptop CPU already reaches onset F1 0.630
+on validation, the beat-snap baseline's level. Results: `scripts/eval_labeller.py` -> mode
+`grid_true` in each run's results, tabled by `scripts/compare_runs.py` ("Note labeller (v2)").
+
 ## Demo: audio in, score out
 
 A small web app runs the whole system on one recording: Transkun V2 transcribes the audio, the
@@ -1102,12 +1145,20 @@ scripts/compare_runs.py          tables of every evaluated run -> outputs/compar
 scripts/system_inputs.py         whole-piece test inputs (clean MIDI, cut Transkun transcriptions) + references
 scripts/system_scores.py         our pipeline on them -> one MusicXML per performance
 scripts/beyer_dai.py             Baseline 3: Beyer & Dai's model (predict) and their metrics for every system (score)
+src/notelabels.py                v2: per-note score labels, tie-aware rendering back to tokens, grid features
+src/labeller.py                  v2: the note labeller (Scoreformer encoder + per-note heads), prediction -> tokens
+scripts/build_notelabels.py      v2: labels + true grids per split -> <split>/notelabels.npz
+scripts/label_ceiling.py         v2: every window rendered from its true labels (the labeller's ceiling)
+scripts/train_labeller.py        v2: train the note labeller
+scripts/eval_labeller.py         v2: evaluate it on the test sets (mode grid_true)
 pace/train.sbatch                PACE GPU job: train + evaluate
 pace/reevaluate.sh               evaluate finished runs: what is missing, one job per run or per test set
 pace/beats.sh                    the beat batch (ground-truth beats, Beat This!, 3 beat runs)
 pace/tsearch.sh                  the time-signature batch (search modes on the best models, 3 runs)
 pace/bd_setup.sh                 Beyer & Dai's environment, code, forks and checkpoint (once)
 pace/system_eval.sh              system-level comparison: ours vs Beyer & Dai on whole pieces
+pace/labeller.sh                 v2 Phase 1: labels for every split, then two note labellers (true grid)
+pace/train_labeller.sbatch       one note labeller: train + evaluate (resumes from last.pt)
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model
 tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
@@ -1117,6 +1168,7 @@ tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume, 
 tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --only-missing end to end
 tests/test_reevaluate.py         pace/reevaluate.sh (per run / per test set), pace/beats.sh, pace/tsearch.sh: what they submit
 tests/test_system_eval.py        system-level comparison: inputs, our pipeline on them, aggregation, job graph
+tests/test_notelabels.py         v2: labels, ties, rendering, grid features, dataset, labeller training / evaluation
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
 tests/test_beats.py              beats vs ASAP annotations, features, tracker errors (bar classes, octave stretches, profiles, fit, vs Beat This!), tracker folds, train / eval / demo
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes

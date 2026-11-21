@@ -263,6 +263,17 @@ everything with their metrics: `outputs/system_eval/results.md`, with their pape
 the clean results to check the reproduction. Bring it back with
 `scp -r <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/outputs/system_eval/results.md outputs/system_eval/`.
 
+## 4i. v2 Phase 1: the note labeller with the true grid
+
+```bash
+bash pace/labeller.sh        # labelprep (CPU: labels + true grids for every split, then the label
+                             # tests) -> nl_base + nl_large (GPU: train, then evaluate every test set)
+```
+
+`pace/train_labeller.sbatch` trains one labeller and evaluates it (`scripts/eval_labeller.py`, mode
+`grid_true`); resubmitting the same NAME / ARGS resumes from `last.pt`, and a finished run only
+evaluates. The comparison: `python3 scripts/compare_runs.py`, section "Note labeller (v2) per test set".
+
 ## 5. Compare the runs and bring results back
 
 ```bash

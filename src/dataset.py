@@ -292,7 +292,7 @@ class ScoreSegmentDataset(Dataset):
                  use_prompt: bool = True, prompt_dropout: float = 0.1, feature_stats: str | None = "auto",
                  context_noise: ContextNoise | None = None, context_before: int = 0, context_after: int = 0,
                  metrical: bool = False, beats: str | None = None, beat_noise: BeatNoise | None = None,
-                 beat_dropout: float = 0.0):
+                 beat_dropout: float = 0.0, notelabels: bool = False):
         """``prompt_dropout``: chance (when training, i.e. with noise or augmentation) of hiding the
         prompt, so the model also works without context (first window of a piece, or after a bad
         window). ``feature_stats``: JSON from ``compute_feature_stats`` (written by build_dataset.py
@@ -302,7 +302,13 @@ class ScoreSegmentDataset(Dataset):
         ``context_after``: context notes the encoder also sees (module docstring); 0 = none.
         ``metrical``: add per-note metrical labels (src/metrical.py), read from the split's
         metrical.npy if scripts/build_metrical.py made it, else aligned on the fly.
-        ``beats`` / ``beat_noise`` / ``beat_dropout``: beat features (module docstring); None = off."""
+        ``beats`` / ``beat_noise`` / ``beat_dropout``: beat features (module docstring); None = off.
+        ``notelabels``: the note labeller's inputs and targets (src/notelabels.py, from the split's
+        notelabels.npz made by scripts/build_notelabels.py): the grid features of every note are
+        appended to its features (the grid scaled with the tempo augmentation), and the item gets
+        "labels" [N, TARGET_COLS], "flags" [N, N_FLAGS] (-1 = nothing to learn), "bar_est" and
+        "pos_est" (where the grid puts each note), the labels following the notes through the
+        synthetic noise (``transfer_rows``)."""
         self.store = SegmentStore(split_dir)
         self.vocab = Vocab.load(vocab_path)
         self.noise = noise
@@ -330,6 +336,15 @@ class ScoreSegmentDataset(Dataset):
                 raise FileNotFoundError(f"{path} missing: run scripts/build_beats.py (gt) or "
                                         f"scripts/track_beats.py (tracked) first")
             self._beats = load_beats(path)
+        self.notelabels = bool(notelabels)
+        self._nl = None
+        if self.notelabels:
+            from .notelabels import LabelSpace, load_split
+            self._nl = load_split(split_dir, len(self.store.notes), len(self.store))
+            if self._nl is None:
+                raise FileNotFoundError(f"{split_dir}/notelabels.npz missing or out of date: run "
+                                        f"scripts/build_notelabels.py first")
+            self.label_space = LabelSpace(self.vocab.itos)
         self.metrical = bool(metrical)
         self._mfile = None
         self._mcache: dict = {}
@@ -472,6 +487,10 @@ class ScoreSegmentDataset(Dataset):
         rng = np.random.default_rng((self.seed, self.epoch, i))
         tempo = 1.0
         lab = self._metrical(i, notes, tokens) if self.metrical else None  # rows follow the window notes
+        nl = None
+        if self.notelabels:  # label rows of the window's stored notes
+            a0, a1 = self.store.index[i, 0], self.store.index[i, 1]
+            nl = np.array(self._nl["labels"][a0:a1])
         if self.with_context:
             before, after, cped = self._context(i, notes)
             nb, nw, npw = len(before), len(notes), len(pedal)
@@ -499,6 +518,9 @@ class ScoreSegmentDataset(Dataset):
             if lab is not None:  # noise moved, dropped and added notes: carry the labels across
                 from .metrical import transfer
                 lab = np.stack(transfer((lab[:, 0], lab[:, 1]), ref, notes), axis=1)
+            if nl is not None:
+                from .notelabels import transfer_rows
+                nl = transfer_rows(nl, ref, notes)
             if self.with_context:  # context notes come from the same transcriber: noise them too
                 nrng = np.random.default_rng((self.seed, self.epoch, i, 11))
                 before = self.noise(before, cped, nrng)[0] if len(before) else before
@@ -515,6 +537,8 @@ class ScoreSegmentDataset(Dataset):
         notes = notes[keep]
         if lab is not None:
             lab = lab[keep]
+        if nl is not None:
+            nl = nl[keep]
         head = np.concatenate([[self.bos], prompt, [self.sep]]) if len(prompt) else np.array([self.bos])
         target = np.concatenate([head, tokens, [self.eos]])
         if self.with_context:
@@ -523,6 +547,8 @@ class ScoreSegmentDataset(Dataset):
             feats = note_features(notes, np.concatenate([pedal.reshape(-1, 2), cped]), roles)
             if lab is not None:
                 lab = np.concatenate([lab, np.full((nb_ + na_, 2), -1, np.int8)])[order]
+            if nl is not None:  # context notes: features only, nothing to learn
+                nl = np.concatenate([nl, np.full((nb_ + na_, nl.shape[1]), -1, np.int32)])[order]
         else:
             roles = np.where(notes[:, 1] < 0, ROLE_CARRIED, ROLE_WINDOW).astype(np.int8)
             feats = note_features(notes, pedal)
@@ -531,8 +557,20 @@ class ScoreSegmentDataset(Dataset):
             feats[:, cols] = (feats[:, cols] - mean) / std
         if self.beats is not None:
             feats = np.concatenate([feats, beat_features(notes[:, 1], bt, bd)], axis=1)
+        extra = {}
+        if nl is not None:
+            from .notelabels import grid_features, score_notes, targets
+            g0, g1 = self._nl["grid_index"][i]
+            win = score_notes(self.vocab.decode(tokens.tolist()))[1]
+            gf, bar_est, pos_est = grid_features(notes[:, 1], self._nl["grid_t"][g0:g1] * tempo,
+                                                 self._nl["grid_q"][g0:g1], win)
+            feats = np.concatenate([feats, gf], axis=1)
+            tg, fl = targets(nl, bar_est, self.label_space)
+            extra = {"labels": torch.from_numpy(tg), "flags": torch.from_numpy(fl),
+                     "bar_est": torch.from_numpy(bar_est.astype(np.int64)),
+                     "pos_est": torch.from_numpy(pos_est.astype(np.float32))}
         item = {"notes": torch.from_numpy(feats), "roles": torch.from_numpy(roles),
-                "target": torch.from_numpy(target), "prompt_len": len(head)}
+                "target": torch.from_numpy(target), "prompt_len": len(head), **extra}
         if self.keep_raw:  # rows follow "notes" / "roles"
             item.update(raw_onsets=notes[:, 1].astype(np.float64), raw_pitches=notes[:, 0].astype(np.int64),
                         beat_t=np.asarray(bt, np.float64), beat_d=np.asarray(bd, bool))
@@ -568,6 +606,13 @@ def collate(batch, pad_id: int = 0):
             for k, b in enumerate(batch):
                 lab[k, : len(b[key])] = b[key]
             out[key] = lab
+    for key, fill in (("labels", -1), ("flags", -1), ("bar_est", 0), ("pos_est", 0.0)):  # note labeller
+        if key in batch[0]:
+            shape = (B, n) + tuple(batch[0][key].shape[1:])
+            t_ = torch.full(shape, fill, dtype=batch[0][key].dtype)
+            for k, b in enumerate(batch):
+                t_[k, : len(b[key])] = b[key]
+            out[key] = t_
     return out
 
 
@@ -587,11 +632,11 @@ class MixedTrainDataset(Dataset):
                  augment: AugmentConfig | None = None, real_fraction: float = 0.3, seed: int = 0,
                  ornament_oversample: float = 3.0, context_noise: ContextNoise | None = None,
                  context_before: int = 0, context_after: int = 0, metrical: bool = False,
-                 beats: dict | None = None, real_beats: dict | None = None):
+                 beats: dict | None = None, real_beats: dict | None = None, notelabels: bool = False):
         """``beats`` / ``real_beats``: beat arguments of ScoreSegmentDataset (beats, beat_noise,
         beat_dropout) for the clean and the real-transcription part; None = no beat features."""
         ctx = dict(context_noise=context_noise, context_before=context_before, context_after=context_after,
-                   metrical=metrical)
+                   metrical=metrical, notelabels=notelabels)
         self.synthetic = ScoreSegmentDataset(clean_dir, vocab_path, noise=noise, augment=augment,
                                              seed=seed, ornament_oversample=ornament_oversample, **ctx,
                                              **(beats or {}))
