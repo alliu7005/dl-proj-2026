@@ -58,8 +58,29 @@ def their_code(repo: str):
     sys.path.insert(0, str(Path(repo) / "midi2scoretransformer"))
 
 
+REFERENCE = "reference, against itself"  # the floor of the metrics: MUSTER's own alignment noise
+THEIR_MODULES = ("config", "models", "tokenizer", "constants", "utils", "score_utils", "dataset", "chunker")
+
+
 def pred_path(out: Path, system: str, entry: dict) -> Path:
+    if system == REFERENCE:
+        return Path(entry["reference"])
     return out / system / entry["condition"] / f"{entry['slug']}.musicxml"
+
+
+def allow_their_classes(ckpt: str) -> list[str]:
+    """PyTorch >= 2.6 loads checkpoints with weights_only=True, which refuses the Python objects
+    their checkpoint pickles (e.g. config.MyModelConfig). Instead of switching that check off, list
+    the objects the file needs and allow exactly those defined in their own modules; anything else
+    stops with its name. Returns the names allowed."""
+    import importlib
+    from torch.serialization import add_safe_globals, get_unsafe_globals_in_checkpoint
+    names = get_unsafe_globals_in_checkpoint(ckpt)
+    foreign = [n for n in names if n.rpartition(".")[0].split(".")[0] not in THEIR_MODULES]
+    if foreign:
+        raise SystemExit(f"{ckpt} needs objects from outside their code: {foreign}; not loading it")
+    add_safe_globals([getattr(importlib.import_module(n.rpartition(".")[0]), n.rpartition(".")[2]) for n in names])
+    return names
 
 
 # ------------------------------------------------------------------------------------- predict
@@ -69,6 +90,7 @@ def predict(args) -> None:
     from models.roformer import Roformer
     from utils import quantize_path
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"allowed in the checkpoint: {allow_their_classes(args.ckpt)}", flush=True)
     model = Roformer.load_from_checkpoint(args.ckpt, map_location=device).to(device).eval()
     entries = load_manifest(args.manifest, args.conditions)
     out, done = Path(args.out), []
@@ -152,16 +174,19 @@ def rate(job: tuple) -> dict:
 
 
 def selftest(args) -> None:
-    """A reference score against itself through ``rate``: every error rate must be 0. Then, if
-    any predictions exist, one of each system, to show that they can be read and scored."""
+    """A reference score against itself through ``rate``: score similarity must be exactly 0,
+    MUSTER's pitch and onset errors 0 and its mean error small (its voice / note alignment is not
+    exact even for identical scores: the Bach fugue against itself has 0.7% missing, 1.6% extra).
+    Then, if any predictions exist, one of each system, to show they can be read and scored."""
     entries = load_manifest(args.manifest, "clean,real")
     ref = entries[0]["reference"]
     r = rate((args.repo, ref, ref))
     print(f"{ref} against itself: {r}")
     assert r["error"] is None, r["error"]
-    worst = max(abs(v) for d in (r["muster"], r["sim"]) for k, v in d.items()
-                if v is not None and k in dict(MUSTER_KEYS) | dict(SIM_KEYS))
-    assert worst < 1e-6, f"a score against itself has error rate {worst}"
+    sim_worst = max(abs(r["sim"][k]) for k, _ in SIM_KEYS if r["sim"].get(k) is not None)
+    assert sim_worst < 1e-9, f"score similarity of a score against itself: {sim_worst}"
+    assert r["muster"]["PitchER"] == 0 and r["muster"]["OnsetER"] == 0, r["muster"]
+    assert r["muster"]["MeanER"] < 2.0, f"MUSTER mean error of a score against itself: {r['muster']['MeanER']}"
     out = Path(args.out)
     for d in sorted(p for p in out.iterdir() if p.is_dir() and p.name != "inputs") if out.exists() else []:
         e = next((e for e in entries if pred_path(out, d.name, e).exists()), None)
@@ -189,11 +214,11 @@ def aggregate(rated: dict, entries: list[dict], systems: list[str]) -> dict:
         def ok(s, p):
             r = rated.get((s, cond, p))
             return bool(r and r["muster"] and r["muster"].get("OnsetER") is not None and r["sim"])
-        common = [p for p in perfs if all(ok(s, p) for s in systems)]
+        common = [p for p in perfs if all(ok(s, p) for s in systems if s != REFERENCE)]
         for s in systems:
             row = {}
             for subset, ps in (("all", [p for p in perfs if ok(s, p)]), ("common", common)):
-                rs = [rated[(s, cond, p)] for p in ps]
+                rs = [rated[(s, cond, p)] for p in ps if ok(s, p)]  # the reference may miss a common one
                 row[subset] = {"n": len(rs),
                                "muster": {k: mean_over([r["muster"].get(k) for r in rs]) for k, _ in MUSTER_KEYS},
                                "sim": {k: (None if (m := mean_over([r["sim"].get(k) for r in rs])) is None else 100 * m)
@@ -210,7 +235,9 @@ def table(results: dict) -> str:
     lines = ["# System-level comparison (whole pieces, Beyer & Dai's metrics)", "",
              "Error rates in %, lower is better. MUSTER: pitch / missing / extra / onset / offset / mean; score "
              "similarity (per reference note): deletion / insertion / duration / staff / stem / spelling. Unweighted "
-             "mean over performances; n = performances averaged. \"common\" = the performances every system scored.", ""]
+             "mean over performances; n = performances averaged. \"common\" = the performances every system scored. "
+             f"\"{REFERENCE}\" = each reference scored against itself: the floor (MUSTER's alignment is not exact "
+             "even for identical scores).", ""]
     for cond, rows in results.items():
         for subset in ("common", "all"):
             lines += [f"## {cond}, {subset}", "", "| " + " | ".join(hdr) + " |", "|" + "---|" * len(hdr)]
@@ -232,7 +259,7 @@ def table(results: dict) -> str:
 def score(args) -> None:
     from joblib import Parallel, delayed
     entries = load_manifest(args.manifest, args.conditions)
-    systems = [s for s in args.systems.split(",") if s]
+    systems = [s for s in args.systems.split(",") if s] + [REFERENCE]
     out = Path(args.out)
     jobs = [(s, e) for s in systems for e in entries]
     paths = [(args.repo, str(pred_path(out, s, e)) if pred_path(out, s, e).exists() else None, e["reference"])

@@ -234,6 +234,48 @@ def test_split_chords():
     assert [n.pitch.name for n in first if n.tie is not None and n.tie.type == "start"] == ["E"]
 
 
+def test_checkpoint_allow_list():
+    """PyTorch's weights_only loading refuses pickled classes: their checkpoint's own classes (a
+    module named like theirs, e.g. config.MyModelConfig) are allowed and it loads; a class from
+    anywhere else stops the load."""
+    import torch
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        (tmp / "config.py").write_text("class MyModelConfig:\n    def __init__(self, d=4):\n        self.d = d\n")
+        (tmp / "elsewhere.py").write_text("class Thing:\n    pass\n")
+        sys.path.insert(0, str(tmp))
+        try:
+            import config
+            import elsewhere
+            torch.save({"hyper_parameters": {"enc": config.MyModelConfig(7)}, "state_dict": {}}, tmp / "ok.ckpt")
+            torch.save({"x": elsewhere.Thing()}, tmp / "bad.ckpt")
+            assert beyer_dai.allow_their_classes(str(tmp / "ok.ckpt")) == ["config.MyModelConfig"]
+            assert torch.load(tmp / "ok.ckpt", weights_only=True)["hyper_parameters"]["enc"].d == 7
+            try:
+                beyer_dai.allow_their_classes(str(tmp / "bad.ckpt"))
+            except SystemExit as e:
+                assert "elsewhere.Thing" in str(e), e
+            else:
+                raise AssertionError("a foreign class was allowed")
+        finally:
+            sys.path.remove(str(tmp))
+            sys.modules.pop("config", None)
+            sys.modules.pop("elsewhere", None)
+
+
+def test_reference_row():
+    """The reference against itself is scored like a system (the metrics' floor) but never
+    removes performances from the common set."""
+    rated, entries = rated_stub()
+    for e in entries:
+        rated[(beyer_dai.REFERENCE, e["condition"], e["performance"])] = \
+            {"muster": None, "sim": None, "error": "x"} if e["performance"] == "p1" else rated[("A", "clean", "p1")]
+    res = beyer_dai.aggregate(rated, entries, ["A", "B", beyer_dai.REFERENCE])
+    assert res["clean"]["A"]["common"]["n"] == 2  # p1, p2 still common although the reference failed on p1
+    assert res["clean"][beyer_dai.REFERENCE]["all"]["n"] == 2
+    assert beyer_dai.pred_path(Path("o"), beyer_dai.REFERENCE, {"reference": "r.musicxml"}) == Path("r.musicxml")
+
+
 def test_cli():
     for argv in (["predict", "--repo", "r"], ["score", "--repo", "r"]):  # required arguments
         try:
