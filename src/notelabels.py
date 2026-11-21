@@ -472,10 +472,12 @@ def estimate_key(notes: np.ndarray) -> int:
 def window_frame(grid: dict, perf_t0: float, onsets: np.ndarray, key: int):
     """A piece's estimated grid (src/meter.py grid_from_states, absolute seconds) in one window's
     frame: (grid_t [K] window seconds, grid_q [K] quarters from the window's first bar line,
-    Window). The window's first bar is the bar the grid puts its first note in (``onsets``: its
-    own notes, window seconds; carried-over ones, < 0, aside); its bars take the grid's time
-    signatures and ``key``; it opens with a bar line when that note sits on it (within 1/24
-    quarter), else its start position is left to the renderer (the first labelled note's)."""
+    Window). The window's bars run from the bar the grid puts its first note in to the bar it
+    puts its last note in (``onsets``: its own notes, window seconds; carried-over ones, < 0,
+    aside), with the grid's time signatures and ``key`` (a note labelled into a later bar gets bars
+    of the last one, as in ``render``); it opens with a bar line when its first note sits on it
+    (within 1/24 quarter), else its start position is left to the renderer (the first labelled
+    note's)."""
     t = np.asarray(grid["t"], np.float64) - perf_t0
     q = np.asarray(grid["q"], np.float64)
     if len(t) < 2:
@@ -483,9 +485,11 @@ def window_frame(grid: dict, perf_t0: float, onsets: np.ndarray, key: int):
     live = np.asarray(onsets, np.float64)
     live = live[live >= 0]
     first = float(live.min()) if len(live) else 0.0
-    qf = float(grid_position(np.array([first]), t, q)[0][0])
+    last = float(live.max()) if len(live) else 0.0
+    qf, ql = grid_position(np.array([first, last]), t, q)[0]
     bq = np.asarray(grid["bar_q"], np.float64)
     b0 = max(0, int(np.searchsorted(bq, qf + 1e-6, side="right")) - 1)
-    bars = [(ts, key) for ts in grid["bars"][b0:]] or [(grid["bars"][-1], key)]
+    b1 = max(b0, int(np.searchsorted(bq, ql + 1e-6, side="right")) - 1)
+    bars = [(ts, key) for ts in grid["bars"][b0:b1 + 1]] or [(grid["bars"][-1], key)]
     win = Window(bars=bars, opens_with_bar=(qf - bq[b0]) < 1 / 24, start_pos=None)
     return t, q - bq[b0], win

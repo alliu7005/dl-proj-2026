@@ -36,6 +36,10 @@ pip install --quiet -r "$BD/MIDI2ScoreTransformer/requirements.txt"
 # run_eval.py); joblib runs scripts/beyer_dai.py score in parallel
 pip install --quiet joblib beautifulsoup4 lxml tqdm \
   "pytorch-lightning==$(python -c 'import lightning; print(lightning.__version__)')"
+# their checkpoint pickles a transformers RoFormerConfig subclass saved with the transformers of
+# August 2024; current releases expect attributes it lacks ("MyModelConfig object has no attribute
+# _attn_implementation_internal"), so pin the release of that time (requirements.txt only says >=)
+pip install --quiet "transformers==4.44.2"
 # muster runs its evaluation programs through a bash script: make sure they are executable
 python - <<'EOF'
 import os, stat, muster

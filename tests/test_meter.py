@@ -132,6 +132,10 @@ def test_window_frame():
     assert toks[:4] == ["ts_4/4", "key_2", "pos_0", "sub_1/2"], toks   # mid-bar: no leading bar line
     t2, q2, win2 = window_frame(g, perf_t0, np.array([0.5]), key=0)  # first note on the bar line
     assert win2.opens_with_bar
+    # only the bars its notes span, not the rest of the piece (each would render as an empty bar)
+    assert len(win.bars) == 1 and len(win2.bars) == 1, (win.bars, win2.bars)
+    t3, q3, win3 = window_frame(g, perf_t0, np.array([0.5, 2.6, 4.6]), key=0)  # notes at 2.5 / 4.6 / 6.6 s: bars at 2.5 / 4.5 / 6.5 s
+    assert len(win3.bars) == 3, win3.bars
 
 
 def test_scripts_end_to_end():

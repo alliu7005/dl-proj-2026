@@ -92,9 +92,12 @@ def main(argv=None):
         ds = ScoreSegmentDataset(str(data / split), str(data / "vocab.json"), notelabels=True, **ctx, **kw)
         grids = None
         if args.grid != "true":
-            gfile = Path(args.runs_dir) / args.grid[6:] / f"grids_{METER_GRIDS.get(cond, '')}.pkl"
-            if cond not in METER_GRIDS or not gfile.exists():
-                print(f"skip {cond}: no meter grids ({gfile}: scripts/eval_meter.py --run {args.grid[6:]})")
+            if cond not in METER_GRIDS:  # no annotated performances to decode (PERiScoPe)
+                print(f"skip {cond}: the meter model's grids cover {', '.join(METER_GRIDS)} only")
+                continue
+            gfile = Path(args.runs_dir) / args.grid[6:] / f"grids_{METER_GRIDS[cond]}.pkl"
+            if not gfile.exists():
+                print(f"skip {cond}: {gfile} missing (scripts/eval_meter.py --run {args.grid[6:]})")
                 continue
             import pickle
             grids = pickle.load(open(gfile, "rb"))
