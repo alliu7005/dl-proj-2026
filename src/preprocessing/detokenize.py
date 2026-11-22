@@ -91,9 +91,47 @@ def parse_tokens(tokens: list[str]) -> list[_Bar]:
     return bars
 
 
-def _make_element(group: list[_Note]):
+# spelling: the tokens carry MIDI pitches only, so the exporter names each note itself
+_STEPS = ("C", "D", "E", "F", "G", "A", "B")
+_STEP_PC = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+_SHARP_ORDER, _FLAT_ORDER = "FCGDAEB", "BEADGCF"
+
+
+def _key_alters(key: int) -> dict:
+    """The alteration a key signature gives each step (``key``: sharps > 0, flats < 0)."""
+    alt = {st: 0 for st in _STEPS}
+    for st in (_SHARP_ORDER[:key] if key > 0 else _FLAT_ORDER[:-key]):
+        alt[st] = 1 if key > 0 else -1
+    return alt
+
+
+def spell(midi: int, key: int = 0) -> m21.pitch.Pitch:
+    """A MIDI pitch named for the key signature: the spelling the signature itself implies if there
+    is one (Db and Gb with five flats, Cb with seven, E# with six sharps), else the signature's own
+    direction (flats in flat keys, sharps in sharp keys; with none, C# F# G# but Eb Bb, as common
+    practice writes them)."""
+    pc = midi % 12
+    alters = _key_alters(max(-7, min(7, int(key))))
+    options = [(st, a) for st in _STEPS for a in (-1, 0, 1) if (_STEP_PC[st] + a) % 12 == pc]
+    implied = [o for o in options if alters[o[0]] == o[1]]
+    if implied:
+        st, a = implied[0]
+    else:
+        natural = [o for o in options if o[1] == 0]
+        if natural:
+            st, a = natural[0]
+        else:
+            want = -1 if key < 0 or (key == 0 and pc in (3, 10)) else 1
+            st, a = next(o for o in options if o[1] == want)
+    p = m21.pitch.Pitch(st + {-1: "-", 0: "", 1: "#"}[a] + "4")
+    p.octave += (midi - p.midi) // 12
+    return p
+
+
+def _make_element(group: list[_Note], key: int = 0):
     pitches = sorted({n.pitch for n in group})
-    el = m21.note.Note(pitches[0]) if len(pitches) == 1 else m21.chord.Chord(pitches)
+    el = (m21.note.Note(spell(pitches[0], key)) if len(pitches) == 1
+          else m21.chord.Chord([spell(x, key) for x in pitches]))
     if group[0].grace:
         el.duration = m21.duration.Duration(0.5).getGraceDuration()
     else:
@@ -185,7 +223,7 @@ def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None
                     groups[(n.pos, n.grace, n.dur, k)].append(n)
             voices: list[list] = []  # each: list of (pos, end, element)
             for (pos, grace, dur, _), group in sorted(groups.items(), key=lambda kv: (kv[0][0], not kv[0][1], kv[0][3])):
-                el, tied = _make_element(group)
+                el, tied = _make_element(group, bar.key)
                 for p in tied:  # continuation of a tie from an earlier note
                     prev = last_el[s].get(p)
                     if prev is not None:

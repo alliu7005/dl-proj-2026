@@ -111,17 +111,43 @@ def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
     return out
 
 
-def engrave(tokens: list[str], out: Path, res: "Result") -> dict:
+def playback_qpm(score, seconds: float | None) -> float | None:
+    """The tempo (quarter notes per minute) at which a music21 score sounds as long as the
+    performance: from its first note's start to its last note's end, in quarters, over the
+    performance's first onset to last offset in seconds, within 20-300. The score MIDI is played at
+    it; without, music21 plays every score at 120 (a slow piece twice too fast)."""
+    if not seconds or seconds <= 0:
+        return None
+    notes = [n for n in score.flatten().notes if not n.duration.isGrace]
+    if not notes:
+        return None
+    first = min(float(n.offset) for n in notes)
+    last = max(float(n.offset + n.quarterLength) for n in notes)
+    if last <= first:
+        return None
+    return float(np.clip(60.0 * (last - first) / seconds, 20.0, 300.0))
+
+
+def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None = None) -> dict:
     """Tokens -> ``out``/score.musicxml and score.mid (``res.files``; failures in ``res.errors``).
-    Returns how the MusicXML export went (src/preprocessing/detokenize.py tokens_to_musicxml: the
-    fallback that worked, the bars it had to empty)."""
+    ``seconds``: the performance's length, which sets the score MIDI's tempo (``playback_qpm``; the
+    MusicXML carries no tempo, as the scores the comparison rates). Returns how the export went
+    (src/preprocessing/detokenize.py tokens_to_musicxml: the fallback that worked, the bars it had
+    to empty) and "playback_qpm"."""
+    import music21 as m21
     from .preprocessing.detokenize import tokens_to_musicxml, tokens_to_score
     report = {}
     try:
         res.files["musicxml"] = Path(tokens_to_musicxml(tokens, str(out / "score.musicxml"), report=report))
         for clip in (False, True):  # clip notes to their bars if the plain export fails
             try:
-                tokens_to_score(tokens, clip=clip).write("midi", fp=str(out / "score.mid"))
+                score = tokens_to_score(tokens, clip=clip)
+                qpm = playback_qpm(score, seconds)
+                report["playback_qpm"] = None if qpm is None else round(qpm, 1)
+                if qpm:
+                    first = score.parts[0].getElementsByClass(m21.stream.Measure).first()
+                    first.insert(0, m21.tempo.MetronomeMark(number=round(qpm, 1)))
+                score.write("midi", fp=str(out / "score.mid"))
                 res.files["score_midi"] = out / "score.mid"
                 break
             except Exception as e:  # noqa: BLE001
@@ -367,12 +393,13 @@ class ScorePipeline(_FrontEnd):
 
         progress("engrave", 0.0, "writing MusicXML")
         res = Result(tokens, files)
-        export = engrave(tokens, out, res)
-
         dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())
+        export = engrave(tokens, out, res, dur)
+
         res.stats = {**self.info, "mode": mode, "duration_s": round(dur, 1), "notes": int(len(notes)),
                      "pedal_presses": int(len(pedal)), "windows": len(windows), "beats": beat_info, **counts,
-                     "bars": tokens.count("bar"), "tokens": len(tokens), "export": export, **timing}
+                     "bars": tokens.count("bar"), "tokens": len(tokens), "export": export,
+                     "playback_qpm": export.get("playback_qpm"), **timing}
         (out / "result.json").write_text(json.dumps({"stats": res.stats, "errors": res.errors,
                                                      "files": {k: str(v) for k, v in files.items()}}, indent=1))
         return res
@@ -561,7 +588,7 @@ class V2Pipeline(_FrontEnd):
         (out / "tokens.txt").write_text(" ".join(tokens))
         files["tokens"] = out / "tokens.txt"
         progress("engrave", 0.0, "writing MusicXML")
-        export = engrave(tokens, out, res)
+        export = engrave(tokens, out, res, float(notes[:, OFFSET].max() - notes[:, ONSET].min()))
         written = counts.pop("bar_ts")  # the score's bars (the grid's, up to the bar the music ends in)
         ts = Counter(written)
         dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())
@@ -570,7 +597,8 @@ class V2Pipeline(_FrontEnd):
                      "grid_bars": len(grid["bars"]),
                      "time_signature": ts.most_common(1)[0][0] if ts else None,
                      "time_signatures": dict(ts.most_common()), "key_signature": int(grid.get("key", 0)),
-                     **counts, "tokens": len(tokens), "export": export, **timing}
+                     **counts, "tokens": len(tokens), "export": export,
+                     "playback_qpm": export.get("playback_qpm"), **timing}
         (out / "result.json").write_text(json.dumps({"stats": res.stats, "errors": res.errors,
                                                      "files": {k: str(v) for k, v in files.items()}}, indent=1))
         return res

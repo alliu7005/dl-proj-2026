@@ -1144,16 +1144,28 @@ where it expects them.
   best seq2seq models with the same rendered-MIDI beats on clean MIDI (`sf_base_reg_cab_meter_sb`,
   `sf_base_reg_cab_c128_meter_sb`), so the clean comparison is like for like. These sit next to
   Beyer & Dai and the seq2seq systems already scored.
-- **Score export, two fixes found on the way:**
+- **Score export, four fixes found on the way:**
+  - Playback tempo (`pipeline.playback_qpm`): the score MIDI the demo plays had no tempo, so music21
+    played every score at 120 quarter notes per minute. A 4-minute slow piece played in about 2
+    minutes. It now gets the tempo at which the written score sounds as long as the performance
+    (first note to last); a v2 and a seq2seq score of a 233 s recording now play for 230 s and
+    232 s. The MusicXML stays without a tempo mark, like the scores the comparison rates.
   - Speed: without its own time signature, a measure made music21 guess one from its contents for
     every rest it filled. Dense or tuplet-grid output took seconds per measure (an 80-note piece:
     32 s), and now takes 0.5 s. Every measure carries its time signature while it is built, and
     repeated ones are removed before writing.
+  - Spelling (`detokenize.spell`): the tokens carry MIDI pitches only, and every black key used to
+    be written as a sharp, even in flat keys (a piece in five flats came out full of C#, F# and
+    naturals). Notes are now named for the bar's key signature: the spelling the signature implies
+    if there is one (Db and Gb in five flats, Cb in seven, E# in six sharps), else its direction.
+    This changes Beyer & Dai's spelling error for every system of ours.
   - A last resort: the bars that cannot be exported even alone (or that break the export in
     context) are emptied, the rest is written, and the result says which. A piece whose score still
-    cannot be written keeps its tokens and its error next to where the score would be. The batch
-    writes the four real pieces no seq2seq score was written for again
-    (`system_scores.py --only-missing`).
+    cannot be written keeps its tokens and its error next to where the score would be.
+
+  The roundtrip check (tokens -> MusicXML -> tokens) gives the same numbers before and after. The
+  batch writes the seq2seq systems' scores again with this export (`sysre_*`), so every system in
+  the comparison is spelled the same way and the four real pieces they had no score for get one.
 
 Results: pending (the batch above).
 

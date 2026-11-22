@@ -29,8 +29,8 @@
 #   synthbeats         Beat This! on the clean test MIDI rendered to audio             v2tests
 #   sys_v2_<nl>_<m>    v2 on whole pieces (scripts/system_scores.py --v2), SYSTEMS     synthbeats, <m>, <nl>
 #   sys_<run>_sb       a seq2seq model with the same rendered-MIDI beats on clean      synthbeats
-#   sysfix_<run>       the pieces a scored system has no score for, again (the export's   v2tests
-#                      fixes; --only-missing)
+#   sysre_<run>        a seq2seq system scored before, every score written again       v2tests
+#                      with the current export (spelling, last resort), SEQ_RERUN
 #   sysscore           every system in outputs/system_eval rated with Beyer & Dai's    all sys_ jobs (any)
 #                      metrics -> outputs/system_eval/results.md
 #   rescore            onset_scaled_f1 added to every run's saved predictions, then    all v2_ jobs (any)
@@ -44,7 +44,10 @@ NLS=${NLS-"nl_base $NEW_NLS"}                        # labellers put on every gr
 GRIDS_OLD=${GRIDS_OLD-"meter_v2_nonote"}             # earlier meter models whose grids they also get
 SYSTEMS=${SYSTEMS-"nl_base+meter_v3 nl_base_gn+meter_v3 nl_base_gn_s1+meter_v3 nl_base_gn+meter_v3_large nl_base+meter_v2_nonote nl_base_gn+meter_v2_nonote"}
 SEQ_SB=${SEQ_SB-"sf_base_reg_cab sf_base_reg_cab_c128"}  # seq2seq models also given the rendered-MIDI beats
-SEQ_FIX=${SEQ_FIX-"sf_base_reg_cab:meter sf_base_reg_cab_s1:meter sf_base_reg_cab_c128:meter s2s_m_cab:meter"}  # their missing scores
+# seq2seq systems scored before, written again with the current export (key-aware spelling, the
+# last resort for bars that cannot be engraved): otherwise their spelling and missing pieces would
+# not compare with the new systems'
+SEQ_RERUN=${SEQ_RERUN-"sf_base_reg_cab:meter sf_base_reg_cab_s1:meter sf_base_reg_cab_c128:meter s2s_m_cab:meter"}
 BD=${BD:-$HOME/scratch/beyer_dai}
 BDENV="module load anaconda3; eval \"\$(conda shell.bash hook)\"; conda activate bd311; export PYTHONUNBUFFERED=1; cd \"\$SLURM_SUBMIT_DIR\""
 
@@ -147,12 +150,13 @@ else
     sys+=("$id")
     echo "  $r with the rendered-MIDI beats on whole pieces: job $id"
   done
-  for spec in $SEQ_FIX; do
+  for spec in $SEQ_RERUN; do
     r=${spec%%:*}; mode=${spec##*:}
     [ -f "outputs/system_eval/${r}_$mode/summary.json" ] || continue
-    id=$(sbatch --parsable "${G[@]}" -J "sysfix_$r" -c 8 --mem=48G -t 2:00:00 --dependency=afterok:$tests          -o "slurm-sysfix_$r-%j.out" --wrap="source pace/common.sh; python scripts/system_scores.py --run $r --mode $mode --only-missing")
+    id=$(sbatch --parsable "${G[@]}" -J "sysre_$r" -c 8 --mem=48G -t 3:00:00 --dependency=afterok:$tests \
+         -o "slurm-sysre_$r-%j.out" --wrap="source pace/common.sh; python scripts/system_scores.py --run $r --mode $mode")
     sys+=("$id")
-    echo "  ${r}_$mode: its missing scores again: job $id"
+    echo "  ${r}_$mode: every score written again with the current export: job $id"
   done
   sc=$(sbatch --parsable -J sysscore -c 16 --mem=64G -t 6:00:00 "--dependency=afterany:$(IFS=:; echo "${sys[*]}")" \
        -o slurm-sysscore-%j.out --wrap="$BDENV; python scripts/beyer_dai.py score --repo $BD/MIDI2ScoreTransformer \

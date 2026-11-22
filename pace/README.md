@@ -324,7 +324,7 @@ METERS="meter_v3" NEW_NLS="nl_base_gn" SYSTEMS="nl_base_gn+meter_v3" SEQ_SB="" b
 | `synthbeats` | Beat This! on the clean test MIDI rendered to audio, each piece with the fold model that never heard it -> `outputs/system_eval/beats_synth.npz` (+ `.json`: its beat F next to the real audio's) | `v2tests` |
 | `sys_v2_<nl>_<m>` | v2 on the whole test pieces (`SYSTEMS`) | `synthbeats`, `<m>`, `<nl>` |
 | `sys_<run>_sb` | `sf_base_reg_cab` and `sf_base_reg_cab_c128` with the same rendered-MIDI beats on clean MIDI | `synthbeats` |
-| `sysfix_<run>` | the pieces a seq2seq system already scored has no score for, again with the export fixes (`--only-missing`; the 4 real pieces of the last comparison) | `v2tests` |
+| `sysre_<run>` | the seq2seq systems scored before (`SEQ_RERUN`), every score written again with the current export: key-aware spelling, and the last resort that gives the 4 real pieces of the last comparison a score | `v2tests` |
 | `sysscore` | every system in `outputs/system_eval` rated with Beyer & Dai's metrics -> `results.md` | every `sys_*` job (finished or not) |
 
 The meter runs take the longest (up to 16 h each). A meter job that ends without its model trained

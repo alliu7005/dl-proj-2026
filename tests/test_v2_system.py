@@ -128,6 +128,53 @@ def test_export_last_resort():
             dt.write_musicxml = real_write
 
 
+def test_spelling():
+    """Notes are named for the key signature: what the signature implies first (Db, Gb in five
+    flats; Cb, Fb in seven; E# in six sharps), else its direction (flats in flat keys, sharps in
+    sharp keys, C# F# G# Eb Bb with none); every name keeps its MIDI pitch, octaves included (B#,
+    Cb across the octave line); the written score has no accidental on a note its key implies."""
+    from src.preprocessing.detokenize import spell, tokens_to_musicxml
+    names = lambda key: [spell(m, key).name for m in range(60, 72)]  # noqa: E731
+    assert names(-5) == ["C", "D-", "D", "E-", "E", "F", "G-", "G", "A-", "A", "B-", "B"]
+    assert names(-7)[4] == "F-" and names(-7)[11] == "C-"
+    assert names(6)[5] == "E#" and names(2) == ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    assert names(0) == ["C", "C#", "D", "E-", "E", "F", "F#", "G", "G#", "A", "B-", "B"]
+    for key in range(-7, 8):
+        for m in range(21, 109):
+            assert spell(m, key).midi == m, (key, m, spell(m, key))
+    toks = render(Window(bars=[("4/4", -5)]), [Placed(0, Fraction(k), p, Fraction(1), 0)
+                                               for k, p in enumerate((61, 66, 70, 59))])
+    with tempfile.TemporaryDirectory() as t:
+        import music21 as m21
+        back = m21.converter.parse(tokens_to_musicxml(toks, str(Path(t) / "k.musicxml")))
+        notes = list(back.parts[0].recurse().notes)
+        assert [n.pitch.nameWithOctave for n in notes] == ["D-4", "G-4", "B-4", "B3"], [n.pitch for n in notes]
+        assert [n.pitch.accidental.name if n.pitch.accidental else None for n in notes][:3] == ["flat"] * 3
+
+
+def test_playback_tempo():
+    """The score MIDI is played at the tempo that makes the written score sound as long as the
+    performance (its first note's start to its last note's end: four quarter notes, one per 4/4 bar,
+    span 13 quarters; a pickup counts from its first note), within 20-300; the MusicXML carries no
+    tempo mark, as before."""
+    import pretty_midi
+    from src.pipeline import Result, engrave, playback_qpm
+    from src.preprocessing.detokenize import tokens_to_score
+    bars4 = render(Window(bars=[("4/4", 0)] * 4), [Placed(b, Fraction(0), 60, Fraction(1), 0) for b in range(4)])
+    assert abs(playback_qpm(tokens_to_score(bars4), 13 * 60 / 90) - 90.0) < 1e-6
+    pickup = render(Window(bars=[("4/4", 0)] * 3, opens_with_bar=False, start_pos=None),
+                    [Placed(0, Fraction(2), 60, Fraction(1), 0)] + [Placed(b, Fraction(0), 62, Fraction(1), 0) for b in (1, 2)])
+    assert abs(playback_qpm(tokens_to_score(pickup), 7.0) - 60.0) < 1e-6   # beat 3 of the pickup to bar 3's end of note 1
+    assert playback_qpm(tokens_to_score(bars4), 0.01) == 300.0 and playback_qpm(tokens_to_score(bars4), None) is None
+    with tempfile.TemporaryDirectory() as t:
+        res = Result(bars4, {})
+        rep = engrave(bars4, Path(t), res, 13 * 60 / 90)  # not music21's default 120
+        pm = pretty_midi.PrettyMIDI(str(res.files["score_midi"]))
+        assert rep["playback_qpm"] == 90.0 and abs(pm.get_tempo_changes()[1][0] - 90.0) < 1e-3
+        assert abs(pm.get_end_time() - 13 * 60 / 90) < 0.01   # as long as the performance
+        assert "metronome" not in Path(res.files["musicxml"]).read_text().lower()
+
+
 def test_synth():
     """The rendered MIDI: silence before the first note, energy right after each onset, a short
     release after each offset, peak 0.9; a 16-bit mono WAV of it."""
@@ -203,6 +250,13 @@ def test_v2_pipeline():
         assert res.tokens.count("bar") in (st["bars"], st["bars"] - 1), (res.tokens.count("bar"), st["bars"])
         assert ("musicxml" in res.files) or any(e.startswith("MusicXML") for e in res.errors), res.errors
         assert sum(st["time_signatures"].values()) == st["bars"] and st["time_signature"] in st["time_signatures"]
+        if "score_midi" in res.files:  # played back as long as the performance
+            import pretty_midi
+            length = pretty_midi.PrettyMIDI(str(res.files["score_midi"])).get_end_time()
+            perf = float(notes[:, 2].max() - notes[:, 1].min())
+            # (these untrained models write far too many quarters: the tempo then stops at its 300 cap)
+            ok = 0.98 * perf < length < 1.02 * perf if st["playback_qpm"] < 300 else length > perf
+            assert ok, (length, perf, st["playback_qpm"])
         saved = json.loads((tmp / "a" / "result.json").read_text())
         assert saved["stats"]["system"] == "v2" and (tmp / "a" / "tokens.txt").read_text().split() == res.tokens
         heard = []
@@ -341,8 +395,9 @@ def test_v2_batch():
         assert f"--dependency=afterok:{sb[0]} " in s2[3] and "--v2 nl_base+meter_v2_nonote" in s2[3]
         seq = [by[f"sys_{r}_sb"][0] for r in ("sf_base_reg_cab", "sf_base_reg_cab_c128")]
         assert all("--midi-beats synth" in q[3] and f"afterok:{sb[0]}" in q[3] for q in seq)
-        fix = by["sysfix_sf_base_reg_cab"][0]  # the one scored system here: its missing scores again
-        assert "--run sf_base_reg_cab --mode meter --only-missing" in fix[3] and "sysfix_s2s_m_cab" not in by
+        fix = by["sysre_sf_base_reg_cab"][0]  # the one system scored before here: written again in full
+        assert fix[3].rstrip().endswith("system_scores.py --run sf_base_reg_cab --mode meter"), fix[3][-80:]
+        assert "sysre_s2s_m_cab" not in by and f"afterok:{by['v2tests'][0][0]}" in fix[3]
         sc = by["sysscore"][0]
         assert f"afterany:{':'.join(r[0] for r in [s1, s2] + seq + [fix])}" in sc[3] and "--systems all" in sc[3]
 
