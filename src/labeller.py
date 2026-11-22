@@ -198,7 +198,10 @@ def predict_windows(model, items: list[dict], windows: list, coll, device, amp: 
                     batch_size: int = 32) -> list[list[str]]:
     """Label dataset items (ScoreSegmentDataset(notelabels=True)) and render each as tokens in the
     frame ``windows[k]`` (src/notelabels.py Window: its bars' time / key signatures; Phase 1 gives
-    the target's own). Returns one token list per item, in order."""
+    the target's own). Returns one token list per item, in order. The window's own notes only:
+    a note carried over from the window before has no label to learn (its continuation is written
+    by the window it was struck in, as V2Pipeline renders a piece, and as the label ceiling counts
+    it), so its untrained outputs are not rendered."""
     from .notelabels import render
-    placed = predict_placed(model, items, coll, device, amp, space, batch_size)
+    placed = predict_placed(model, items, coll, device, amp, space, batch_size, carried=False)
     return [render(w, pl) for w, pl in zip(windows, placed)]

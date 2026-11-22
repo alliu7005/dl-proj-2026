@@ -97,6 +97,8 @@ def predict(args) -> None:
     for k, e in enumerate(entries):
         dst = pred_path(out, "beyer_dai", e)
         t, err = time.perf_counter(), None
+        if dst.exists():  # an earlier run's score must not stand in for a piece that fails now
+            dst.unlink()
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")

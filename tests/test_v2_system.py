@@ -6,7 +6,7 @@ Covers the onset-scale metric (src/eval/metrics.py), re-scoring saved prediction
 (scripts/rescore.py), the MusicXML export's last resort (src/preprocessing/detokenize.py), the
 MIDI synthesizer (src/synth.py), V2Pipeline end to end on tiny untrained models (src/pipeline.py:
 given beats, beats of a MIDI input rendered to audio, no beats), the demo serving both systems
-(demo/app.py), and the job graph of pace/v2.sh (stand-in sbatch).
+(demo/app.py), the job graph of pace/v2.sh (stand-in sbatch) and pace/v2_jobs.sh (stand-in python).
 """
 from __future__ import annotations
 
@@ -119,13 +119,49 @@ def test_export_last_resort():
         try:
             rep = {}
             out = dt.tokens_to_musicxml(good, str(Path(t) / "b.musicxml"), report=rep)
-            assert Path(out).exists() and rep["attempt"] == 4 and rep["emptied_bars"] == [1], rep
+            assert Path(out).exists() and rep["attempt"] == 1 and rep["emptied_bars"] == [1], rep
+            assert rep["fixed_bars"] == {1: "empty"}, rep
             import music21 as m21
             back = m21.converter.parse(out)
             pitches = sorted({n.pitch.midi for n in back.recurse().notes})
             assert pitches == [60, 62], pitches
         finally:
             dt.write_musicxml = real_write
+
+
+def test_export_fixes_only_failing_bars():
+    """When some bars cannot be written exactly, only those are snapped to the grid: the other
+    bars keep their exact positions and lengths (here quintuplets, which a 1/48 grid would move);
+    a note past its bar's end is written at the start of the next bar, when it sounds."""
+    import music21 as m21
+    import src.preprocessing.detokenize as dt
+    sept = [Placed(0, Fraction(k, 7), 60 + k % 5, Fraction(1, 7), 0) for k in range(7)]
+    quint = [Placed(2, Fraction(k, 5), 70 + k, Fraction(1, 5), 0) for k in range(5)]
+    toks = render(Window(bars=[("4/4", 0)] * 3), sept + [Placed(1, Fraction(0), 65, Fraction(4), 0)] + quint)
+    real_write = dt.write_musicxml
+
+    def no_septuplets(score, path):  # an exporter that cannot write 1/7-quarter notes
+        if any(Fraction(n.quarterLength).limit_denominator(1000).denominator % 7 == 0 for n in score.recurse().notes):
+            raise ValueError("septuplet")
+        return real_write(score, path)
+    with tempfile.TemporaryDirectory() as t:
+        dt.write_musicxml = no_septuplets
+        try:
+            rep = {}
+            out = dt.tokens_to_musicxml(toks, str(Path(t) / "q.musicxml"), report=rep)
+        finally:
+            dt.write_musicxml = real_write
+        assert rep["attempt"] == 1 and rep["fixed_bars"] == {0: "grid"} and rep["emptied_bars"] == [], rep
+        back = m21.converter.parse(out)
+        bars = list(back.parts[0].getElementsByClass("Measure"))
+        q = [(float(n.offset), Fraction(n.quarterLength).limit_denominator(1000)) for n in bars[2].recurse().notes]
+        assert q == [(k / 5, Fraction(1, 5)) for k in range(5)], q   # untouched: the exact quintuplets
+        # overflow: a note at beat 5 of a 4/4 bar is written at beat 1 of the next bar
+        over = dt.tokens_to_musicxml(["bar", "ts_4/4", "key_0", "pos_4", "p_60", "d_1", "bar", "pos_1", "p_62", "d_1"],
+                                     str(Path(t) / "o.musicxml"))
+        bars = list(m21.converter.parse(over).parts[0].getElementsByClass("Measure"))
+        got = [(i, float(n.offset), n.pitch.midi) for i, m in enumerate(bars) for n in m.recurse().notes]
+        assert got == [(1, 0.0, 60), (1, 1.0, 62)], got
 
 
 def test_spelling():
@@ -311,11 +347,25 @@ def test_demo_serves_both():
         assert c.post("/api/jobs", files={"file": ("x.mid", b"MThd")}, data={"system": "v9"}).status_code == 400
 
 
+def _stub_bin(tmp: Path, sbatch: bool = True):
+    """bin/ with a stand-in sbatch (records each submission: id, NAME, ARGS, arguments)."""
+    (tmp / "bin").mkdir(exist_ok=True)
+    if sbatch:
+        (tmp / "bin" / "sbatch").write_text('#!/bin/bash\nn=$(( $(cat "$SUBMITS.n" 2>/dev/null || echo 100) + 1 ))\n'
+                                            'echo $n > "$SUBMITS.n"\nprintf "%s\\t%s\\t%s\\t%s\\n" "$n" "${NAME:-}" '
+                                            '"${ARGS:-}" "$*" >> "$SUBMITS"\necho $n\n')
+        (tmp / "bin" / "sbatch").chmod(0o755)
+
+
 def test_v2_batch():
-    """pace/v2.sh: the tests first; each meter run in two chained jobs (the second resuming, failing
-    unless trained and evaluated); the oracle; the new labellers; every labeller on every grid after
-    both (pairs evaluated before skipped); the rescoring after all of those; the whole-piece systems
-    after the rendered-MIDI beats and their models, then the scoring after all of them."""
+    """pace/v2.sh in two waves of at most 8 jobs (PACE's per-user submission limit). Wave 1: the
+    tests; per meter group two GPU jobs (the second resuming the first); one job for both new
+    labellers; one CPU job for the grids and the rendered-MIDI beats; and a last job, after all
+    of them, that submits wave 2. A job waiting on another's success is cancelled if that fails.
+    Wave 2 (at most 7, plus the job submitting it): one evaluation job per labeller (the first
+    also nl_large); v2 on whole pieces after the evaluations; the seq2seq systems in two jobs (the
+    rendered-MIDI beats, and those scored before written again); the rescoring and the scoring
+    in one last job after all of them."""
     if shutil.which("bash") is None:
         print("  (skipped: no bash)")
         return
@@ -323,83 +373,195 @@ def test_v2_batch():
         tmp = Path(t)
         (tmp / "pace").mkdir()
         shutil.copy(ROOT / "pace" / "v2.sh", tmp / "pace")
-        (tmp / "bin").mkdir()
-        (tmp / "bin" / "sbatch").write_text('#!/bin/bash\nn=$(( $(cat "$SUBMITS.n" 2>/dev/null || echo 100) + 1 ))\n'
-                                            'echo $n > "$SUBMITS.n"\nprintf "%s\\t%s\\t%s\\t%s\\n" "$n" "${NAME:-}" '
-                                            '"${ARGS:-}" "$*" >> "$SUBMITS"\necho $n\n')
-        (tmp / "bin" / "sbatch").chmod(0o755)
-        (tmp / "outputs" / "runs" / "nl_base").mkdir(parents=True)
-        (tmp / "outputs" / "runs" / "nl_base" / "eval_pieces_best.json").write_text(
-            json.dumps({"clean": {"grid_meter_meter_v2_nonote": {}}}))
+        _stub_bin(tmp)
         bd = tmp / "bd"
         bd.mkdir()
 
-        def submit(env):
+        def submit(wave, env=None):
             for f in (tmp / "jobs.txt", tmp / "jobs.txt.n"):
                 if f.exists():
                     f.unlink()
-            r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/v2.sh'], cwd=tmp,
-                               env=dict(os.environ, SUBMITS=str(tmp / "jobs.txt"), BD=str(bd), **env),
+            r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash pace/v2.sh {wave}'],
+                               cwd=tmp, env=dict(os.environ, SUBMITS=str(tmp / "jobs.txt"), BD=str(bd), **(env or {})),
                                capture_output=True, text=True)
             assert r.returncode == 0, r.stdout + r.stderr
             rows = [ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()]
-            return r.stdout, rows
-        out, rows = submit({})
-        assert "pace/bd_setup.sh" in out  # no manifest / checkpoint: no whole-piece comparison
-        name = lambda r: r[3].split("-J ")[1].split()[0] if "-J " in r[3] else r[1]  # noqa: E731
-        by = {}
-        for r in rows:
-            by.setdefault(name(r), []).append(r)
+            by = {}
+            for row in rows:
+                by.setdefault(row[3].split("-J ")[1].split()[0], []).append(row)
+            return r.stdout, rows, by
+        out, rows, by = submit("")
+        assert len(rows) <= 8 and "wave 2 is submitted by job" in out, (len(rows), out)
         tests = by["v2tests"][0]
-        assert "tests.test_meter" in tests[3] and "tests.test_notelabels" in tests[3]
-        meters = ["meter_v3", "meter_v3_s1", "meter_v3_s2", "meter_v3_large"]
-        for m in meters:
-            a, b = by["met_" + m]
-            assert f"afterok:{tests[0]}" in a[3] and f"--dependency=afterany:{a[0]}" in b[3]
-            assert f"train_meter.py --name {m} --steps 60000 --patience 8" in a[3] and "--max-hours 7.5" in a[3]
-            assert f"eval_meter.py --run {m} --tune" in a[3] and "--resume" in a[3]
-            assert b[3].rstrip().endswith(f"[ -f outputs/runs/{m}/eval_meter.json ]"), b[3][-120:]
-        assert "--seed 2" in by["met_meter_v3_s2"][0][3] and "--d-model 384 --layers 8" in by["met_meter_v3_large"][0][3]
-        assert "--oracle" in by["metev_meter_oracle"][0][3]
-        new = {r[1]: r for r in rows if r[1] in ("nl_base_gn", "nl_base_gn_s1")}
-        assert set(new) == {"nl_base_gn", "nl_base_gn_s1"} and "--grid-noise 0.8" in new["nl_base_gn"][2]
-        assert "--seed 1" in new["nl_base_gn_s1"][2] and all("train_labeller.sbatch" in r[3] for r in new.values())
-        evals = {k: v[0] for k, v in by.items() if k.startswith("v2_")}
-        want = {f"v2_{nl}@{m}" for nl in ("nl_base", "nl_base_gn", "nl_base_gn_s1")
-                for m in ["meter_oracle", "meter_v2_nonote"] + meters} - {"v2_nl_base@meter_v2_nonote"}
-        assert set(evals) == want, sorted(set(evals) ^ want)
-        jid = {"meter_oracle": by["metev_meter_oracle"][0][0], **{m: by["met_" + m][1][0] for m in meters},
-               **{k: v[0] for k, v in new.items()}}
-        for k, r in evals.items():
-            nl, m = k[3:].split("@")
-            deps = [jid[x] for x in (m, nl) if x in jid]
-            assert f"--dependency=afterok:{':'.join(deps)}" in r[3] if deps else "--dependency" not in r[3], (k, r[3])
-            assert f"--grid meter:{m}" in r[3]
-        re = by["rescore"][0]
-        assert all(r[0] in re[3] for r in evals.values()) and "rescore.py" in re[3] and "compare_runs.py" in re[3]
-        # with the system comparison set up
+        assert "tests.test_meter" in tests[3] and "tests.test_v2_system" in tests[3] and "--gres" not in tests[3]
+        for grp, runs in (("meter_v3+meter_v3_s1", "meter_v3 meter_v3_s1"), ("meter_v3_s2+meter_v3_large", "meter_v3_s2 meter_v3_large")):
+            a, b = by["met_" + grp]
+            assert f"--dependency=afterok:{tests[0]}" in a[3] and f"--dependency=afterany:{a[0]}" in b[3]
+            assert all(f"bash pace/v2_jobs.sh meters {runs}" in x[3] and "--gres=gpu:1" in x[3] for x in (a, b))
+            assert "--kill-on-invalid-dep=yes" in a[3] and "--kill-on-invalid-dep" not in b[3]
+        lab = by["labellers"][0]
+        assert "v2_jobs.sh labellers nl_base_gn nl_base_gn_s1" in lab[3] and f"afterok:{tests[0]}" in lab[3]
+        grids = by["v2grids"][0]
+        assert "v2_jobs.sh grids" in grids[3] and "--gres" not in grids[3]
+        assert "--kill-on-invalid-dep=yes" in lab[3] and "--kill-on-invalid-dep=yes" in grids[3]
+        nx = by["v2next"][0]
+        others = [r[0] for r in rows if r is not nx and r is not tests]
+        # wave 2 only if the tests passed (cancelled with the rest otherwise), after everything else ended
+        assert f"--dependency=afterok:{tests[0]},afterany:{':'.join(others)}" in nx[3], nx[3]
+        assert "--kill-on-invalid-dep=yes" in nx[3] and "bash pace/v2.sh wave2" in nx[3]
+        # wave 2 without the system comparison set up: the evaluations and the rescoring
+        out, rows, by = submit("wave2")
+        assert "pace/bd_setup.sh" in out and set(by) == {"evals_nl_base", "evals_nl_base_gn", "evals_nl_base_gn_s1", "v2final"}
+        evals = [by[k][0][0] for k in sorted(by) if k.startswith("evals_")]
+        assert all("--dependency" not in by[k][0][3] for k in by if k.startswith("evals_"))
+        assert "v2_jobs.sh evals nl_base_gn_s1" in by["evals_nl_base_gn_s1"][0][3]
+        assert by["evals_nl_base"][0][3].rstrip().endswith("v2_jobs.sh evals nl_base nl_large")
+        fin = by["v2final"][0]
+        assert set(fin[3].split("--dependency=afterany:")[1].split()[0].split(":")) == set(evals)
+        assert "rescore.py --workers 16" in fin[3] and "compare_runs.py" in fin[3] and "beyer_dai.py" not in fin[3]
+        # with it set up, and one seq2seq system scored before
         (tmp / "outputs" / "system_eval" / "sf_base_reg_cab_meter").mkdir(parents=True)
         (tmp / "outputs" / "system_eval" / "sf_base_reg_cab_meter" / "summary.json").write_text("{}")
         (tmp / "outputs" / "system_eval" / "manifest.json").write_text("[]")
         (bd / "MIDI2ScoreTF.ckpt").write_text("x")
-        out, rows = submit({"METERS": "meter_v3", "NEW_NLS": "nl_base_gn", "GRIDS_OLD": "",
-                            "SYSTEMS": "nl_base_gn+meter_v3 nl_base+meter_v2_nonote"})
-        by = {}
-        for r in rows:
-            by.setdefault(name(r), []).append(r)
-        sb = by["synthbeats"][0]
-        assert "synth_beats.py" in sb[3]
-        s1, s2 = by["sys_v2_nl_base_gn_meter_v3"][0], by["sys_v2_nl_base_meter_v2_nonote"][0]
-        nl_job = next(r[0] for r in rows if r[1] == "nl_base_gn")
-        assert f"--dependency=afterok:{sb[0]}:{by['met_meter_v3'][1][0]}:{nl_job}" in s1[3]
-        assert f"--dependency=afterok:{sb[0]} " in s2[3] and "--v2 nl_base+meter_v2_nonote" in s2[3]
-        seq = [by[f"sys_{r}_sb"][0] for r in ("sf_base_reg_cab", "sf_base_reg_cab_c128")]
-        assert all("--midi-beats synth" in q[3] and f"afterok:{sb[0]}" in q[3] for q in seq)
-        fix = by["sysre_sf_base_reg_cab"][0]  # the one system scored before here: written again in full
-        assert fix[3].rstrip().endswith("system_scores.py --run sf_base_reg_cab --mode meter"), fix[3][-80:]
-        assert "sysre_s2s_m_cab" not in by and f"afterok:{by['v2tests'][0][0]}" in fix[3]
-        sc = by["sysscore"][0]
-        assert f"afterany:{':'.join(r[0] for r in [s1, s2] + seq + [fix])}" in sc[3] and "--systems all" in sc[3]
+        out, rows, by = submit("wave2")
+        assert len(rows) <= 7, len(rows)   # + the job submitting them: 8
+        evals = [by[k][0][0] for k in sorted(by) if k.startswith("evals_")]
+        v2 = by["sys_v2"][0]
+        assert "v2_jobs.sh systems nl_base+meter_v3 nl_base_gn+meter_v3" in v2[3]
+        assert set(v2[3].split("--dependency=afterany:")[1].split()[0].split(":")) == set(evals)
+        a, b = by["sys_seq_a"][0], by["sys_seq_b"][0]
+        assert "systems sf_base_reg_cab:meter:sb sf_base_reg_cab_c128:meter:sb" in a[3]
+        assert b[3].rstrip().endswith("systems sf_base_reg_cab:meter") and "s2s_m_cab" not in b[3]   # only the one scored before
+        fin = by["v2final"][0]
+        assert set(fin[3].split("--dependency=afterany:")[1].split()[0].split(":")) == set(evals) | {v2[0], a[0], b[0]}
+        assert "rescore.py" in fin[3] and "beyer_dai.py score" in fin[3] and "--systems all" in fin[3]
+        assert fin[3].index("rescore.py") < fin[3].index("beyer_dai.py")
+
+
+def test_rebuild_batch():
+    """pace/rebuild.sh: one CPU job that keeps the data in use (moved to data/processed_pre1122),
+    rebuilds with its vocabulary and feature scaling, every derived step in order (the note labels
+    before the meter data), the tracked beats copied over, the data tests last; refused when the
+    old folder exists already. pace/v2.sh with AFTER waits for it."""
+    if shutil.which("bash") is None:
+        print("  (skipped: no bash)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        (tmp / "pace").mkdir()
+        for f in ("rebuild.sh", "v2.sh"):
+            shutil.copy(ROOT / "pace" / f, tmp / "pace")
+        _stub_bin(tmp)
+        (tmp / "data" / "processed").mkdir(parents=True)
+        (tmp / "data" / "processed" / "vocab.json").write_text("{}")
+
+        def run(script, env=None):
+            for f in (tmp / "jobs.txt", tmp / "jobs.txt.n"):
+                if f.exists():
+                    f.unlink()
+            r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash {script}'], cwd=tmp,
+                               env=dict(os.environ, SUBMITS=str(tmp / "jobs.txt"), BD=str(tmp / "nobd"), **(env or {})),
+                               capture_output=True, text=True)
+            rows = [ln.split("	") for ln in (tmp / "jobs.txt").read_text().splitlines()] if (tmp / "jobs.txt").exists() else []
+            return r, rows
+        r, rows = run("pace/rebuild.sh")
+        assert r.returncode == 0 and len(rows) == 1 and "AFTER=101 bash pace/v2.sh" in r.stdout, r.stdout + r.stderr
+        job = rows[0][3]
+        assert "--gres" not in job and "mv data/processed data/processed_pre1122" in job
+        order = ["mv data/processed", "build_dataset.py --vocab data/processed_pre1122/vocab.json",
+                 "cp data/processed_pre1122/feature_stats.json", "build_transcribed.py --asap-split test",
+                 "build_metrical.py", "build_beats.py", "build_notelabels.py", "build_meter_data.py --workers 8 --check",
+                 "tests.test_integrity", "tests.test_preprocessing"]
+        pos = [job.index(x) for x in order]
+        assert pos == sorted(pos), list(zip(order, pos))
+        assert "beats_tracked" in job and "set -euo pipefail" in job
+        (tmp / "data" / "processed_pre1122").mkdir()
+        r, rows = run("pace/rebuild.sh")
+        assert r.returncode == 1 and not rows and "exists already" in r.stdout
+        r, rows = run("pace/v2.sh", {"AFTER": "555"})
+        tests = next(x for x in rows if "-J v2tests" in x[3])
+        assert "--dependency=afterok:555" in tests[3] and "--kill-on-invalid-dep=yes" in tests[3], tests[3]
+
+
+def test_v2_jobs():
+    """pace/v2_jobs.sh with a stand-in python: meter models trained side by side with their own
+    options and logs, then each finished one tuned and evaluated (once: not again on the next job),
+    an unfinished one failing the job; a labeller not trained yet resumed before its evaluations,
+    an earlier one evaluated again on the true grid and every grid; whole-piece systems by kind, a
+    v2 system with an unfinished model refused; the earlier meter models' grids decoded again."""
+    if shutil.which("bash") is None:
+        print("  (skipped: no bash)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        (tmp / "pace").mkdir()
+        shutil.copy(ROOT / "pace" / "v2_jobs.sh", tmp / "pace")
+        _stub_bin(tmp, sbatch=False)
+        # stand-in python: logs its arguments; training finishes the runs named in $DONE (status + an
+        # old best.pt), evaluations write their result file
+        (tmp / "bin" / "python").write_text(r'''#!/bin/bash
+echo "$*" >> "$CALLS"
+name=""; prev=""
+for a in "$@"; do [ "$prev" = "--name" ] || [ "$prev" = "--run" ] && name=$a; prev=$a; done
+case "$1" in
+  scripts/train_meter.py|scripts/train_labeller.py)
+    mkdir -p "outputs/runs/$name"; touch "outputs/runs/$name/last.pt"
+    case " $DONE " in *" $name "*) echo '{"phase": "done"}' > "outputs/runs/$name/status.json"
+      touch -d '2 days ago' "outputs/runs/$name/best.pt" ;; *) echo '{"phase": "train"}' > "outputs/runs/$name/status.json" ;; esac ;;
+  scripts/eval_meter.py) echo '{}' > "outputs/runs/$name/eval_meter.json" ;;
+esac
+exit 0
+''')
+        (tmp / "bin" / "python").chmod(0o755)
+
+        def run(args, done=""):
+            calls = tmp / "calls.txt"
+            if calls.exists():
+                calls.unlink()
+            r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash pace/v2_jobs.sh {args}'],
+                               cwd=tmp, env=dict(os.environ, CALLS=str(calls), DONE=done, SLURM_JOB_ID="77"),
+                               capture_output=True, text=True)
+            return r.returncode, (calls.read_text().splitlines() if calls.exists() else []), r.stdout + r.stderr
+        code, calls, out = run("meters meter_v3 meter_v3_large", done="meter_v3")
+        trains = [c for c in calls if c.startswith("scripts/train_meter.py")]
+        assert len(trains) == 2 and code == 1, (calls, out)   # meter_v3_large not done: the job fails
+        assert any("--name meter_v3 --steps 60000 --patience 8 --workers 6" in c and "--max-hours 7.5" in c for c in trains)
+        assert any("--name meter_v3_large" in c and "--d-model 384 --layers 8" in c for c in trains)
+        assert "--resume" not in " ".join(trains) and (tmp / "slurm-met_meter_v3-77.log").exists()
+        assert [c for c in calls if c.startswith("scripts/eval_meter.py")] == ["scripts/eval_meter.py --run meter_v3 --tune"]
+        code, calls, out = run("meters meter_v3 meter_v3_large", done="meter_v3 meter_v3_large")
+        assert code == 0, out
+        assert calls == ["scripts/train_meter.py --name meter_v3_large --steps 60000 --patience 8 --d-model 384 --layers 8 "
+                         "--workers 6 --normal-priority --max-hours 7.5 --resume",
+                         "scripts/eval_meter.py --run meter_v3_large --tune"], calls   # meter_v3: done and evaluated
+        code, calls, out = run("evals nl_base nl_large")
+        for nl in ("nl_base", "nl_large"):
+            mine = [c for c in calls if f"--run {nl} " in c + " "]
+            assert mine[0] == f"scripts/eval_labeller.py --run {nl} --normal-priority", mine   # the true grid
+            assert [c.split("--grid meter:")[1].split()[0] for c in mine[1:]] == [
+                "meter_oracle", "meter_v2_nonote", "meter_v3", "meter_v3_s1", "meter_v3_s2", "meter_v3_large"], mine
+        code, calls, out = run("evals nl_base_gn", done="nl_base_gn")
+        assert calls[0].startswith("scripts/train_labeller.py --name nl_base_gn --size base --grid-noise 0.8")
+        assert calls[1] == "scripts/eval_labeller.py --run nl_base_gn --normal-priority"
+        assert [c.split("--grid meter:")[1].split()[0] for c in calls[2:]][:2] == ["meter_oracle", "meter_v2_nonote"]
+        code, calls, out = run("systems nl_base_gn+meter_v3 sf_base_reg_cab:meter:sb s2s_m_cab:meter")
+        assert calls == ["scripts/system_scores.py --v2 nl_base_gn+meter_v3",
+                         "scripts/system_scores.py --run sf_base_reg_cab --mode meter --midi-beats synth",
+                         "scripts/system_scores.py --run s2s_m_cab --mode meter"], calls
+        code, calls, out = run("labellers nl_base_gn nl_base_gn_s1", done="nl_base_gn nl_base_gn_s1")
+        # nl_base_gn finished above (its evals job trained it): only nl_base_gn_s1 trains, both are evaluated
+        trains = [c for c in calls if c.startswith("scripts/train_labeller.py")]
+        assert len(trains) == 1 and "--name nl_base_gn_s1" in trains[0] and "--seed 1" in trains[0] and code == 0
+        assert [c for c in calls if c.startswith("scripts/eval_labeller.py")] == [
+            "scripts/eval_labeller.py --run nl_base_gn --normal-priority", "scripts/eval_labeller.py --run nl_base_gn_s1 --normal-priority"]
+        code, calls, out = run("systems nl_base_gn+meter_v3_s1")   # meter_v3_s1 never trained here: refused
+        assert calls == [] and code == 1 and "not finished" in out, (calls, out)
+        (tmp / "outputs" / "runs" / "meter_v2_nonote").mkdir(parents=True)
+        (tmp / "outputs" / "runs" / "meter_v2_nonote" / "best.pt").write_text("x")
+        code, calls, out = run("grids")
+        assert calls == ["scripts/eval_meter.py --run meter_v2_nonote --device cpu",   # the others: no best.pt here
+                         "scripts/eval_meter.py --run meter_oracle --oracle --device cpu", "scripts/synth_beats.py"], calls
 
 
 def main():

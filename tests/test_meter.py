@@ -329,6 +329,33 @@ def test_oracle_logp():
     assert oracle_logp(gt["t"][:1], gt) is None
 
 
+def test_long_steps_and_pickup_bars():
+    """A decoded step longer than the bar (a 2/4 piece tracked at half notes that missed a beat: 4
+    quarters) keeps the bar it passes; cover_notes puts bars in front of the grid for notes played
+    before its first bar line (the pickup becomes a partial first bar), and leaves a grid that
+    already covers them alone."""
+    from src.meter import cover_notes, oracle_logp
+    for ts, q_beats in (("2/4", [0, 2, 4, 8, 10, 12]), ("3/4", [0, 1, 2, 3, 4, 8, 9, 10, 11, 12])):
+        c = TS_CLASSES.index(ts)
+        L = int(bar_quarters(ts))
+        gq = np.arange(13, dtype=float)
+        gt = {"t": gq * 0.5, "q": gq, "down": np.arange(13) % L == 0, "ts": np.full(13, c), "ts_names": [ts] * 13,
+              "key": np.zeros(13)}
+        t = np.array(q_beats, float) * 0.5
+        g = grid_from_logp(t, oracle_logp(t, gt))
+        assert np.allclose(g["q"], q_beats), (ts, g["q"])
+        assert np.allclose(g["bar_q"], np.arange(0, 13, L)) and g["bars"] == [ts] * len(g["bar_q"]), (ts, g["bar_q"])
+        assert grid_scores(g, gt) == {"beat_f": 1.0, "downbeat_f": 1.0, "ts_acc": 1.0}
+    g = grid_from_states(np.array([1.5, 2.0, 2.5, 3.0, 3.5]), [(0, 0), (0, 12), (0, 24), (0, 36), (0, 0)])  # 4/4 from 1.5 s
+    assert cover_notes(g, 1.5) is g and cover_notes(g, 1.49) is g      # within 1/24 quarter: no bar added
+    c = cover_notes(g, 1.0)                                             # one quarter (0.5 s) early: a pickup
+    assert c["bars"] == ["4/4", "4/4"] + g["bars"][1:] and np.allclose(c["bar_q"][:2], [0, 4])
+    assert np.allclose(c["q"], g["q"] + 4) and np.allclose(c["bar_t"][:2], [-0.5, 1.5])
+    from src.notelabels import grid_position
+    assert abs(grid_position(np.array([1.0]), c["t"], c["q"])[0][0] - 3.0) < 1e-9   # beat 4 of the added bar
+    assert len(cover_notes(g, -1.0)["bars"]) == len(g["bars"]) + 2       # 2.5 s early: two bars
+
+
 def test_window_frame():
     """A decoded grid in a window's frame: its first bar is the bar its first note falls in; a
     window takes the grid of the segment whose span holds it."""

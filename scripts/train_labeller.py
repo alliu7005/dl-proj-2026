@@ -212,10 +212,13 @@ def main(argv=None):
                              min_lr_frac=args.min_lr_frac, phase=phase, cool=cool)
 
     step, epoch, best, best_step, stopped_early = 0, 0, float("inf"), 0, False
+    in_epoch = 0
     if ck is not None:
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
         step, epoch, best, best_step = ck["step"], ck["epoch"], ck["best"], ck["best_step"]
+        in_epoch = ck.get("batch_in_epoch", 0)  # batches of this epoch trained on already
+        batches.skip = in_epoch
         phase, cool, stopped_early = ck["phase"], ck["cool"], ck.get("stopped_early", False)
         print(f"resumed {run} at step {step} (epoch {epoch}, phase {phase})", flush=True)
     json.dump({"args": vars(args), "arch": "labeller", "model": cfg, "params": n_params,
@@ -238,6 +241,7 @@ def main(argv=None):
     def save(path):
         tmp = path.with_name(path.name + ".tmp")
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": epoch,
+                    "batch_in_epoch": in_epoch,
                     "best": best, "best_step": best_step, "phase": phase, "cool": cool,
                     "stopped_early": stopped_early, "arch": "labeller", "config": cfg}, tmp)
         os.replace(tmp, path)
@@ -277,6 +281,7 @@ def main(argv=None):
                 train.set_epoch(epoch)
             batches.set_epoch(epoch)
             for b in dl:
+                in_epoch += 1
                 b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
                     out = model(b["notes"], b["note_mask"])
@@ -317,6 +322,7 @@ def main(argv=None):
                     break
             else:
                 epoch += 1
+                in_epoch = 0
     except KeyboardInterrupt:
         save(run / "last.pt")
         print(f"\nstopped at step {step}: python scripts/train_labeller.py --name {args.name} --resume", flush=True)

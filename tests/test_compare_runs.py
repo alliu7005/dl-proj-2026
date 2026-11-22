@@ -196,7 +196,7 @@ def test_meter_tables():
                 "tracker_beat_f": 0.81, "tracker_downbeat_f": 0.62, "performances": n, "pieces": 14,
                 "default": {"grid_downbeat_f": base + 0.05, "grid_ts_acc": base - 0.05},
                 "piece_mean": {"grid_downbeat_f": base + 0.08, "grid_ts_acc": base + 0.02},
-                "ts_confusion": [["4/4", "4/4", 900], ["6/4", "3/4", 300], ["2/4", "4/4", 120]]}
+                "ts_confusion": [["4/4", "4/4", 900], ["6/4", "3/4", 300], ["2/4", "4/4", 120]], "decoder_version": 2}
     with tempfile.TemporaryDirectory() as t:
         runs, out = Path(t) / "runs", Path(t) / "compare"
         for name, res, config in (
@@ -238,15 +238,15 @@ def test_labeller_tables():
     the oracle as a meter-model row with no model settings."""
     with tempfile.TemporaryDirectory() as t:
         runs, out = Path(t) / "runs", Path(t) / "compare"
-        res = {"clean": {"grid_true": metrics(0.7, onset_scaled_f1=0.8),
-                         "grid_meter_meter_v3": metrics(0.3, onset_scaled_f1=0.45),
-                         "grid_meter_meter_oracle": metrics(0.5, onset_scaled_f1=0.6),
-                         "grid_meter_meter_base": metrics(0.2)}}
+        res = {"clean": {"grid_true": metrics(0.7, onset_scaled_f1=0.8, labeller_eval=2),
+                         "grid_meter_meter_v3": metrics(0.3, onset_scaled_f1=0.45, labeller_eval=2),
+                         "grid_meter_meter_oracle": metrics(0.5, onset_scaled_f1=0.6, labeller_eval=2),
+                         "grid_meter_meter_base": metrics(0.2)}}   # an earlier evaluation: flagged
         make_run(runs, "nl_base_gn", res, {"arch": "labeller", "params": 25.6e6, "args": {}, "model": {}})
         d = runs / "meter_oracle"
         d.mkdir()
         (d / "eval_meter.json").write_text(json.dumps({"clean": {"grid_beat_f": 0.88, "grid_downbeat_f": 0.9,
-                                                                 "grid_ts_acc": 0.99, "performances": 59}}))
+                                                                 "grid_ts_acc": 0.99, "performances": 59}}))  # old decoder
         (d / "config.json").write_text(json.dumps({"arch": "meter_oracle"}))
         assert compare_runs.main(["--runs-dir", str(runs), "--out", str(out), "--quiet"]) == 0
         s = (out / "summary.md").read_text(encoding="utf-8")
@@ -255,11 +255,12 @@ def test_labeller_tables():
         assert "onset-scale F1" in hdr and "oracle grid" in sec and "*_gn" in sec
         rows = [[c.strip() for c in ln.split("|")[1:-1]] for ln in sec.splitlines() if ln.startswith("| nl_base_gn")]
         assert [r[1] for r in rows] == ["true grid", "oracle grid (tracked beats, every meter head right)",
-                                        "meter model meter_base", "meter model meter_v3"], [r[1] for r in rows]
+                                        "meter model meter_base (old eval)", "meter model meter_v3"], [r[1] for r in rows]
         col = [c.strip() for c in hdr.split("|")[1:-1]].index("onset-scale F1")
         assert [r[col] for r in rows] == ["**0.800**", "0.600", compare_runs.DASH, "0.450"], [r[col] for r in rows]
         meter = s.split("## Meter models (v2) per test set")[1]
         orow = next([c.strip() for c in ln.split("|")[1:-1]] for ln in meter.splitlines() if ln.startswith("| meter_oracle"))
+        assert orow[0] == "meter_oracle (old decoder)", orow[0]
         assert orow[1:5] == ["oracle", compare_runs.DASH, compare_runs.DASH, compare_runs.DASH], orow
 
 

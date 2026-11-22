@@ -49,11 +49,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import pick_device  # noqa: E402
 from scripts.train_meter import load  # noqa: E402
 from src.beats import MATCH_TOL, BeatNoise, f_measure  # noqa: E402
-from src.meter import (DecodeConfig, build_meter_model, grid_from_logp, grid_scores, oracle_logp,  # noqa: E402
-                       predict_logp)
+from src.meter import (DecodeConfig, build_meter_model, cover_notes, grid_from_logp, grid_scores,  # noqa: E402
+                       oracle_logp, predict_logp)
 from src.notelabels import estimate_key  # noqa: E402
 
 CONDITIONS = {"clean": "test", "real": "test_transcribed", "periscope": "test_periscope"}
+DECODER_VERSION = 2  # 2: a step longer than a bar keeps the bars it passes (src/meter.py grid_from_states)
 VAL = {"asap": "val", "real": "val_transcribed", "periscope": "val_periscope"}
 SEED = 12345  # the simulated tracker's draw on the clean performances (fixed: comparable runs)
 SEARCH = {  # coordinate search over the decoder's settings (each list holds the default)
@@ -174,8 +175,11 @@ def main(argv=None):
             grid["key"] = estimate_key(perf["notes"])  # the key signature the rendered score gets
             grid["performance"] = perf["performance"]
             grid["span"] = tuple(perf.get("span") or (float(bt[0]) - 1.0, float(bt[-1]) + 1.0))
-            grids[key_of(perf)] = grid
             s = grid_scores(grid, perf["gt"])
+            # the labeller's grid: bars in front for the notes before the first bar line (scored above without)
+            on = np.asarray(perf["notes"], np.float64)[:, 1] if len(perf["notes"]) else np.zeros(0)
+            on = on[on >= grid["span"][0]]
+            grids[key_of(perf)] = cover_notes(grid, float(on.min())) if len(on) else grid
             scores.append(s)
             default.append(grid_scores(grid_from_logp(bt, lp, DecodeConfig()), perf["gt"]))
             gt = perf["gt"]
@@ -198,6 +202,7 @@ def main(argv=None):
                                                           for v in by_piece.values()])) for key in scores[0]}
         res["performances"], res["pieces"] = len(perfs), len(by_piece)
         res["decode"] = cfg.to_dict()
+        res["decoder_version"] = DECODER_VERSION
         res["ts_confusion"] = [[a, b, n] for (a, b), n in confusion.most_common(25)]
         results[cond] = res
         with open(run / f"grids_{cond}.pkl", "wb") as f:

@@ -65,7 +65,8 @@ for r in "${RUNS[@]}"; do
     echo "  skip $r: already being evaluated (job ${whole:-$parts})"
     continue
   fi
-  # what is missing (exit 0), nothing (3), training not finished (4); $ARGS unquoted on purpose:
+  # what is missing (exit 0), nothing (3), training not finished (4), not a seq2seq model (5: a v2
+  # labeller or meter model, evaluated by their own scripts); $ARGS unquoted on purpose:
   # it holds several arguments, exactly as evaluate.sbatch passes it
   set +e
   # shellcheck disable=SC2086
@@ -76,6 +77,7 @@ for r in "${RUNS[@]}"; do
     0) ;;
     3) if [ "$FORCE" != 1 ]; then echo "  skip $r: nothing missing"; continue; fi ;;
     4) echo "  skip $r: $todo"; continue ;;  # even with FORCE: its best.pt is not final yet
+    5) echo "  skip $r: $todo"; continue ;;
     *) echo "  error for $r (src.eval.plan exit $rc):"; echo "$todo" | sed 's/^/    /'; exit 1 ;;
   esac
   t=$TIME

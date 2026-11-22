@@ -63,13 +63,22 @@ def test_manifest_on_local_data():
     if not (data / "test" / "index.npy").exists() or not (asap / "metadata.csv").exists():
         print("  (skipped: data/processed/test or data/raw/asap_bd missing)")
         return
+    real = (data / "test_transcribed" / "report.json").exists()
+    maestro, transcribed = ROOT / "data" / "raw" / "maestro", ROOT / "data" / "transcribed_transkun"
+    if real and not ((maestro / "maestro-v3.0.0.csv").exists() and transcribed.exists()):
+        print("  (skipped: test_transcribed exists but data/raw/maestro or data/transcribed_transkun is missing)")
+        return
     with tempfile.TemporaryDirectory() as t:
-        entries = system_inputs.build(data, asap, Path(t) / "none", Path(t) / "none", Path(t))
-    clean = [e for e in entries if e["condition"] == "clean"]
-    assert len(clean) == len({e["performance"] for e in clean}) >= 1
-    assert all(Path(e["midi"]).exists() and Path(e["reference"]).name == "xml_score.musicxml" for e in clean)
-    if not (data / "test_transcribed" / "report.json").exists():
-        assert all(e["condition"] == "clean" for e in entries)
+        entries = system_inputs.build(data, asap, transcribed, maestro, Path(t))
+        clean = [e for e in entries if e["condition"] == "clean"]
+        assert len(clean) == len({e["performance"] for e in clean}) >= 1
+        assert all(Path(e["midi"]).exists() and Path(e["reference"]).name == "xml_score.musicxml" for e in clean)
+        if real:  # every real input written (cut to its piece), its performance a clean one too
+            got = [e for e in entries if e["condition"] == "real"]
+            assert got and all(Path(e["midi"]).exists() and e["notes"] > 0 for e in got), got[:2]
+            assert {e["performance"] for e in got} <= {e["performance"] for e in clean}
+        else:
+            assert all(e["condition"] == "clean" for e in entries)
 
 
 def test_system_scores_end_to_end():

@@ -458,10 +458,11 @@ class V2Pipeline(_FrontEnd):
     # ------------------------------------------------------------------ steps
     def grid(self, notes: np.ndarray, beats: tuple) -> dict:
         """The meter model's grid of the whole performance on these beats, with its key signature."""
-        from .meter import predict_grid
+        from .meter import cover_notes, predict_grid
         from .notelabels import estimate_key
         g = predict_grid(self.meter, notes, np.asarray(beats[0], np.float64), np.asarray(beats[1], bool),
                          self.device, self.decode_cfg)
+        g = cover_notes(g, float(notes[:, ONSET].min()))  # a pickup before the first tracked beat's bar
         g["key"] = estimate_key(notes)
         return g
 
@@ -469,13 +470,19 @@ class V2Pipeline(_FrontEnd):
         """The labeller's input for every window (the layout of src/dataset.py with notelabels and
         context notes: note features, standardised, then where the grid puts each note), and each
         window's frame in the grid."""
-        from .dataset import assembly
+        from .dataset import ROLE_CARRIED, ROLE_WINDOW, assembly
         from .notelabels import grid_features, window_frame
         items, frames = [], []
         cols, mean, std = self.scale
+        context = bool(int(self.cfg.context_before) or int(self.cfg.context_after))
         for w in windows:
-            notes, roles, _ = assembly(w["notes"], w["before"], w["after"])
-            f = note_features(notes, w["pedal"], roles)
+            if context:  # the layout of src/dataset.py with context notes (role columns)
+                notes, roles, _ = assembly(w["notes"], w["before"], w["after"])
+                f = note_features(notes, w["pedal"], roles)
+            else:  # and without
+                notes = w["notes"]
+                roles = np.where(notes[:, 1] < 0, ROLE_CARRIED, ROLE_WINDOW).astype(np.int8)
+                f = note_features(notes, w["pedal"])
             f[:, cols] = (f[:, cols] - mean) / std
             g_t, g_q, win = window_frame(grid, w["t0"], w["notes"][:, 1], int(grid.get("key", 0)))
             gf, bar_est, pos_est = grid_features(notes[:, 1], g_t, g_q, win)

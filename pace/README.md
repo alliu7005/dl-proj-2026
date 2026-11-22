@@ -301,35 +301,57 @@ per-piece numbers, the time-signature confusions (`meter_scores_<condition>.json
 models (v2)") and puts each labeller's true-grid
 and meter-grid results side by side ("Note labeller (v2)").
 
+## 4j2. Rebuild the data with the 2026-11-22 fixes
+
+The sweep of 2026-11-22 (README, "Repo sweep") fixed three errors in how scores become training
+data: ties in chords, pickups, and one piece in both train and val. They take effect once the data
+is rebuilt:
+
+```bash
+bash pace/rebuild.sh                  # one CPU job (up to 8 h); the data in use is kept as data/processed_pre1122
+AFTER=<its job id> bash pace/v2.sh    # 4k on the rebuilt data, starting when the rebuild has succeeded
+```
+
+The rebuild keeps the vocabulary (same token ids: every checkpoint reads the new data) and the
+feature scaling, reuses the transcriptions and Beat This!'s tracked beats, and builds everything
+that depends on the scores again (windows and targets, real-transcription splits, metrical labels,
+annotated beats, note labels, meter data), then runs the data tests. To go back:
+`rm -rf data/processed && mv data/processed_pre1122 data/processed`.
+
 ## 4k. v2, third round: the whole system end to end
 
 After 4j (its data and runs) and 4h (`pace/bd_setup.sh`, `pace/system_eval.sh` once: the manifest and
 Beyer & Dai's predictions):
 
 ```bash
-bash pace/v2.sh                       # tests -> meter models, oracle, labellers -> labeller on every grid,
-                                      # rescoring; Beat This! on the rendered MIDI -> v2 on whole pieces -> scoring
+bash pace/v2.sh                       # wave 1 (8 jobs); its last job submits wave 2 when the rest has finished
+bash pace/v2.sh wave2                 # wave 2 by hand, if that job could not submit it (see its slurm-v2next log)
 SKIP_SYSTEM=1 bash pace/v2.sh         # without the whole-piece comparison
-METERS="meter_v3" NEW_NLS="nl_base_gn" SYSTEMS="nl_base_gn+meter_v3" SEQ_SB="" bash pace/v2.sh   # a subset
+METERS="meter_v3" METER_GROUPS="meter_v3" NEW_NLS="nl_base_gn" SYSTEMS="nl_base_gn+meter_v3" SEQ_SB="" bash pace/v2.sh   # a subset
 ```
 
-| job | what | waits for |
-|---|---|---|
-| `v2tests` | the test suites, on PACE's Python (CPU) | - |
-| `met_<m>` (x2) | `meter_v3`, `_s1`, `_s2` (seeds), `_large` (d 384, 8 layers): no note encoder, up to 60k steps; two 8-hour jobs, the second resuming the first (`--max-hours 7.5`), then `eval_meter.py --tune`. The second fails unless the model is trained and evaluated, so nothing runs on an unfinished one | `v2tests` |
-| `metev_meter_oracle` | the oracle grids: every meter head certain of the truth on the same tracked beats (CPU) | `v2tests` |
-| `nl_base_gn`, `nl_base_gn_s1` | the labeller trained with the tracker's timing on its grid (`--grid-noise 0.8`), then evaluated on the true grid | `v2tests` |
-| `v2_<nl>@<grid>` | each labeller (`nl_base` and the two new ones) on each grid (the oracle, `meter_v2_nonote`, the new meter models), every test set; pairs evaluated before are skipped | that grid's job and that labeller's |
-| `rescore` | the new onset-scale F1 for every run's saved predictions, then `outputs/compare` | every `v2_*` job (finished or not) |
-| `synthbeats` | Beat This! on the clean test MIDI rendered to audio, each piece with the fold model that never heard it -> `outputs/system_eval/beats_synth.npz` (+ `.json`: its beat F next to the real audio's) | `v2tests` |
-| `sys_v2_<nl>_<m>` | v2 on the whole test pieces (`SYSTEMS`) | `synthbeats`, `<m>`, `<nl>` |
-| `sys_<run>_sb` | `sf_base_reg_cab` and `sf_base_reg_cab_c128` with the same rendered-MIDI beats on clean MIDI | `synthbeats` |
-| `sysre_<run>` | the seq2seq systems scored before (`SEQ_RERUN`), every score written again with the current export: key-aware spelling, and the last resort that gives the 4 real pieces of the last comparison a score | `v2tests` |
-| `sysscore` | every system in `outputs/system_eval` rated with Beyer & Dai's metrics -> `results.md` | every `sys_*` job (finished or not) |
+PACE limits how many jobs a user may have submitted at once (a submission over the limit fails with
+`QOSMaxSubmitJobPerUserLimit`), so models share GPU jobs and the batch comes in two waves of at most
+8 jobs, each wave submitted when the one before has finished. `pace/v2_jobs.sh` does each job's work.
+A job waiting on another's success is cancelled if that one fails (`--kill-on-invalid-dep=yes`), so
+the waves never wait forever.
 
-The meter runs take the longest (up to 16 h each). A meter job that ends without its model trained
-(both 8-hour jobs used up) can be continued with the same command `pace/v2.sh` submits: it
-resumes from `last.pt` (`grep met_ slurm-met_*.out`). A piece whose score cannot be written keeps
+| wave | job | what | waits for |
+|---|---|---|---|
+| 1 | `v2tests` | the test suites, on PACE's Python (CPU) | - |
+| 1 | `met_<a>+<b>` (x2 per group) | two meter models side by side on one GPU (`METER_GROUPS`: `meter_v3`+`_s1`, `_s2`+`_large`): no note encoder, up to 60k steps, 7.5 h per job; the second job resumes the first, then tunes the decoder and evaluates each model. It fails unless both are trained and evaluated | `v2tests` (2nd: the 1st) |
+| 1 | `labellers` | `nl_base_gn` and `nl_base_gn_s1` (`--grid-noise 0.8`) side by side, then each on the true grid | `v2tests` |
+| 1 | `v2grids` | the earlier meter models' grids decoded again (the fixed decoder), the oracle grids, then Beat This! on the clean test MIDI rendered to audio, each piece with the fold model that never heard it -> `outputs/system_eval/beats_synth.npz` (+ `.json`: its beat F next to the real audio's) (CPU) | `v2tests` |
+| 1 | `v2next` | submits wave 2 | all of wave 1 (finished or not) |
+| 2 | `evals_<nl>` (x3) | each labeller (`nl_base`, then also `nl_large`; the two new ones) on the true grid and every grid (the oracle, `meter_v2_nonote`, the new meter models), every test set | - |
+| 2 | `sys_v2` | v2 on the whole test pieces (`SYSTEMS`; a system whose models are not finished is skipped) | the `evals_*` jobs |
+| 2 | `sys_seq_a`, `sys_seq_b` | `sf_base_reg_cab` and `sf_base_reg_cab_c128` with the rendered-MIDI beats on clean MIDI, and the seq2seq systems scored before written again with the current export (spelling, overflow, per-bar fallbacks; the 4 real pieces they had no score for) | - |
+| 2 | `v2final` | the onset-scale F1 for every run's saved predictions and `outputs/compare`, then every system in `outputs/system_eval` rated with Beyer & Dai's metrics -> `results.md` | all of wave 2 (finished or not) |
+
+The meter runs take the longest (up to 16 h each; each model logs to `slurm-met_<run>-<job>.log`).
+A meter pair not finished after its two jobs is continued with
+`sbatch --gres=gpu:1 -c 16 --mem=120G -t 8:00:00 --wrap="source pace/common.sh; bash pace/v2_jobs.sh meters <a> <b>"`
+(it resumes from `last.pt`), then `bash pace/v2.sh wave2`. A piece whose score cannot be written keeps
 `<slug>.tokens.txt` and `<slug>.error.txt` in `outputs/system_eval/<system>/<condition>/`.
 
 To bring everything back (PACE, then Windows):

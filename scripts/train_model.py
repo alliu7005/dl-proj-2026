@@ -378,11 +378,14 @@ def main():
 
     weights = torch.tensor(vocab.loss_weights(args.ornament_weight), device=device)
     step, epoch, best = 0, 0, float("inf")
+    in_epoch = 0
     best_step = 0  # step of the best validation loss (early stopping)
     if ck is not None:
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
         step, epoch, best = ck["step"], ck["epoch"], ck.get("best", best)
+        in_epoch = ck.get("batch_in_epoch", 0)  # batches of this epoch trained on already
+        batches.skip = in_epoch
         best_step = ck.get("best_step", step)
         phase = ck.get("phase", "train" if step < total_steps else "done")
         cool = ck.get("cool", cool)
@@ -411,6 +414,7 @@ def main():
         # instead of a truncated file that the resubmitted job cannot load
         tmp = path.with_name(path.name + ".tmp")
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": epoch,
+                    "batch_in_epoch": in_epoch,
                     "best": best, "best_step": best_step, "phase": phase, "cool": cool,
                     "stopped_early": stopped_early,
                     "arch": args.arch, "config": cfg}, tmp)
@@ -468,6 +472,7 @@ def main():
             batches.set_epoch(epoch)
             t_wait = time.time()
             for b in dl:
+                in_epoch += 1
                 wait_int += time.time() - t_wait
                 b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
@@ -518,6 +523,7 @@ def main():
                 t_wait = time.time()
             else:  # the epoch's batches ran out (not stopped by total_steps or early stopping)
                 epoch += 1
+                in_epoch = 0
     except KeyboardInterrupt:
         save(run / "last.pt")
         print(f"\nstopped at step {step}: saved {run / 'last.pt'}. Continue with: "

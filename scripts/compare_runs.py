@@ -66,7 +66,8 @@ METER_HELP = ("The grid each meter model decodes from the tracked beats of a who
               "default = the same model with the untuned decoder (the tuned one: decode.json, chosen on validation). "
               "tracker = the tracked beats themselves, the input. Data: A = ASAP, R = real ASAP transcriptions "
               "with Beat This!'s beats, P = PERiScoPe; oracle = no model, every head certain of the truth on the "
-              "same tracked beats (scripts/eval_meter.py --oracle): the best grid those beats allow")
+              "same tracked beats (scripts/eval_meter.py --oracle): the best grid those beats allow. (old decoder) "
+              "= decoded before a step longer than a bar kept the bars it passes: bars were lost")
 
 
 def num(x, pct=False, digits=3):
@@ -221,7 +222,8 @@ def meter_section(meters):
                 continue
             mi, dflt, pm = meters[r][1], v.get("default", {}), v.get("piece_mean", {})
             wrong = [c for c in v.get("ts_confusion", []) if c[0] != c[1]][:2]
-            rows.append([r, mi["data"], mi["notes"], mi["params"], mi["seed"],
+            name = r if v.get("decoder_version", 1) >= 2 else r + " (old decoder)"
+            rows.append([name, mi["data"], mi["notes"], mi["params"], mi["seed"],
                          num(v.get("grid_beat_f")), num(v.get("grid_downbeat_f")), num(v.get("grid_ts_acc")),
                          num(pm.get("grid_downbeat_f")), num(pm.get("grid_ts_acc")),
                          num(dflt.get("grid_downbeat_f")), num(dflt.get("grid_ts_acc")),
@@ -296,8 +298,10 @@ def summary(runs, res, info, now, meters=None):
             "grid = the same tracked beats decoded with every meter head certain of the truth (scripts/eval_meter.py "
             "--oracle): the most a meter model can give on them. Runs named *_gn were trained with the tracker's "
             "timing on their grid (--grid-noise). onset-scale F1 = onset-shift F1 at the note values written, "
-            "halved or doubled, whichever is best (3/8 written for 3/4: the same music). The seq2seq models' "
-            "meter mode is the system they replace.", ""]
+            "halved or doubled, whichever is best (3/8 written for 3/4: the same music). (old eval) = evaluated "
+            "before the notes carried over from the window before were left out (their untrained outputs were "
+            "scored): not comparable with the other rows. The seq2seq models' meter mode is the system they "
+            "replace.", ""]
     for cond, desc in CONDITIONS:
         rows = []
         for r in runs:
@@ -306,6 +310,8 @@ def summary(runs, res, info, now, meters=None):
             order = [m for m, _ in LABELLER_MODES]
             for mode, label in sorted(modes, key=lambda x: (order.index(x[0]) if x[0] in order else len(order), x[0])):
                 v = res[r][cond][mode]
+                if v.get("labeller_eval", 1) < 2:  # before carried-over notes were left out
+                    label += " (old eval)"
                 rows.append([r, label] + [num(v.get(k)) for k, _ in METRICS])
         if rows:
             out += ["### {}: {}".format(cond, desc), "",

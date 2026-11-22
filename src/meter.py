@@ -359,14 +359,15 @@ def _machine(ts_idx: tuple[int, ...]):
 
 
 def decode(logp_bar: np.ndarray, logp_step: np.ndarray, logp_ts: np.ndarray, cfg: DecodeConfig = DecodeConfig(),
-           ts_idx: tuple[int, ...] | None = None) -> list[tuple[int, int]]:
+           ts_idx: tuple[int, ...] | None = None, return_steps: bool = False):
     """Most probable consistent (time signature, position in the bar) per tracked beat.
     logp_bar [K, 2] (no / yes), logp_step [K, len(Q_STEPS)], logp_ts [K, len(TS_CLASSES)].
     Beat k+1's position = beat k's + its step; reaching the bar length exactly starts a bar on beat
     k+1 (where the time signature may change), passing it puts the bar line between the two
     (penalised: a tracker that missed the downbeat's beat). ``cfg`` weighs the bar and
     time-signature heads and sets the two penalties (tuned on validation by scripts/eval_meter.py
-    --tune)."""
+    --tune). ``return_steps``: also the Q_STEPS index chosen between each pair of beats (a step can
+    span more than a bar, which the states alone do not show: give both to ``grid_from_states``)."""
     ts_idx = tuple(range(len(TS_CLASSES))) if ts_idx is None else tuple(ts_idx)
     states, src, stp, mid, st_c, at0 = _machine(ts_idx)
     n, k = len(states), len(logp_bar)
@@ -378,33 +379,43 @@ def decode(logp_bar: np.ndarray, logp_step: np.ndarray, logp_ts: np.ndarray, cfg
         return cfg.bar_weight * np.where(at0, logp_bar[j, 1], logp_bar[j, 0]) + cfg.ts_weight * logp_ts[j, st_c]
     score = emit(0)
     back = np.zeros((k, n), np.int64)
+    back_step = np.zeros((k, n), np.int64)
     for j in range(1, k):
         ext = np.append(score, -np.inf)
         cand = ext[src] + logp_step[j - 1][stp] + pen               # [n, moves]
         a = cand.argmax(1)
         new = cand[rows, a]
         arg = src[rows, a]
+        step = stp[rows, a]
         # a new time signature at a bar line: from the best bar start of any other time signature
         best = starts[np.argmax(new[starts])]
         alt = new[best] + cfg.ts_change
         better = alt > new[starts]
         new[starts[better]] = alt
         arg[starts[better]] = arg[best]
-        back[j] = arg
+        step[starts[better]] = step[best]
+        back[j], back_step[j] = arg, step
         score = new + emit(j)
     path = [int(np.argmax(score))]
+    steps = []
     for j in range(k - 1, 0, -1):
+        steps.append(int(back_step[j, path[-1]]))
         path.append(int(back[j, path[-1]]))
     path.reverse()
-    return [states[i] for i in path]
+    steps.reverse()
+    out = [states[i] for i in path]
+    return (out, steps) if return_steps else out
 
 
-def grid_from_states(beat_t: np.ndarray, states: list[tuple[int, int]]) -> dict:
+def grid_from_states(beat_t: np.ndarray, states: list[tuple[int, int]], steps: list[int] | None = None) -> dict:
     """Decoded states -> the grid: {"t": beat times, "q": quarters from the first bar line (the bar
     the first beat is in; a pickup's first beat has q > 0), "bars": time signature of each bar,
     "bar_q": each bar line's q, "bar_t": its time (interpolated where it falls between beats)}.
-    Consecutive beats of one time signature are ``(p' - p) mod bar length`` apart (a whole bar when
-    equal); a new time signature starts at its bar line."""
+    ``steps``: the Q_STEPS index decoded between each pair of beats (``decode(...,
+    return_steps=True)``): a step longer than the bar passes one bar line or more, all of them
+    written. Without, consecutive beats of one time signature are taken as ``(p' - p) mod bar
+    length`` apart (a whole bar when equal), which loses the bars of such a step. A new time
+    signature starts at its bar line."""
     t = np.asarray(beat_t, np.float64)
     if not states:
         return {"t": t, "q": np.zeros(0), "bars": [], "bar_q": np.zeros(0), "bar_t": np.zeros(0)}
@@ -412,14 +423,20 @@ def grid_from_states(beat_t: np.ndarray, states: list[tuple[int, int]]) -> dict:
     c0, p0 = states[0]
     acc = [p0]                                   # GRID units from the first bar line
     bars, bar_q = [TS_CLASSES[c0]], [0]
-    for (pc, pp), (c, p) in zip(states[:-1], states[1:]):
+    units = [int(Q_STEPS[k] * GRID) for k in steps] if steps is not None else None
+    for j, ((pc, pp), (c, p)) in enumerate(zip(states[:-1], states[1:])):
         L = lens[pc]
-        if c == pc:
+        if units is not None:
+            d = units[j]
+        elif c == pc:
             d = (p - pp) % L or L
         else:
             d = L - pp + p
         acc.append(acc[-1] + d)
-        line = acc[-1] - p
+        line = acc[-1] - p                       # the bar line of beat j + 1's bar
+        while bar_q[-1] + L < line:              # bar lines a long step passes on the way
+            bar_q.append(bar_q[-1] + L)
+            bars.append(TS_CLASSES[pc])
         if line > bar_q[-1]:
             bar_q.append(line)
             bars.append(TS_CLASSES[c])
@@ -430,6 +447,34 @@ def grid_from_states(beat_t: np.ndarray, states: list[tuple[int, int]]) -> dict:
         s0 = (t[1] - t[0]) / max(q[1] - q[0], 1e-6)
         bar_t = np.where(bq < q[0], t[0] + (bq - q[0]) * s0, bar_t)
     return {"t": t, "q": q, "bars": bars, "bar_q": bq, "bar_t": bar_t}
+
+
+def cover_notes(grid: dict, t_first: float, tol: float = 1 / 24) -> dict:
+    """The grid with bars of its first time signature added before its first bar line until the
+    note at ``t_first`` (seconds) falls inside its bars. A grid starts at the bar line of the first
+    tracked beat's bar, so notes played before it (a pickup the tracker had no beat for) would sit
+    at negative positions of bar 0, on top of its downbeat; with the bar in front they are a
+    partial first bar. Times before the first beat are extended with the first tempo. Applied to
+    the grids the labeller gets (scripts/eval_meter.py saves them, src/pipeline.py V2Pipeline),
+    after the grid is scored: the scores stay those of the decoded beats."""
+    t, q = np.asarray(grid["t"], np.float64), np.asarray(grid["q"], np.float64)
+    if len(t) < 2 or not grid["bars"] or t_first >= t[0]:
+        return grid
+    spq = max(t[1] - t[0], 1e-6) / max(q[1] - q[0], 1e-6)       # seconds per quarter at the start
+    qf = q[0] + (t_first - t[0]) / spq
+    if qf >= -tol:
+        return grid
+    L = float(bar_quarters(grid["bars"][0]))
+    k = int(math.ceil((-qf - tol) / L))
+    shift = k * L
+    new_q = np.arange(k, dtype=np.float64) * L
+    new_t = t[0] + (new_q - (q[0] + shift)) * spq
+    out = dict(grid)
+    out["q"] = q + shift
+    out["bar_q"] = np.concatenate([new_q, np.asarray(grid["bar_q"], np.float64) + shift])
+    out["bar_t"] = np.concatenate([new_t, np.asarray(grid["bar_t"], np.float64)])
+    out["bars"] = [grid["bars"][0]] * k + list(grid["bars"])
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -662,7 +707,8 @@ def grid_from_logp(beat_t: np.ndarray, lp: dict | None, cfg: DecodeConfig = Deco
     """``predict_logp``'s output decoded into a grid (a single bar without it)."""
     if lp is None:
         return grid_from_states(beat_t, [(0, 0)] * len(beat_t))
-    return grid_from_states(beat_t, decode(lp["bar"], lp["step"], lp["ts"], cfg))
+    states, steps = decode(lp["bar"], lp["step"], lp["ts"], cfg, return_steps=True)
+    return grid_from_states(beat_t, states, steps)
 
 
 def predict_grid(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, device="cpu",

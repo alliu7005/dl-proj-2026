@@ -160,8 +160,8 @@ def _clip_to_bars(bars: list[_Bar]) -> list[_Bar]:
     time signature, a missed bar line) or hold it across the bar line; music21's export then tries
     to carry the overflow into the next measure and fails (KeyError on a voice id, or "object
     already found in this Stream"). Notes starting past the end are dropped, longer ones cut at
-    the bar line. Only used as an export fallback: some real scores have bars fuller than their
-    time signature (cadenzas, irregular measures) and export fine as they are."""
+    the bar line. Only used as an export fallback (the export normally carries such notes into the
+    next bar at the same time instead: ``_carry_overflow``)."""
     for b in bars:
         try:
             bl = Fraction(m21.meter.TimeSignature(b.ts).barDuration.quarterLength)
@@ -188,13 +188,55 @@ def tokens_to_score(tokens: list[str], min_staves: int = 2, grid: int | None = N
     return bars_to_score(parse_tokens(tokens), min_staves, grid, clip)
 
 
+def _bar_length(ts: str) -> Fraction:
+    try:
+        return Fraction(m21.meter.TimeSignature(ts).barDuration.quarterLength)
+    except Exception:  # noqa: BLE001
+        return Fraction(4)
+
+
+def _carry_overflow(bars: list[_Bar]) -> list[_Bar]:
+    """Keep every note inside its bar without changing when it sounds. A note's position counts from
+    its bar line and a bar lasts its time signature (as the metrics read the tokens): a note past
+    the bar's end sounds in the next bar, so it is moved there; a note held across the bar line is
+    split there and tied on (bars are added at the end if needed). Otherwise music21's MusicXML
+    writer moves the overflow itself and shifts the next bar's notes (with several voices), or the
+    bar is written longer than its time signature."""
+    out = [_Bar(b.ts, b.key, [], []) for b in bars]
+    pending = [(j, n) for j, b in enumerate(bars) for n in b.notes]
+    peds = [(j, pos, kind) for j, b in enumerate(bars) for pos, kind in b.pedal]
+    while pending:
+        j, n = pending.pop(0)
+        while j >= len(out):
+            out.append(_Bar(out[-1].ts, out[-1].key, [], []))
+        L = _bar_length(out[j].ts)
+        if n.pos >= L:
+            pending.append((j + 1, _Note(n.pos - L, n.staff, n.pitch, n.dur, n.grace, n.tie, n.arp, list(n.orns))))
+            continue
+        if not n.grace and n.pos + n.dur > L:
+            out[j].notes.append(_Note(n.pos, n.staff, n.pitch, L - n.pos, False, n.tie, n.arp, list(n.orns)))
+            pending.append((j + 1, _Note(Fraction(0), n.staff, n.pitch, n.pos + n.dur - L, False, True, False, [])))
+            continue
+        out[j].notes.append(n)
+    for j, pos, kind in peds:
+        while j < len(out) and pos >= _bar_length(out[j].ts):
+            pos, j = pos - _bar_length(out[j].ts), j + 1
+        while j >= len(out):
+            out.append(_Bar(out[-1].ts, out[-1].key, [], []))
+        out[j].pedal.append((pos, kind))
+    for b in out:  # the order the tokens give within a position: grace notes first
+        b.notes.sort(key=lambda n: (n.pos, not n.grace))
+    return out
+
+
 def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None,
                   clip: bool = False) -> m21.stream.Score:
-    """``tokens_to_score`` from parsed bars (changed in place by ``grid`` / ``clip``)."""
+    """``tokens_to_score`` from parsed bars (changed in place by ``grid`` / ``clip``). Notes past
+    their bar's end are carried into the next bar at the same time (``_carry_overflow``) unless
+    ``clip``."""
     if grid:
         bars = _regrid(bars, grid)
-    if clip:
-        bars = _clip_to_bars(bars)
+    bars = _clip_to_bars(bars) if clip else _carry_overflow(bars)
     n_staves = max([min_staves] + [n.staff + 1 for b in bars for n in b.notes])
     score = m21.stream.Score()
     parts = [m21.stream.PartStaff(id=f"P1-Staff{s + 1}") for s in range(n_staves)]
@@ -233,9 +275,12 @@ def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None
                             prev_note.tie = m21.tie.Tie("start" if prev_note.tie is None else "continue")
                     target = el if isinstance(el, m21.note.Note) else next(x for x in el.notes if x.pitch.midi == p)
                     target.tie = m21.tie.Tie("stop")
-                end = pos + dur
+                end = pos + dur  # a grace note: pos (no length); its main note then joins its voice
                 for v in voices:
-                    if grace or v[-1][1] <= pos:
+                    # a voice free at this position; also for a grace note: put into a voice still
+                    # sounding a longer note, it overlapped that note and shifted everything the
+                    # voice wrote after it in the MusicXML
+                    if v[-1][1] <= pos:
                         v.append((pos, end, el))
                         break
                 else:
@@ -323,18 +368,60 @@ def _exports(bars: list[_Bar], **kw) -> bool:
             pass
 
 
+def _fix_bars(bars: list[_Bar], fallback_grid: int) -> tuple[list[_Bar], dict]:
+    """Only the bars that cannot be exported exactly on their own, snapped to 1/``fallback_grid``
+    quarter, clipped to the bar, or both (the first that exports): every other bar stays exact.
+    Returns the bars (copies) and {bar index: "grid" | "clip" | "clip+grid" | "empty"}."""
+    out, fixed = copy.deepcopy(bars), {}
+    levels = (("grid", {"grid": fallback_grid}), ("clip", {"clip": True}),
+              ("clip+grid", {"clip": True, "grid": fallback_grid}))
+    for j, b in enumerate(bars):
+        if _exports([b]):
+            continue
+        for name, kw in levels:
+            if _exports([b], **kw):
+                one = copy.deepcopy(b)
+                if "grid" in kw:
+                    _regrid([one], fallback_grid)
+                if "clip" in kw:
+                    _clip_to_bars([one])
+                out[j], fixed[j] = one, name
+                break
+        else:
+            out[j].notes, out[j].pedal = [], []
+            fixed[j] = "empty"
+    return out, fixed
+
+
 def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, report: dict | None = None) -> str:
-    """Tokens -> MusicXML file. Exact rendering first; if mixed tuplet grids make some duration
-    inexpressible, re-render with everything snapped to 1/``fallback_grid`` quarter; if notes
-    overflowing their bars break the export (model output), clip them to the bar and retry.
-    Each attempt rebuilds the score: a failed export can leave it half-modified. Last resort: the
-    bars that cannot be exported even on their own (clipped and snapped) are emptied, so the rest
-    of the score is still written. ``report`` (a dict) gets "attempt" (0-4: which of these
-    worked) and "emptied_bars" (their indices)."""
-    attempts = [{}, {"grid": fallback_grid}, {"clip": True}, {"clip": True, "grid": fallback_grid}]
+    """Tokens -> MusicXML file, as exact as the notation allows. Exact rendering first. If that
+    fails (mixed tuplet grids making some duration inexpressible, a zero-length note, overfull
+    model output), only the bars that fail on their own are snapped to 1/``fallback_grid``
+    quarter and / or clipped to their bar (``_fix_bars``), the others staying exact. If the
+    score still fails, the whole score is snapped, clipped, or both. Each attempt rebuilds the
+    score: a failed export can leave it half-modified. Last resort: the bars that cannot be
+    exported even on their own (clipped and snapped) are emptied, so the rest of the score is
+    still written. ``report`` (a dict) gets "attempt" (0: exact; 1: per bar, "fixed_bars" saying
+    which bars and how; 2-4: the whole score snapped / clipped / both; 5: bars emptied) and
+    "emptied_bars" (their indices)."""
     report = {} if report is None else report
     report["emptied_bars"] = []
-    for k, kw in enumerate(attempts):
+    try:
+        out = write_musicxml(tokens_to_score(tokens), path)
+        report["attempt"] = 0
+        return out
+    except Exception as e:  # noqa: BLE001
+        last = e
+    fixed_bars, fixed = _fix_bars(parse_tokens(tokens), fallback_grid)
+    try:
+        out = write_musicxml(bars_to_score(fixed_bars), path)
+        report.update(attempt=1, fixed_bars={int(k): v for k, v in fixed.items()},
+                      emptied_bars=sorted(k for k, v in fixed.items() if v == "empty"))
+        return out
+    except Exception as e:  # noqa: BLE001
+        last = e
+    attempts = [{"grid": fallback_grid}, {"clip": True}, {"clip": True, "grid": fallback_grid}]
+    for k, kw in enumerate(attempts, start=2):
         try:
             out = write_musicxml(tokens_to_score(tokens, **kw), path)
             report["attempt"] = k
@@ -365,5 +452,5 @@ def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, re
         out = write_musicxml(bars_to_score(bars, **kw), path)
     except Exception:  # noqa: BLE001
         raise last
-    report.update(attempt=len(attempts), emptied_bars=sorted(bad))
+    report.update(attempt=5, emptied_bars=sorted(bad))
     return out

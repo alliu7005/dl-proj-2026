@@ -1096,7 +1096,7 @@ where it expects them.
 
 ### Third round: the whole system, end to end
 
-`pace/v2.sh` (pace/README.md, 4k) runs every part of this round in one batch:
+`pace/v2.sh` (pace/README.md, 4k) runs every part of this round, in two waves of at most 8 jobs (PACE's per-user limit; several models share one GPU job, `pace/v2_jobs.sh`):
 
 - **Meter models without the note encoder, trained longer:** up to 60,000 steps, early stopping
   after 8 evaluations without a gain. Each run is two chained 8-hour jobs: `--max-hours` stops one
@@ -1168,6 +1168,83 @@ where it expects them.
   the comparison is spelled the same way and the four real pieces they had no score for get one.
 
 Results: pending (the batch above).
+
+### Repo sweep, 2026-11-22: what was wrong, and what it touched
+
+The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced
+before fixing, plus a check that the written scores say exactly what the models wrote: tokens ->
+MusicXML -> tokens, compared note by note in sounding time). Fixed, with tests:
+
+**Data built from the scores** (`src/preprocessing`; they take effect when the data is rebuilt:
+`pace/rebuild.sh`, which keeps the data in use, the token ids (`build_dataset.py --vocab`) and the
+feature scaling, so existing models read the new data):
+- **Ties in chords.** A chord note without a tie took the chord's first tie (music21's
+  `Chord.tie`): about 11% of the tied chord notes in the targets are really struck (17 of 25
+  sampled ASAP scores; 69 in Scriabin's Sonata 5). The targets wrote them as continuations, the
+  note labels made their performed notes "delete", and the tokens tied them to an earlier note.
+- **Pickups.** A score's first, incomplete measure was written from beat 1 (a one-beat pickup in
+  4/4 at `pos_0`, then a bar line a beat later). It is now written where it falls, starting
+  mid-bar (Beethoven 10-1, Brahms 118/2, Ravel's Ondine in the test set).
+- **One piece in train and val.** Only `_no_repeat(s)` was stripped from piece names, so Liszt's
+  Paganini Etude 6 and its `_repeat` version were in train and val. Every version suffix
+  (`_repeat`, `_no_2_repeat`, `_no_first_repeat`) now maps to one composition.
+- Smaller: performances of two folders of one composition now add up in the split weighting; a
+  beat time map stays increasing through two backward beats in a row (no ASAP file has them).
+
+**Model inputs and training:**
+- **Context notes.** A note struck just before a window's cut but released before it carries
+  over was in neither the window nor its context in training (53% of val windows lost such
+  notes, ~7 of the most recent ones), while the inference pipeline gives them as context. Now
+  they are context in both. Every model with context notes was trained without them.
+- Duplicate context notes (a note seen from two windows rounded to neighbouring milliseconds):
+  27 of 3,000 training windows; matched within 1 ms now.
+- **Resume.** A run resumed after the 8-hour limit replayed its current epoch from the start, and
+  every later epoch repeated an earlier epoch's sample (the global RNG was re-seeded). An epoch's
+  batches now depend on (seed, epoch) only, and a resumed run skips the batches it trained on.
+- **Epoch length.** It was estimated from the token budget only; with context notes the note
+  budget binds, so an "epoch" was 13% (64/32 context) to 43% (128/64) shorter than one pass, and
+  the schedule, patience and cooldown with it. Both budgets count now (future runs).
+
+**v2:**
+- **Lost bars in the meter grid.** The decoder allows a step longer than a bar (a missed beat in
+  2/4 tracked at half notes: 4 quarters), but the grid rebuilt each step from the positions,
+  modulo the bar: such a step lost a bar, and every later bar number shifted. Even the oracle grid
+  lost bars in 15 of the 59 ASAP test performances. The decoder now returns its steps and the
+  grid writes every bar a step passes (oracle on the ASAP test: downbeat F 0.901 -> 0.907). All
+  meter results and grids are decoded again (`pace/v2.sh`; older ones are marked "(old decoder)").
+- **Pickup notes before the grid.** A grid starts at the bar line of the first tracked beat's
+  bar, so notes played before it sat at negative positions of bar 0, on top of its downbeat (9 of
+  59 ASAP test performances). Bars are now put in front (`src/meter.py cover_notes`), so they are
+  a partial first bar.
+- **Carried-over notes in the labeller's evaluation.** A window's notes carried over from the
+  window before have no label to learn, yet their untrained outputs were rendered and scored. They
+  are left out now, as in the whole-piece pipeline and the label ceiling; every labeller is
+  evaluated again (older results are marked "(old eval)").
+
+**Written scores** (what the demo shows and the comparison with Beyer & Dai rates):
+- **Grace notes** went into the first voice even while it held a longer note; the MusicXML then
+  shifted everything after them in that voice (12 notes in one bar of Schumann's Arabeske). They
+  go into a free voice now.
+- **Bars fuller than their time signature** (model output, and a few cadenza bars) made music21's
+  writer move the overflow into the next bar and shift its notes. A note past its bar's end is now
+  written at the start of the next bar, a note held across the bar line is tied over: the time it
+  sounds is what the tokens (and the metrics) say.
+- **Fallbacks per bar.** One bar the notation cannot express exactly (a 2048th gap rest, a
+  zero-length note) snapped the whole piece to a 1/48 grid (156 quintuplet / septuplet notes of
+  Chopin's Ballade moved). Only the bars that fail are snapped now.
+- Plus the three fixes above: spelling for the key signature, playback at the performance's tempo,
+  the speed fix.
+
+Measured on 300 ASAP test windows (ground truth): notes whose sounding time differs between the
+tokens and the written score went from 572 to 446 of 38,785, what is left being bars the notation
+cannot express exactly; on the demo's real outputs, none.
+
+**Jobs:** `pace/reevaluate.sh` no longer submits seq2seq evaluations for labeller and meter runs
+(they crashed after queueing); a job waiting on another's success is cancelled when that fails
+instead of pending forever; Beyer & Dai's prediction step deletes a piece's old score before
+predicting it again; the synthetic-noise baselines get the very noise draws the models are scored
+on (`scripts/run_baselines.py`; the stored baseline numbers used an unpaired draw of the same
+noise until it is run again); Beat This!'s weights go to scratch, not the 30 GB home.
 
 ## Demo: audio in, score out
 
@@ -1429,7 +1506,9 @@ pace/system_eval.sh              system-level comparison: ours vs Beyer & Dai on
 pace/labeller.sh                 v2 Phase 1: labels for every split, then two note labellers (true grid)
 pace/train_labeller.sbatch       one note labeller: train + evaluate (resumes from last.pt)
 pace/meter.sh                    v2 Phases 2 + 3: the meter model, then the labellers on its grids (second round)
-pace/v2.sh                       v2 third round: meter models, oracle, grid-noise labellers, every labeller on every grid, whole-piece comparison
+pace/v2.sh                       v2 third round, two waves: meter models, oracle, grid-noise labellers, every labeller on every grid, whole-piece comparison
+pace/v2_jobs.sh                  the work of pace/v2.sh's jobs (several models per GPU job)
+pace/rebuild.sh                  data/processed rebuilt with the 2026-11-22 data fixes (old data kept, same vocabulary)
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model
 tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
@@ -1441,7 +1520,8 @@ tests/test_reevaluate.py         pace/reevaluate.sh (per run / per test set), pa
 tests/test_system_eval.py        system-level comparison: inputs, our pipeline on them, aggregation, job graph
 tests/test_notelabels.py         v2: labels, ties, rendering, grid features, GridNoise, dataset, labeller training / evaluation
 tests/test_meter.py              v2: meter targets, decoding (vs a plain Viterbi), oracle, note encoder, alignment ground truth, augmentation, time limit + resume, end to end, job graph
-tests/test_v2_system.py          v2 system: onset-scale F1, rescoring, the export's last resort, the synthesizer, V2Pipeline, the demo's two systems, pace/v2.sh
+tests/test_v2_system.py          v2 system: onset-scale F1, rescoring, the export (per-bar fallbacks, overflow, spelling, playback tempo), the synthesizer, V2Pipeline, the demo's two systems, pace/v2.sh and v2_jobs.sh
+tests/test_preprocessing.py      scores -> training data: chord ties, pickups, composition ids, time maps; plan.py leaves v2 runs alone
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
 tests/test_beats.py              beats vs ASAP annotations, features, tracker errors (bar classes, octave stretches, profiles, fit, vs Beat This!), tracker folds, train / eval / demo
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes

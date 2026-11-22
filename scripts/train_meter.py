@@ -53,7 +53,7 @@ from scripts.train import lower_priority, pick_device  # noqa: E402
 from scripts.train_model import learning_rate  # noqa: E402
 from src.beats import BeatNoise, f_measure  # noqa: E402
 from src.meter import (N_BEAT_FEATURES, N_NOTE_FEATURES, Augment, DecodeConfig, MeterConfig,  # noqa: E402
-                       build_meter_model, collate, decode, grid_from_states, grid_scores, meter_loss, sample)
+                       build_meter_model, collate, grid_from_logp, grid_scores, meter_loss, sample)
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 
 FIRST_FEATURES = 27  # the first meter model's beat features (--beat-features first)
@@ -120,7 +120,7 @@ def validate(model, groups: dict, device, noise, seed: int = 0) -> dict:
                 m = tg[h] >= 0
                 ok[h] += int((lp[h].argmax(-1) == tg[h])[m].sum())
                 n[h] += int(m.sum())
-            grid = grid_from_states(bt, decode(lp["bar"], lp["step"], lp["ts"], DecodeConfig()))
+            grid = grid_from_logp(bt, lp, DecodeConfig())
             scores.append(grid_scores(grid, perf["gt"]))
             gt = perf["gt"]
             rng2 = np.random.default_rng((seed, gi, k))  # the same tracked beats again, for the tracker's own scores

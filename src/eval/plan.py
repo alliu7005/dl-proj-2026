@@ -65,7 +65,8 @@ DEFAULT_GUARD_MARGIN = 0.0
 # max_new_tokens), guarded with margin recorded, meter with the forced time signature banned
 # elsewhere in the window.
 EVAL_VERSION = 1
-MISSING, NOTHING_MISSING, TRAINING = 0, 3, 4  # exit statuses of the command line
+MISSING, NOTHING_MISSING, TRAINING, NOT_SEQ2SEQ = 0, 3, 4, 5  # exit statuses of the command line
+OTHER_ARCHS = ("labeller", "meter", "meter_oracle")  # v2 runs: scripts/eval_labeller.py / eval_meter.py
 
 
 def join_dash_values(argv, flags=("--extra-margins",)):
@@ -255,8 +256,21 @@ def plan(args):
     return training_state(run_dir), todo
 
 
+def run_arch(run_dir):
+    """The run's architecture from its config.json ("" if it has none)."""
+    p = Path(run_dir) / "config.json"
+    try:
+        return json.loads(p.read_text()).get("arch", "") if p.exists() else ""
+    except ValueError:
+        return ""
+
+
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    arch = run_arch(Path(args.runs_dir) / args.run)
+    if arch in OTHER_ARCHS:
+        print("not a seq2seq model (arch {}): evaluated by scripts/eval_labeller.py / eval_meter.py".format(arch))
+        return NOT_SEQ2SEQ
     phase, todo = plan(args)
     if phase != "done":
         print("training not finished (phase {})".format(phase))

@@ -1,166 +1,169 @@
 #!/bin/bash
 # v2, third round: the whole system, measured end to end (on the login node from the repo root,
 # after git pull; needs pace/meter.sh's data and runs, and pace/system_eval.sh run once):
-#   bash pace/v2.sh
-#   METERS="meter_v3" NEW_NLS="nl_base_gn" SYSTEMS="nl_base_gn+meter_v3" SEQ_SB="" bash pace/v2.sh   # a subset
-#   SKIP_SYSTEM=1 bash pace/v2.sh       # no whole-piece comparison with Beyer & Dai
+#   bash pace/v2.sh                 # wave 1; its last job submits wave 2 when the rest has finished
+#   bash pace/v2.sh wave2           # wave 2 by hand (if that job could not submit it)
+#   SKIP_SYSTEM=1 bash pace/v2.sh   # without the whole-piece comparison with Beyer & Dai
+#   AFTER=<job> bash pace/v2.sh     # wave 1 starts once that job has succeeded (pace/rebuild.sh)
+#
+# PACE limits how many jobs a user may have submitted at once, so several models share one GPU job
+# (pace/v2_jobs.sh does the work) and the batch comes in two waves of at most 8 jobs each.
 #
 # The second round's results (README, "Meter model, second round: results"): PERiScoPe helps, the
-# note encoder overfits (best at 4k steps) while the beat features alone still improved at 26k of
-# 30k steps, and the labeller on a meter grid keeps only ~0.3 onset F1 of its 0.85 with the true
-# grid. This round: longer meter training without the note encoder (3 seeds, one larger model);
-# the oracle grid (each meter head certain of the truth on the same tracked beats), which splits
-# what the tracked beats cost from what the meter model's errors cost; the labeller trained with
-# the tracker's timing on its grid (GridNoise); every labeller on every grid; the windows' onset
-# F1 at halved / doubled note values (onset_scaled_f1) for every run's saved predictions; and v2
-# on whole pieces next to Beyer & Dai and the seq2seq models, with their metrics.
+# note encoder overfits, the labeller on a meter grid keeps only ~0.35 onset F1 of its 0.85 with the
+# true grid. This round: longer meter training without the note encoder (3 seeds, one larger
+# model); the oracle grid (every meter head certain of the truth on the same tracked beats), which
+# splits what the tracked beats cost from what the meter model's errors cost; the labeller trained
+# with the tracker's timing on its grid (GridNoise); every labeller on every grid; the windows'
+# onset F1 at halved / doubled note values for every run's saved predictions; and v2 on whole
+# pieces next to Beyer & Dai and the seq2seq models, with their metrics.
 #
-#   job                what                                                          waits for
-#   v2tests            the test suites of this round, on PACE's Python (CPU)           -
-#   met_<m> a / b      meter model <m>: two 8-hour jobs, the second resuming the       v2tests (b: a)
-#                      first (--max-hours), then the decoder tuned on validation and
-#                      every test set (eval_meter.py --tune)
-#   metev_meter_oracle the oracle grids (no model, CPU)                                v2tests
-#   <nl>               labeller trained with GridNoise, then evaluated on the true     v2tests
-#                      grid (pace/train_labeller.sbatch)
-#   v2_<nl>@<grid>     labeller <nl> on <grid>'s grids, every test set                 that grid's job and
-#                      (NLS x the oracle, GRIDS_OLD and METERS; pairs already           <nl>'s job
-#                      evaluated are skipped)
-#   synthbeats         Beat This! on the clean test MIDI rendered to audio             v2tests
-#   sys_v2_<nl>_<m>    v2 on whole pieces (scripts/system_scores.py --v2), SYSTEMS     synthbeats, <m>, <nl>
-#   sys_<run>_sb       a seq2seq model with the same rendered-MIDI beats on clean      synthbeats
-#   sysre_<run>        a seq2seq system scored before, every score written again       v2tests
-#                      with the current export (spelling, last resort), SEQ_RERUN
-#   sysscore           every system in outputs/system_eval rated with Beyer & Dai's    all sys_ jobs (any)
-#                      metrics -> outputs/system_eval/results.md
-#   rescore            onset_scaled_f1 added to every run's saved predictions, then    all v2_ jobs (any)
-#                      outputs/compare (scripts/rescore.py, compare_runs.py)
+# wave 1                                                                          waits for
+#   v2tests           the test suites, on PACE's Python (CPU)                       -
+#   met_<a>+<b> (x2)  two meter models side by side in one GPU job, up to 7.5 h;     v2tests
+#                     a second job resumes them, then tunes the decoder and           (2nd: the 1st)
+#                     evaluates each (pace/v2_jobs.sh meters). METER_GROUPS: 2 pairs
+#   labellers         nl_base_gn and nl_base_gn_s1 (--grid-noise 0.8) side by side,  v2tests
+#                     then each evaluated on the true grid
+#   v2grids           the earlier meter models' grids decoded again (fixed decoder),  v2tests
+#                     the oracle grids, then Beat This! on the clean test MIDI
+#                     rendered to audio (CPU)
+#   v2next            submits wave 2                                                 all of wave 1 (any)
+# wave 2
+#   evals_<nl> (x3)   labeller <nl> on the true grid and every grid: oracle,          -
+#                     GRIDS_OLD, METERS (the first job also NLS_EXTRA: nl_large)
+#   sys_v2            v2 on whole pieces: SYSTEMS (finished models only)              the evals (any)
+#   sys_seq_a/b       seq2seq: the two best with the rendered-MIDI beats on clean    -
+#                     (SEQ_SB), and those scored before written again with the
+#                     current export, so spelling and missing pieces compare (SEQ_RERUN)
+#   v2final           onset_scaled_f1 for every run's saved predictions and          all of the above (any)
+#                     outputs/compare; then every system in outputs/system_eval
+#                     rated with Beyer & Dai's metrics -> outputs/system_eval/results.md
 set -euo pipefail
+WAVE=${1:-wave1}
 GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}
 G=(--gres=gpu:1 "--constraint=$GPUS")
-METERS=${METERS-"meter_v3 meter_v3_s1 meter_v3_s2 meter_v3_large"}
-NEW_NLS=${NEW_NLS-"nl_base_gn nl_base_gn_s1"}       # labellers trained here
-NLS=${NLS-"nl_base $NEW_NLS"}                        # labellers put on every grid
-GRIDS_OLD=${GRIDS_OLD-"meter_v2_nonote"}             # earlier meter models whose grids they also get
+export METERS=${METERS-"meter_v3 meter_v3_s1 meter_v3_s2 meter_v3_large"}
+export NEW_NLS=${NEW_NLS-"nl_base_gn nl_base_gn_s1"}
+export GRIDS_OLD=${GRIDS_OLD-"meter_v2_nonote"}
+NLS=${NLS-"nl_base $NEW_NLS"}
+NLS_EXTRA=${NLS_EXTRA-"nl_large"}   # evaluated again in the first labeller's job (its results predate this evaluation)
+METER_GROUPS=${METER_GROUPS-"meter_v3,meter_v3_s1 meter_v3_s2,meter_v3_large"}   # one GPU job per group
 SYSTEMS=${SYSTEMS-"nl_base+meter_v3 nl_base_gn+meter_v3 nl_base_gn_s1+meter_v3 nl_base_gn+meter_v3_large nl_base+meter_v2_nonote nl_base_gn+meter_v2_nonote"}
-SEQ_SB=${SEQ_SB-"sf_base_reg_cab sf_base_reg_cab_c128"}  # seq2seq models also given the rendered-MIDI beats
-# seq2seq systems scored before, written again with the current export (key-aware spelling, the
-# last resort for bars that cannot be engraved): otherwise their spelling and missing pieces would
-# not compare with the new systems'
+SEQ_SB=${SEQ_SB-"sf_base_reg_cab:meter sf_base_reg_cab_c128:meter"}
 SEQ_RERUN=${SEQ_RERUN-"sf_base_reg_cab:meter sf_base_reg_cab_s1:meter sf_base_reg_cab_c128:meter s2s_m_cab:meter"}
 BD=${BD:-$HOME/scratch/beyer_dai}
 BDENV="module load anaconda3; eval \"\$(conda shell.bash hook)\"; conda activate bd311; export PYTHONUNBUFFERED=1; cd \"\$SLURM_SUBMIT_DIR\""
-
-meter_flags() {  # train_meter.py options of each meter run
-  case "$1" in
-    meter_v3) echo "--steps 60000 --patience 8" ;;
-    meter_v3_s1) echo "--steps 60000 --patience 8 --seed 1" ;;
-    meter_v3_s2) echo "--steps 60000 --patience 8 --seed 2" ;;
-    meter_v3_large) echo "--steps 60000 --patience 8 --d-model 384 --layers 8" ;;
-    *) echo "unknown meter run $1 (add it to meter_flags() in pace/v2.sh)" >&2; return 1 ;;
-  esac
+JOBS="source pace/common.sh; bash pace/v2_jobs.sh"
+n=0
+ID=""
+submit() {  # name, then sbatch options and --wrap: the job id in $ID, counted in $n
+  local name=$1
+  shift
+  # a job waiting on another's success is cancelled if that fails, instead of pending forever
+  # (which would also hold back every afterany job behind it)
+  local kill=()
+  case " $* " in *" --dependency=afterok:"*) kill=(--kill-on-invalid-dep=yes) ;; esac
+  ID=$(sbatch --parsable -J "$name" -o "slurm-$name-%j.out" ${kill[@]+"${kill[@]}"} "$@")
+  n=$((n + 1))
 }
-nl_flags() {  # train_labeller.py options of each labeller trained here
-  case "$1" in
-    nl_base_gn) echo "--size base --grid-noise 0.8" ;;
-    nl_base_gn_s1) echo "--size base --grid-noise 0.8 --seed 1" ;;
-    *) echo "unknown labeller run $1 (add it to nl_flags() in pace/v2.sh)" >&2; return 1 ;;
-  esac
-}
-in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-tests=$(sbatch --parsable -J v2tests -c 8 --mem=64G -t 2:00:00 -o slurm-v2tests-%j.out --wrap="source pace/common.sh; \
+if [ "$WAVE" = wave1 ]; then
+  after=()  # AFTER=<job id>: start once that job (e.g. pace/rebuild.sh's) has succeeded
+  [ -n "${AFTER:-}" ] && after=("--dependency=afterok:$AFTER")
+  submit v2tests -c 8 --mem=64G -t 2:00:00 ${after[@]+"${after[@]}"} --wrap="source pace/common.sh; \
 python -m tests.test_meter && python -m tests.test_notelabels && python -m tests.test_pipeline && \
-python -m tests.test_v2_system && python -m tests.test_system_eval && python -m tests.test_compare_runs")
-echo "tests: job $tests"
-declare -A job
-for m in $METERS; do
-  f=$(meter_flags "$m")
-  train="source pace/common.sh; python scripts/train_meter.py --name $m $f --workers 6 --normal-priority --max-hours 7.5 \
-\$( [ -f outputs/runs/$m/last.pt ] && echo --resume ) && if grep -q '\"phase\": \"done\"' outputs/runs/$m/status.json \
-&& [ ! outputs/runs/$m/eval_meter.json -nt outputs/runs/$m/best.pt ]; then python scripts/eval_meter.py --run $m --tune; fi"
-  a=$(sbatch --parsable "${G[@]}" -J "met_$m" -c 8 --mem=64G -t 8:00:00 --dependency=afterok:$tests \
-      -o "slurm-met_$m-%j.out" --wrap="$train")
-  # the second job fails (so nothing waits on an unfinished model) unless training and evaluation are done
-  b=$(sbatch --parsable "${G[@]}" -J "met_$m" -c 8 --mem=64G -t 8:00:00 --dependency=afterany:$a \
-      -o "slurm-met_$m-%j.out" --wrap="$train; grep -q '\"phase\": \"done\"' outputs/runs/$m/status.json \
-&& [ -f outputs/runs/$m/eval_meter.json ]")
-  job[$m]=$b
-  echo "meter model $m ($f): jobs $a, then $b"
-done
-job[meter_oracle]=$(sbatch --parsable -J metev_meter_oracle -c 4 --mem=32G -t 2:00:00 --dependency=afterok:$tests \
-  -o slurm-metev_meter_oracle-%j.out --wrap="source pace/common.sh; python scripts/eval_meter.py --run meter_oracle \
---oracle --device cpu")
-echo "oracle grids: job ${job[meter_oracle]}"
-for nl in $NEW_NLS; do
-  f=$(nl_flags "$nl")
-  job[$nl]=$(NAME="$nl" ARGS="$f" sbatch --parsable "${G[@]}" --dependency=afterok:$tests --export=ALL \
-             pace/train_labeller.sbatch)
-  echo "labeller $nl ($f): job ${job[$nl]}"
-done
-evals=()
-for nl in $NLS; do
-  for m in meter_oracle $GRIDS_OLD $METERS; do
-    if ! in_list "$nl" "$NEW_NLS" && ! in_list "$m" "meter_oracle $METERS" \
-       && grep -q "\"grid_meter_$m\"" "outputs/runs/$nl/eval_pieces_best.json" 2>/dev/null; then
-      echo "  $nl on $m's grids: evaluated before (rescore adds the new metric)"
-      continue
-    fi
-    deps=()
-    [ -n "${job[$m]:-}" ] && deps+=("${job[$m]}")
-    [ -n "${job[$nl]:-}" ] && deps+=("${job[$nl]}")
-    dep=()
-    [ ${#deps[@]} -gt 0 ] && dep=("--dependency=afterok:$(IFS=:; echo "${deps[*]}")")
-    id=$(sbatch --parsable "${G[@]}" -J "v2_$nl@$m" -c 8 --mem=32G -t 4:00:00 ${dep[@]+"${dep[@]}"} \
-         -o "slurm-v2_$nl@$m-%j.out" --wrap="source pace/common.sh; python scripts/eval_labeller.py --run $nl \
---grid meter:$m --conditions clean,synthetic,real,periscope --normal-priority")
-    evals+=("$id")
-    echo "  $nl on $m's grids: job $id"
+python -m tests.test_v2_system && python -m tests.test_system_eval && python -m tests.test_compare_runs && \
+python -m tests.test_preprocessing && python -m tests.test_context_notes && python -m tests.test_training_stop"
+  tests=$ID
+  echo "tests: job $tests"
+  ids=("$tests")
+  for grp in $METER_GROUPS; do
+    runs=${grp//,/ }
+    submit "met_${grp//,/+}" "${G[@]}" -c 16 --mem=120G -t 8:00:00 --dependency=afterok:$tests \
+        --wrap="$JOBS meters $runs"
+    a=$ID
+    submit "met_${grp//,/+}" "${G[@]}" -c 16 --mem=120G -t 8:00:00 --dependency=afterany:$a \
+        --wrap="$JOBS meters $runs"
+    b=$ID
+    ids+=("$a" "$b")
+    echo "meter models $runs: jobs $a, then $b (resumes)"
   done
+  if [ -n "$NEW_NLS" ]; then
+    submit labellers "${G[@]}" -c 16 --mem=96G -t 8:00:00 --dependency=afterok:$tests \
+          --wrap="$JOBS labellers $NEW_NLS"
+    lab=$ID
+    ids+=("$lab")
+    echo "labellers $NEW_NLS: job $lab"
+  fi
+  submit v2grids -c 8 --mem=48G -t 8:00:00 --dependency=afterok:$tests --wrap="$JOBS grids"
+  grids=$ID
+  ids+=("$grids")
+  echo "oracle grids + rendered-MIDI beats: job $grids"
+  # wave 2 only after the tests passed (else this job is cancelled with the rest), and once every
+  # other job of wave 1 has ended, however it ended
+  others=("${ids[@]:1}")
+  submit v2next -c 1 --mem=2G -t 0:20:00 "--dependency=afterok:$tests,afterany:$(IFS=:; echo "${others[*]}")" \
+       --wrap="source pace/common.sh; bash pace/v2.sh wave2"
+  nx=$ID
+  echo "wave 2 is submitted by job $nx when all of these have finished ($n jobs now)"
+  echo "watch: squeue -u \$USER"
+  exit 0
+fi
+[ "$WAVE" = wave2 ] || { echo "unknown wave $WAVE (wave1, wave2)"; exit 2; }
+
+evals=()
+first=1
+for nl in $NLS; do
+  extra=""
+  [ $first = 1 ] && extra=" $NLS_EXTRA"
+  first=0
+  submit "evals_$nl" "${G[@]}" -c 8 --mem=48G -t 8:00:00 --wrap="$JOBS evals $nl$extra"
+  evals+=("$ID")
+  echo "$nl$extra on every grid: job $ID"
 done
-rdep=()
-[ ${#evals[@]} -gt 0 ] && rdep=("--dependency=afterany:$(IFS=:; echo "${evals[*]}")")
-re=$(sbatch --parsable -J rescore -c 16 --mem=64G -t 4:00:00 ${rdep[@]+"${rdep[@]}"} -o slurm-rescore-%j.out \
-     --wrap="source pace/common.sh; python scripts/rescore.py --workers 16 && python3 scripts/compare_runs.py --quiet")
-echo "new metric on every run's saved predictions, then outputs/compare: job $re"
+FINAL="source pace/common.sh; python scripts/rescore.py --workers 16; python3 scripts/compare_runs.py --quiet"
+systems_on=1
 if [ -n "${SKIP_SYSTEM:-}" ]; then
   echo "SKIP_SYSTEM: no whole-piece comparison"
+  systems_on=""
 elif [ ! -f outputs/system_eval/manifest.json ] || [ ! -s "$BD/MIDI2ScoreTF.ckpt" ]; then
   echo "no outputs/system_eval/manifest.json or $BD/MIDI2ScoreTF.ckpt: run bash pace/bd_setup.sh and bash pace/system_eval.sh first"
-else
-  sb=$(sbatch --parsable "${G[@]}" -J synthbeats -c 8 --mem=32G -t 2:00:00 --dependency=afterok:$tests \
-       -o slurm-synthbeats-%j.out --wrap="source pace/common.sh; python scripts/synth_beats.py")
-  echo "Beat This! on the rendered clean MIDI: job $sb"
-  sys=()
-  for spec in $SYSTEMS; do
-    nl=${spec%%+*}; m=${spec##*+}
-    deps=("$sb")
-    [ -n "${job[$m]:-}" ] && deps+=("${job[$m]}")
-    [ -n "${job[$nl]:-}" ] && deps+=("${job[$nl]}")
-    id=$(sbatch --parsable "${G[@]}" -J "sys_v2_${nl}_$m" -c 8 --mem=48G -t 3:00:00 \
-         "--dependency=afterok:$(IFS=:; echo "${deps[*]}")" -o "slurm-sys_v2_${nl}_$m-%j.out" \
-         --wrap="source pace/common.sh; python scripts/system_scores.py --v2 $spec")
-    sys+=("$id")
-    echo "  v2 $nl + $m on whole pieces: job $id"
-  done
-  for r in $SEQ_SB; do
-    id=$(sbatch --parsable "${G[@]}" -J "sys_${r}_sb" -c 8 --mem=48G -t 3:00:00 --dependency=afterok:$sb \
-         -o "slurm-sys_${r}_sb-%j.out" --wrap="source pace/common.sh; python scripts/system_scores.py --run $r \
---midi-beats synth")
-    sys+=("$id")
-    echo "  $r with the rendered-MIDI beats on whole pieces: job $id"
-  done
-  for spec in $SEQ_RERUN; do
-    r=${spec%%:*}; mode=${spec##*:}
-    [ -f "outputs/system_eval/${r}_$mode/summary.json" ] || continue
-    id=$(sbatch --parsable "${G[@]}" -J "sysre_$r" -c 8 --mem=48G -t 3:00:00 --dependency=afterok:$tests \
-         -o "slurm-sysre_$r-%j.out" --wrap="source pace/common.sh; python scripts/system_scores.py --run $r --mode $mode")
-    sys+=("$id")
-    echo "  ${r}_$mode: every score written again with the current export: job $id"
-  done
-  sc=$(sbatch --parsable -J sysscore -c 16 --mem=64G -t 6:00:00 "--dependency=afterany:$(IFS=:; echo "${sys[*]}")" \
-       -o slurm-sysscore-%j.out --wrap="$BDENV; python scripts/beyer_dai.py score --repo $BD/MIDI2ScoreTransformer \
---systems all --jobs 16")
-  echo "every system rated with Beyer & Dai's metrics: job $sc (outputs/system_eval/results.md)"
+  systems_on=""
 fi
-echo "watch: squeue -u \$USER     then: python3 scripts/compare_runs.py   (outputs/compare/summary.md)"
+if [ -z "$systems_on" ]; then
+  fdep=()
+  [ ${#evals[@]} -gt 0 ] && fdep=("--dependency=afterany:$(IFS=:; echo "${evals[*]}")")
+  submit v2final -c 16 --mem=64G -t 4:00:00 ${fdep[@]+"${fdep[@]}"} --wrap="$FINAL"
+  echo "new metric on every run's saved predictions, then outputs/compare: job $ID (wave 2: $n jobs)"
+  exit 0
+fi
+seq=()
+for s in $SEQ_SB; do seq+=("$s:sb"); done
+for s in $SEQ_RERUN; do  # only systems scored before
+  [ -f "outputs/system_eval/${s%%:*}_${s##*:}/summary.json" ] && seq+=("$s")
+done
+half=$(( (${#seq[@]} + 1) / 2 ))
+sys=()
+if [ -n "$SYSTEMS" ]; then
+  vdep=()
+  [ ${#evals[@]} -gt 0 ] && vdep=("--dependency=afterany:$(IFS=:; echo "${evals[*]}")")
+  # shellcheck disable=SC2086
+  submit sys_v2 "${G[@]}" -c 8 --mem=48G -t 8:00:00 ${vdep[@]+"${vdep[@]}"} --wrap="$JOBS systems $SYSTEMS"
+  id=$ID
+  sys+=("$id")
+  echo "v2 on whole pieces ($SYSTEMS): job $id"
+fi
+for part in a b; do
+  if [ $part = a ]; then specs=("${seq[@]:0:$half}"); else specs=("${seq[@]:$half}"); fi
+  [ ${#specs[@]} -gt 0 ] || continue
+  submit "sys_seq_$part" "${G[@]}" -c 8 --mem=48G -t 8:00:00 --wrap="$JOBS systems ${specs[*]}"
+  id=$ID
+  sys+=("$id")
+  echo "seq2seq on whole pieces (${specs[*]}): job $id"
+done
+all=(${evals[@]+"${evals[@]}"} ${sys[@]+"${sys[@]}"})
+submit v2final -c 16 --mem=64G -t 8:00:00 "--dependency=afterany:$(IFS=:; echo "${all[*]}")" \
+     --wrap="$FINAL; $BDENV; python scripts/beyer_dai.py score --repo $BD/MIDI2ScoreTransformer --systems all --jobs 16"
+echo "new metric + outputs/compare, then every system rated with Beyer & Dai's metrics: job $ID"
+echo "wave 2: $n jobs. then: python3 scripts/compare_runs.py (outputs/compare/summary.md), outputs/system_eval/results.md"

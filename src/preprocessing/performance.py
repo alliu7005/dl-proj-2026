@@ -78,7 +78,8 @@ class TimeMap:
         dst = np.asarray(dst_beats, dtype=np.float64)
         if len(src) != len(dst) or len(src) < 2:
             raise ValueError(f"beat grids must align and have >=2 beats ({len(src)} vs {len(dst)})")
-        keep = np.concatenate([[True], np.diff(src) > 0])  # drop duplicate/backwards beats
+        # drop duplicate / backwards beats: each kept beat later than every beat kept before it
+        keep = np.concatenate([[True], src[1:] > np.maximum.accumulate(src)[:-1]])
         self.src, self.dst = src[keep], dst[keep]
         self._lo = (self.dst[1] - self.dst[0]) / (self.src[1] - self.src[0])
         self._hi = (self.dst[-1] - self.dst[-2]) / (self.src[-1] - self.src[-2])

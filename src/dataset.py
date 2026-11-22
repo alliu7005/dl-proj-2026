@@ -403,6 +403,10 @@ class ScoreSegmentDataset(Dataset):
             a = np.concatenate(notes)
             keys = self._keys(a[:, 0], a[:, 1])
             keys, first = np.unique(keys, return_index=True)
+            # one note seen from two windows can round to neighbouring milliseconds (perf_t0 is
+            # stored as float32): keys 1 ms apart are the same note
+            same = np.concatenate([[False], np.diff(keys) <= 1])
+            keys, first = keys[~same], first[~same]
             a = a[first]
             order = np.argsort(a[:, 1], kind="stable")
             ped = np.concatenate(peds) if peds else np.zeros((0, 2))
@@ -419,7 +423,7 @@ class ScoreSegmentDataset(Dataset):
         t0 = float(m["perf_t0"])
         pool, keys, ped = self._pool(m["performance"])
         own = self._keys(window[:, 0], window[:, 1].astype(np.float64) + t0)
-        free = ~np.isin(keys, own)
+        free = ~(np.isin(keys, own) | np.isin(keys, own + 1) | np.isin(keys, own - 1))  # 1 ms: float32 times
         before = pool[free & (pool[:, 1] < t0)]
         before = before[-self.context_before:] if self.context_before else before[:0]  # ([-0:] = all)
         after = pool[free & (pool[:, 1] >= t0)][:self.context_after]
@@ -541,6 +545,13 @@ class ScoreSegmentDataset(Dataset):
                 prompt = self._ctx(prompt, crng)
         min_end = self.store.meta[i].get("carry_min_sec")
         keep = released_mask(notes, None if min_end is None else min_end * tempo)
+        if self.with_context and not keep.all():
+            # a note struck before the cut but released before it carries over is a note just before
+            # the window: it is context, as the inference pipeline (src/pipeline.py
+            # performance_windows) gives it, not dropped from the input altogether
+            before = np.concatenate([before, notes[~keep]])
+            before = before[np.argsort(before[:, 1], kind="stable")][-self.context_before:] \
+                if self.context_before else before[:0]
         notes = notes[keep]
         if lab is not None:
             lab = lab[keep]

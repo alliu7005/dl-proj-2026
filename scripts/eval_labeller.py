@@ -43,6 +43,9 @@ from src.notelabels import LABEL_FILE, score_notes, window_frame  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 
 SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed", "periscope": "test_periscope"}
+# 2: a window's notes carried over from the window before are no longer rendered (no label to learn:
+# their untrained outputs were scored), and context notes match the inference pipeline's
+LABELLER_EVAL = 2
 METER_GRIDS = {"clean": "clean", "synthetic": "clean", "real": "real", "periscope": "periscope"}  # -> eval_meter.py's grids
 
 
@@ -168,11 +171,13 @@ def main(argv=None):
                 for k, v in head_counts({k: v.float().cpu() for k, v in o.items()}, b["labels"]).items():
                     counts[k] = counts.get(k, 0) + v
         res = stamp(acc.result(), None, args.limit_perfs)
+        res["labeller_eval"] = LABELLER_EVAL
         res.update({f"head_{h}_acc": counts[f"{h}_ok"] / max(counts[f"{h}_n"], 1)
                     for h in ("keep", "delta", "pos", "sub", "dur", "staff")})
         new = {cond: {mode: res}}
         if cond == "real":
-            new["real_unseen_audio"] = {mode: stamp(acc_unseen.result(), None, args.limit_perfs)}
+            new["real_unseen_audio"] = {mode: dict(stamp(acc_unseen.result(), None, args.limit_perfs),
+                                                   labeller_eval=LABELLER_EVAL)}
         merge_results(out_file, new)
         merge_predictions(run / f"pred_pieces_{Path(args.ckpt).stem}_{cond}.jsonl", mode,
                           [{"performance": ds.store.meta[i]["performance"], "win": ds.store.meta[i]["win"],

@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 from src.dataset import (N_FEATURES, N_FEATURES_CONTEXT, ROLE_AFTER, ROLE_BEFORE, ROLE_CARRIED, ROLE_WINDOW,
-                         AugmentConfig, ScoreSegmentDataset, assemble_notes, collate)
+                         AugmentConfig, ScoreSegmentDataset, assemble_notes, collate, released_mask)
 from src.preprocessing.noise import NoiseModel
 from src.scoreformer import PRESETS, build_model
 
@@ -76,7 +76,10 @@ def test_window_notes_unchanged_and_context_exact():
         key = lambda a: set(zip(a[:, 0].astype(int), np.round(a[:, 1] * 1000).astype(np.int64)))
         # time order, chords (same onset) by pitch: the order the Dataset's pool uses, so the N-note
         # cut through a chord keeps the same notes
-        uniq = np.array(sorted(key(allnotes), key=lambda t: (t[1], t[0])))
+        # (one note seen from two windows can round to neighbouring milliseconds: the same note)
+        ks = sorted(key(allnotes))
+        ks = [k for j, k in enumerate(ks) if not (j and k[0] == ks[j - 1][0] and k[1] - ks[j - 1][1] <= 1)]
+        uniq = np.array(sorted(ks, key=lambda t: (t[1], t[0])))
         for pos, i in enumerate(idx):
             a, b = plain[i], ctx[i]
             r = b["roles"].numpy()
@@ -87,7 +90,11 @@ def test_window_notes_unchanged_and_context_exact():
             for c in (0, 1, 3, 4):  # pitch, onset, log duration, velocity (ioi depends on neighbours)
                 assert np.allclose(own[:, c], xa[:, c], atol=1e-4), (perf, i, c)
             t0 = st.meta[i]["perf_t0"]
-            mine = key(abs_notes[pos])
+            # the window's own notes: a carried-over candidate released before carry_min_sec is not
+            # one of them but a note just before the window, i.e. context (as the pipeline has it)
+            kept = released_mask(st.get(i)[0], st.meta[i].get("carry_min_sec"))
+            mine = key(abs_notes[pos][kept])
+            mine |= {(p, k + d) for p, k in mine for d in (-1, 1)}
             rest = [(p, k) for p, k in uniq.tolist() if (p, k) not in mine]
             want_before = [t for t in rest if t[1] < round(t0 * 1000)][-NB:]
             want_after = [t for t in rest if t[1] >= round(t0 * 1000)][:NA]
