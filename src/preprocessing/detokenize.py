@@ -8,6 +8,9 @@ not rendered into the MusicXML yet; evaluate pedal precision/recall on tokens di
 """
 from __future__ import annotations
 
+import copy
+import os
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -144,7 +147,12 @@ def tokens_to_score(tokens: list[str], min_staves: int = 2, grid: int | None = N
                     clip: bool = False) -> m21.stream.Score:
     """``grid``: optionally snap positions/durations to 1/grid quarter (fallback for export).
     ``clip``: keep notes inside their bars (fallback for malformed model output, see _clip_to_bars)."""
-    bars = parse_tokens(tokens)
+    return bars_to_score(parse_tokens(tokens), min_staves, grid, clip)
+
+
+def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None,
+                  clip: bool = False) -> m21.stream.Score:
+    """``tokens_to_score`` from parsed bars (changed in place by ``grid`` / ``clip``)."""
     if grid:
         bars = _regrid(bars, grid)
     if clip:
@@ -160,8 +168,10 @@ def tokens_to_score(tokens: list[str], min_staves: int = 2, grid: int | None = N
         content_end = max([n.pos + n.dur for n in bar.notes] + [bar_len])
         for s, part in enumerate(parts):
             meas = m21.stream.Measure(number=bi + 1)
-            if bar.ts != prev_ts:
-                meas.timeSignature = m21.meter.TimeSignature(bar.ts)
+            # every measure carries its time signature while it is built: without one, music21's rest
+            # filling (makeRests -> barDuration) guesses one from the measure's contents, which takes
+            # seconds per measure for dense or tuplet-grid content; a repeated one is removed below
+            meas.timeSignature = m21.meter.TimeSignature(bar.ts)
             if bar.key != prev_key:
                 meas.keySignature = m21.key.KeySignature(bar.key)
             if bi == 0:
@@ -217,6 +227,8 @@ def tokens_to_score(tokens: list[str], min_staves: int = 2, grid: int | None = N
                         if prev is not None:
                             prev.quarterLength = prev.quarterLength + r.quarterLength
                         v.remove(r)
+            if bar.ts == prev_ts:  # written only where it changes
+                meas.timeSignature = None
             part.append(meas)
         prev_ts, prev_key = bar.ts, bar.key
     for p in parts:
@@ -257,15 +269,63 @@ def write_musicxml(score: m21.stream.Score, path: str) -> str:
         return score.write("musicxml", fp=str(path))
 
 
-def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48) -> str:
+def _exports(bars: list[_Bar], **kw) -> bool:
+    """Whether these bars alone make a MusicXML file (written to a temporary file, then removed)."""
+    fd, tmp = tempfile.mkstemp(suffix=".musicxml")
+    os.close(fd)
+    try:
+        write_musicxml(bars_to_score(copy.deepcopy(bars), **kw), tmp)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, report: dict | None = None) -> str:
     """Tokens -> MusicXML file. Exact rendering first; if mixed tuplet grids make some duration
     inexpressible, re-render with everything snapped to 1/``fallback_grid`` quarter; if notes
     overflowing their bars break the export (model output), clip them to the bar and retry.
-    Each attempt rebuilds the score: a failed export can leave it half-modified."""
+    Each attempt rebuilds the score: a failed export can leave it half-modified. Last resort: the
+    bars that cannot be exported even on their own (clipped and snapped) are emptied, so the rest
+    of the score is still written. ``report`` (a dict) gets "attempt" (0-4: which of these
+    worked) and "emptied_bars" (their indices)."""
     attempts = [{}, {"grid": fallback_grid}, {"clip": True}, {"clip": True, "grid": fallback_grid}]
+    report = {} if report is None else report
+    report["emptied_bars"] = []
     for k, kw in enumerate(attempts):
         try:
-            return write_musicxml(tokens_to_score(tokens, **kw), path)
-        except Exception:  # noqa: BLE001
-            if k == len(attempts) - 1:
-                raise
+            out = write_musicxml(tokens_to_score(tokens, **kw), path)
+            report["attempt"] = k
+            return out
+        except Exception as e:  # noqa: BLE001
+            last = e
+    kw = attempts[-1]
+    bars = parse_tokens(tokens)
+    bad = [j for j, b in enumerate(bars) if not _exports([b], **kw)]  # broken on their own
+    for j in bad:
+        bars[j].notes, bars[j].pedal = [], []
+    for _ in range(64):  # broken only in context (e.g. a tie from the bar before): the first such bar
+        if _exports(bars, **kw):
+            break
+        lo, hi = 1, len(bars)  # the shortest failing prefix
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if _exports(bars[:mid], **kw):
+                lo = mid + 1
+            else:
+                hi = mid
+        j = lo - 1
+        if not bars[j].notes and not bars[j].pedal:
+            break
+        bars[j].notes, bars[j].pedal = [], []
+        bad.append(j)
+    try:
+        out = write_musicxml(bars_to_score(bars, **kw), path)
+    except Exception:  # noqa: BLE001
+        raise last
+    report.update(attempt=len(attempts), emptied_bars=sorted(bad))
+    return out

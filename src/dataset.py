@@ -348,6 +348,10 @@ class ScoreSegmentDataset(Dataset):
         # evaluation with an estimated grid: {window index: (grid_t, grid_q, src.notelabels.Window)}
         # replaces the stored true grid and the target's bars (scripts/eval_labeller.py --grid meter:...)
         self.grid_override: dict | None = None
+        # the beat tracker's timing on the true grid (src/notelabels.py GridNoise; labeller training
+        # and its validation): set by scripts/train_labeller.py --grid-noise, drawn from its own
+        # stream (seed, epoch, index, 13), so every other random draw is unchanged
+        self.grid_noise = None
         self.metrical = bool(metrical)
         self._mfile = None
         self._mcache: dict = {}
@@ -570,6 +574,8 @@ class ScoreSegmentDataset(Dataset):
                 g0, g1 = self._nl["grid_index"][i]
                 win = score_notes(self.vocab.decode(tokens.tolist()))[1]
                 g_t, g_q = self._nl["grid_t"][g0:g1] * tempo, self._nl["grid_q"][g0:g1]
+                if self.grid_noise is not None:
+                    g_t, g_q = self.grid_noise(g_t, g_q, np.random.default_rng((self.seed, self.epoch, i, 13)))
             gf, bar_est, pos_est = grid_features(notes[:, 1], g_t, g_q, win)
             feats = np.concatenate([feats, gf], axis=1)
             tg, fl = targets(nl, bar_est, self.label_space)

@@ -3,8 +3,9 @@
     python -m tests.test_system_eval        # or: pytest tests/test_system_eval.py
 
 Covers the inputs (scripts/system_inputs.py: real transcriptions shifted onto the ASAP timeline and
-cut to their piece; the manifest on the local data build), our system on them (scripts/system_scores.py
-with a tiny model, the tracked beats given to a beat model), the aggregation and tables of
+cut to their piece; the manifest on the local data build), our systems on them (scripts/system_scores.py
+with a tiny model, the tracked beats given to a beat model; v2 with tiny models, the rendered-MIDI
+beats on clean; a failed score's tokens and error kept), the aggregation and tables of
 scripts/beyer_dai.py (their metrics themselves need their environment: pace/bd_setup.sh checks
 those on PACE), and the job graph of pace/system_eval.sh (stand-in sbatch).
 """
@@ -103,6 +104,72 @@ def test_system_scores_end_to_end():
                 assert pieces["clean"]["beats"] == "none (MIDI input)", pieces["clean"]
             else:
                 assert pieces["real"]["beats"] == "not used by this model"
+
+
+def test_system_scores_v2_and_failures():
+    """--v2: V2Pipeline on every input, the tracked beats on real, the rendered-MIDI beats
+    (beats_synth.npz) on clean; --midi-beats synth gives a seq2seq beat model those too (system
+    <run>_<mode>_sb). A piece whose score cannot be written keeps its tokens and its error."""
+    from tests.test_v2_system import make_v2
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        make_performance(tmp / "perf.mid", n=80)
+        perf = "X/Y/perf.mid"
+        manifest = [{"condition": c, "performance": perf, "slug": "X_Y_perf", "midi": str(tmp / "perf.mid"),
+                     "reference": "ref.musicxml"} for c in ("clean", "real")]
+        (tmp / "manifest.json").write_text(json.dumps(manifest))
+        (tmp / "tracked").mkdir()
+        save_beats(beats_path(tmp / "tracked", "tracked"), {perf: (0.5 + 0.5 * np.arange(40), np.arange(40) % 4 == 0)})
+        save_beats(tmp / "synth.npz", {perf: (0.4 + 0.5 * np.arange(41), np.arange(41) % 3 == 0)})
+        make_v2(tmp / "runs")
+        common = ["--runs-dir", str(tmp / "runs"), "--vocab", str(ROOT / "data" / "processed" / "vocab.json"),
+                  "--manifest", str(tmp / "manifest.json"), "--out", str(tmp / "out"), "--device", "cpu",
+                  "--tracked", str(tmp / "tracked"), "--synth-beats", str(tmp / "synth.npz")]
+        system_scores.main(["--v2", "nl+m"] + common)
+        summary = json.loads((tmp / "out" / "v2_nl_m" / "summary.json").read_text())
+        pieces = {p["condition"]: p for p in summary["pieces"]}
+        assert summary["v2"] == "nl+m" and summary["midi_beats"] == "synth" and summary["mode"] is None
+        assert pieces["real"]["beats"] == "given: 40 beats, 10 downbeats", pieces["real"]
+        assert pieces["clean"]["beats"] == "given: 41 beats, 14 downbeats", pieces["clean"]
+        for p in pieces.values():
+            assert p["musicxml"] is None or Path(p["musicxml"]).exists(), p
+            assert p["bars"] > 0 and p["notes_kept"] >= 0 and p["emptied_bars"] >= 0, p
+        (tmp / "runs" / "beat").mkdir()
+        make_checkpoint(tmp / "runs" / "beat", n_features=15, beat_features=True)
+        system_scores.main(["--run", "beat", "--mode", "none", "--midi-beats", "synth"] + common)
+        sb = json.loads((tmp / "out" / "beat_none_sb" / "summary.json").read_text())
+        assert {p["condition"]: p["beats"] for p in sb["pieces"]}["clean"] == "given: 41 beats, 14 downbeats"
+        # a score that cannot be written: its tokens and error are kept, a stale score removed
+        from src.pipeline import Result, V2Pipeline
+        real_run = V2Pipeline.run
+        V2Pipeline.run = lambda self, *a, **k: Result(["bar", "ts_4/4"], {}, {"export": {"emptied_bars": []}},
+                                                      ["MusicXML: KeyError: 3"])
+        try:
+            system_scores.main(["--v2", "nl+m", "--conditions", "real"] + common)
+        finally:
+            V2Pipeline.run = real_run
+        d = tmp / "out" / "v2_nl_m" / "real"
+        assert not (d / "X_Y_perf.musicxml").exists()
+        assert (d / "X_Y_perf.tokens.txt").read_text() == "bar ts_4/4"
+        assert (d / "X_Y_perf.error.txt").read_text() == "MusicXML: KeyError: 3"
+        # --only-missing: only that piece again; the summary keeps the clean one
+        system_scores.main(["--v2", "nl+m", "--only-missing"] + common)
+        summary = json.loads((tmp / "out" / "v2_nl_m" / "summary.json").read_text())
+        got = {p["condition"]: p for p in summary["pieces"]}
+        assert set(got) == {"clean", "real"} and got["real"]["musicxml"] and (d / "X_Y_perf.musicxml").exists(), got
+        assert not (d / "X_Y_perf.error.txt").exists() and not (d / "X_Y_perf.tokens.txt").exists()
+        assert got["clean"] == pieces["clean"]  # not run again
+        assert beyer_dai.all_systems(tmp / "out") == ["beat_none_sb", "v2_nl_m"]
+        (tmp / "out" / "beyer_dai").mkdir()
+        (tmp / "out" / "beyer_dai" / "summary.json").write_text("{}")
+        (tmp / "out" / "junk").mkdir()  # no summary.json: not a system
+        assert beyer_dai.all_systems(tmp / "out") == ["beyer_dai", "beat_none_sb", "v2_nl_m"]
+        try:
+            system_scores.main(["--v2", "nl"] + common)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("--v2 without +<meter run> should be refused")
 
 
 def rated_stub():

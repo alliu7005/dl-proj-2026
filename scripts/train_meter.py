@@ -25,7 +25,13 @@ PERiScoPe val performances): the heads' accuracies and the DECODED grids scored 
 ground truth (src/meter.py grid_scores: beat F, downbeat F, time-signature accuracy) next to the
 raw tracker's beat / downbeat F on the same beats. best.pt keeps the best mean over the sources of
 (downbeat F + time-signature accuracy) / 2: the bar lines and meters the note labeller is given.
-Early stopping, resume and atomic checkpoints as in the other training scripts.
+Early stopping, resume and atomic checkpoints as in the other training scripts; --max-hours stops
+cleanly (last.pt) before a job's time limit, and --resume goes on from there.
+
+Inputs: per-beat features (src/meter.py beat_features). --note-encoder adds an embedding of every
+note pooled into its beat; off by default since the second round: with PERiScoPe it overfits
+(best validation at 4k steps, then early stopping) where the beat features alone kept improving
+to 26k and won on every test set (README, "Meter model, second round: results").
 """
 from __future__ import annotations
 
@@ -139,7 +145,7 @@ def main(argv=None):
     ap.add_argument("--d-model", type=int, default=256)
     ap.add_argument("--layers", type=int, default=6)
     ap.add_argument("--dropout", type=float, default=0.1)
-    ap.add_argument("--note-encoder", action=argparse.BooleanOptionalAction, default=True,
+    ap.add_argument("--note-encoder", action=argparse.BooleanOptionalAction, default=False,
                     help="pool a learned embedding of every note into its beat (--no-note-encoder: beat features only)")
     ap.add_argument("--d-note", type=int, default=64)
     ap.add_argument("--beat-features", choices=("all", "first"), default="all",
@@ -164,6 +170,8 @@ def main(argv=None):
     ap.add_argument("--patience", type=int, default=5, help="evaluations without a better selection score (0 = off)")
     ap.add_argument("--workers", type=int, default=6, help="processes making training samples (0 = in the main one)")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--max-hours", type=float, default=0.0,
+                    help="stop cleanly (last.pt saved, not done) after this long; --resume continues (0 = off)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--normal-priority", action="store_true")
@@ -238,6 +246,7 @@ def main(argv=None):
                                          persistent_workers=bool(args.workers))
     batches = iter(loader)
     log_path, t0, run_loss = run / "log.csv", time.time(), 0.0
+    deadline = t0 + args.max_hours * 3600 if args.max_hours > 0 else float("inf")
     model.train()
     try:
         while not done:
@@ -273,6 +282,11 @@ def main(argv=None):
                 if step >= args.steps or (args.patience and (step - best_step) >= args.patience * args.eval_every):
                     done = True
                 save(run / "last.pt")
+            if not done and time.time() > deadline:
+                save(run / "last.pt")
+                print(f"time limit ({args.max_hours:g} h) at step {step}: python scripts/train_meter.py --name "
+                      f"{args.name} --resume goes on", flush=True)
+                return
     except KeyboardInterrupt:
         save(run / "last.pt")
         sys.exit(130)

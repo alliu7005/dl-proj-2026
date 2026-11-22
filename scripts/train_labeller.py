@@ -16,6 +16,12 @@ windows of val (and val_transcribed), and the windows rendered back to tokens an
 src/eval/metrics.py on --eval-decode-windows of them (onset F1 etc., the numbers every system is
 compared on). The best mean validation loss keeps best.pt; early stopping, cooldown, resume,
 atomic checkpoints and status.json work as in scripts/train_model.py.
+
+--grid-noise P: the true grid of P of the training windows gets the beat tracker's timing errors
+(src/notelabels.py GridNoise, the fitted Beat This! errors of --beat-noise): the grid the real
+system gives the labeller is anchored on tracked beats, ~20 ms off and with missed / spurious
+ones, not on the beats as played. Validation then gets the same noise on the same windows every
+time (a fixed draw), so the selection measures the labeller as it will be used.
 """
 from __future__ import annotations
 
@@ -36,7 +42,7 @@ from scripts.train_model import learning_rate  # noqa: E402
 from src.dataset import AugmentConfig, MixedTrainDataset, ScoreSegmentDataset  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.labeller import PRESETS, build_labeller, head_counts, labeller_loss, predict_windows  # noqa: E402
-from src.notelabels import score_notes  # noqa: E402
+from src.notelabels import GridNoise, score_notes  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 
 D = Path("data/processed")
@@ -50,13 +56,15 @@ def has_split(d: Path, name: str) -> bool:
 class Validator:
     """Fixed validation windows: losses / head accuracies, and rendered-token metrics."""
 
-    def __init__(self, data: Path, vocab_path: str, ctx: dict, n_loss: int, n_decode: int, coll, seed: int = 0):
+    def __init__(self, data: Path, vocab_path: str, ctx: dict, n_loss: int, n_decode: int, coll, seed: int = 0,
+                 grid_noise: GridNoise | None = None):
         self.sets, self.coll = {}, coll
         rng = np.random.default_rng(seed)
         for name, split in (("val", "val"), ("val_real", "val_transcribed")):
             if not has_split(data, split):
                 continue
             ds = ScoreSegmentDataset(str(data / split), vocab_path, notelabels=True, **ctx)
+            ds.grid_noise = grid_noise  # epoch 0 always: the same draw at every validation
             idx = np.arange(len(ds))
             loss_idx = np.sort(rng.choice(idx, min(n_loss, len(idx)), replace=False))
             dec_idx = np.sort(rng.choice(idx, min(n_decode, len(idx)), replace=False))
@@ -116,6 +124,9 @@ def main(argv=None):
     ap.add_argument("--context-before", type=int, default=64)
     ap.add_argument("--context-after", type=int, default=32)
     ap.add_argument("--noise", default="configs/noise_stats.json")
+    ap.add_argument("--grid-noise", type=float, default=0.0,
+                    help="share of training windows whose true grid gets the beat tracker's timing (GridNoise)")
+    ap.add_argument("--beat-noise", default="configs/beat_noise.json", help="the tracker errors --grid-noise draws")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--eval-every", type=int, default=1000)
     ap.add_argument("--eval-loss-windows", type=int, default=400)
@@ -150,6 +161,7 @@ def main(argv=None):
         c, d = store_lengths(train.real.store, args.max_notes, 10 ** 9)
         note_len = np.concatenate([b_, d])
         space = train.synthetic.label_space
+        parts = [train.synthetic, train.real]
     else:
         print(f"note: no {data / 'train_transcribed'}, training on `train` only", flush=True)
         train = ScoreSegmentDataset(str(data / "train"), vocab_path, noise=nm, augment=AugmentConfig(),
@@ -157,6 +169,10 @@ def main(argv=None):
         sampler = train.sampler()
         _, note_len = store_lengths(train.store, args.max_notes, 10 ** 9)
         space = train.label_space
+        parts = [train]
+    gnoise = GridNoise.from_json(args.beat_noise, args.grid_noise) if args.grid_noise > 0 else None
+    for part in parts:
+        part.grid_noise = gnoise
     note_len = np.minimum(note_len + args.context_before + args.context_after, args.max_notes)
     coll = TruncatingCollate(args.max_notes, 10 ** 9)
     batches = TokenBudgetBatches(sampler, note_len, note_len, args.batch_notes, args.batch_notes, seed=args.seed)
@@ -205,11 +221,13 @@ def main(argv=None):
     json.dump({"args": vars(args), "arch": "labeller", "model": cfg, "params": n_params,
                "steps_per_epoch": steps_per_epoch, "total_steps": total_steps,
                "data": {"train_windows": len(train), "train_transcribed": has_split(data, "train_transcribed"),
-                        "grid": "true (score beats timed through the note alignment)"}},
+                        "grid": "true (score beats timed through the note alignment)",
+                        "grid_noise": args.grid_noise, "beat_noise": args.beat_noise if gnoise else None}},
               open(run / "config.json", "w"), indent=1)
     print(f"labeller: {n_params / 1e6:.1f}M parameters on {device} | {len(train)} training windows, "
           f"{steps_per_epoch} steps/epoch, {total_steps} steps total", flush=True)
-    validator = Validator(data, vocab_path, ctx, args.eval_loss_windows, args.eval_decode_windows, coll, args.seed)
+    validator = Validator(data, vocab_path, ctx, args.eval_loss_windows, args.eval_decode_windows, coll, args.seed,
+                          grid_noise=GridNoise.from_json(args.beat_noise, 1.0) if gnoise else None)
 
     def write_status():
         tmp = run / "status.json.tmp"

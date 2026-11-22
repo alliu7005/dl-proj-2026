@@ -301,6 +301,51 @@ per-piece numbers, the time-signature confusions (`meter_scores_<condition>.json
 models (v2)") and puts each labeller's true-grid
 and meter-grid results side by side ("Note labeller (v2)").
 
+## 4k. v2, third round: the whole system end to end
+
+After 4j (its data and runs) and 4h (`pace/bd_setup.sh`, `pace/system_eval.sh` once: the manifest and
+Beyer & Dai's predictions):
+
+```bash
+bash pace/v2.sh                       # tests -> meter models, oracle, labellers -> labeller on every grid,
+                                      # rescoring; Beat This! on the rendered MIDI -> v2 on whole pieces -> scoring
+SKIP_SYSTEM=1 bash pace/v2.sh         # without the whole-piece comparison
+METERS="meter_v3" NEW_NLS="nl_base_gn" SYSTEMS="nl_base_gn+meter_v3" SEQ_SB="" bash pace/v2.sh   # a subset
+```
+
+| job | what | waits for |
+|---|---|---|
+| `v2tests` | the test suites, on PACE's Python (CPU) | - |
+| `met_<m>` (x2) | `meter_v3`, `_s1`, `_s2` (seeds), `_large` (d 384, 8 layers): no note encoder, up to 60k steps; two 8-hour jobs, the second resuming the first (`--max-hours 7.5`), then `eval_meter.py --tune`. The second fails unless the model is trained and evaluated, so nothing runs on an unfinished one | `v2tests` |
+| `metev_meter_oracle` | the oracle grids: every meter head certain of the truth on the same tracked beats (CPU) | `v2tests` |
+| `nl_base_gn`, `nl_base_gn_s1` | the labeller trained with the tracker's timing on its grid (`--grid-noise 0.8`), then evaluated on the true grid | `v2tests` |
+| `v2_<nl>@<grid>` | each labeller (`nl_base` and the two new ones) on each grid (the oracle, `meter_v2_nonote`, the new meter models), every test set; pairs evaluated before are skipped | that grid's job and that labeller's |
+| `rescore` | the new onset-scale F1 for every run's saved predictions, then `outputs/compare` | every `v2_*` job (finished or not) |
+| `synthbeats` | Beat This! on the clean test MIDI rendered to audio, each piece with the fold model that never heard it -> `outputs/system_eval/beats_synth.npz` (+ `.json`: its beat F next to the real audio's) | `v2tests` |
+| `sys_v2_<nl>_<m>` | v2 on the whole test pieces (`SYSTEMS`) | `synthbeats`, `<m>`, `<nl>` |
+| `sys_<run>_sb` | `sf_base_reg_cab` and `sf_base_reg_cab_c128` with the same rendered-MIDI beats on clean MIDI | `synthbeats` |
+| `sysfix_<run>` | the pieces a seq2seq system already scored has no score for, again with the export fixes (`--only-missing`; the 4 real pieces of the last comparison) | `v2tests` |
+| `sysscore` | every system in `outputs/system_eval` rated with Beyer & Dai's metrics -> `results.md` | every `sys_*` job (finished or not) |
+
+The meter runs take the longest (up to 16 h each). A meter job that ends without its model trained
+(both 8-hour jobs used up) can be continued with the same command `pace/v2.sh` submits: it
+resumes from `last.pt` (`grep met_ slurm-met_*.out`). A piece whose score cannot be written keeps
+`<slug>.tokens.txt` and `<slug>.error.txt` in `outputs/system_eval/<system>/<condition>/`.
+
+To bring everything back (PACE, then Windows):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_round3.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/beats_synth.json outputs/system_eval/*/summary.json outputs/system_eval/*/*/*.error.txt outputs/system_eval/*/*/*.tokens.txt outputs/runs/meter_*/*.json outputs/runs/meter_*/log.csv outputs/runs/nl_*/*.json outputs/runs/nl_*/log.csv 2>/dev/null; ls -la v2_round3.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_round3.tgz .
+```
+
+```powershell
+tar xzf v2_round3.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

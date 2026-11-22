@@ -40,14 +40,15 @@ MODES = ["oracle", "chained", "none", "guarded", "meter", "piece"]
 SYSTEM = "meter"  # the mode the demo runs (guarded + time-signature consistency)
 TS_MODES = ["meter", "ts_true", "tsearch", "tsearch_beat"]  # the time-signature search table
 # note labeller (v2) results, one per grid it was given (scripts/eval_labeller.py)
-LABELLER_MODES = [("grid_true", "true grid")]
+LABELLER_MODES = [("grid_true", "true grid"),  # in table order; other grids follow by name
+                  ("grid_meter_meter_oracle", "oracle grid (tracked beats, every meter head right)")]
 TS_HELP = ("ts_true = guarded with each window's true time signature forced (the most a time-signature "
            "choice can give); tsearch = the whole piece decoded under its 3 likeliest time signatures, keeping "
            "the one the model finds most probable; tsearch_beat = the same candidates, keeping the one whose "
            "written beats agree best with the tracked beats (models trained with beats; otherwise as tsearch); "
            "changed = share of windows whose time signature tsearch changed from guarded decoding")
 METRICS = [("note_f1", "note F1"), ("onset_f1", "onset F1"), ("onset_shift_f1", "onset-shift F1"),
-           ("duration_acc", "duration"), ("staff_acc", "staff"), ("bar_f1", "bar F1"), ("ts_acc", "time sig")]
+           ("onset_scaled_f1", "onset-scale F1"), ("duration_acc", "duration"), ("staff_acc", "staff"), ("bar_f1", "bar F1"), ("ts_acc", "time sig")]
 MODE_HELP = ("oracle = the true score before each window (upper bound); chained = the model's own "
              "previous output; none = no context; guarded = chained, falling back to no context when "
              "that output matches the input notes better; meter = guarded + consistent time signatures; "
@@ -64,7 +65,8 @@ METER_HELP = ("The grid each meter model decodes from the tracked beats of a who
               "signature, per performance and averaged (per piece: each piece once, however often it was played). "
               "default = the same model with the untuned decoder (the tuned one: decode.json, chosen on validation). "
               "tracker = the tracked beats themselves, the input. Data: A = ASAP, R = real ASAP transcriptions "
-              "with Beat This!'s beats, P = PERiScoPe")
+              "with Beat This!'s beats, P = PERiScoPe; oracle = no model, every head certain of the truth on the "
+              "same tracked beats (scripts/eval_meter.py --oracle): the best grid those beats allow")
 
 
 def num(x, pct=False, digits=3):
@@ -192,6 +194,8 @@ def meter_info(d):
     """Settings of one meter-model run (missing files -> dashes)."""
     cfg = load_json(d / "config.json")
     model, data = cfg.get("model", {}), cfg.get("data", {})
+    if cfg.get("arch") == "meter_oracle":  # scripts/eval_meter.py --oracle: no model
+        return {"params": DASH, "notes": DASH, "data": "oracle", "seed": DASH, "ended": "done"}
     by = data.get("train_by_source")
     if by:
         src = "+".join(label for key, label in (("asap", "A"), ("real", "R"), ("periscope", "P")) if by.get(key))
@@ -288,14 +292,19 @@ def summary(runs, res, info, now, meters=None):
             "the notes are rendered back to tokens (src/labeller.py, scripts/eval_labeller.py). true grid = given "
             "the score's beats timed through the note alignment (like the beat-snap baselines given the annotated "
             "beats); meter model <run> = the grid that meter model decoded from the tracked beats, with its bars, "
-            "time signatures and an estimated key signature: nothing from the score (the real system). The "
-            "seq2seq models' meter mode is the system they replace.", ""]
+            "time signatures and an estimated key signature: nothing from the score (the real system); oracle "
+            "grid = the same tracked beats decoded with every meter head certain of the truth (scripts/eval_meter.py "
+            "--oracle): the most a meter model can give on them. Runs named *_gn were trained with the tracker's "
+            "timing on their grid (--grid-noise). onset-scale F1 = onset-shift F1 at the note values written, "
+            "halved or doubled, whichever is best (3/8 written for 3/4: the same music). The seq2seq models' "
+            "meter mode is the system they replace.", ""]
     for cond, desc in CONDITIONS:
         rows = []
         for r in runs:
             modes = [(m, dict(LABELLER_MODES).get(m, "meter model " + m[len("grid_meter_"):]))
                      for m in res[r].get(cond, {}) if m.startswith("grid_")]
-            for mode, label in sorted(modes, key=lambda x: (x[0] != "grid_true", x[0])):
+            order = [m for m, _ in LABELLER_MODES]
+            for mode, label in sorted(modes, key=lambda x: (order.index(x[0]) if x[0] in order else len(order), x[0])):
                 v = res[r][cond][mode]
                 rows.append([r, label] + [num(v.get(k)) for k, _ in METRICS])
         if rows:

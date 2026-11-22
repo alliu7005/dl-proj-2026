@@ -105,7 +105,14 @@
       <div class="muted">or click to choose · WAV, MP3, FLAC, M4A, OGG · or a MIDI file to skip transcription</div>
       <input type="file" id="file" class="hidden" accept="audio/*,.mid,.midi,.flac,.m4a,.opus">
     </div>
-    <div class="options">
+    <div class="options" id="sysopts">
+      <span>System</span>
+      <div class="seg" id="systems">
+        <label id="sys-v2" title="The bars of the whole piece first (a meter model over Beat This!'s beats), then every note placed in them by the note labeller"><input type="radio" name="system" value="v2"><span>Grid + note labeller (v2)</span></label>
+        <label id="sys-seq2seq" title="The Scoreformer writes the score window by window, token by token"><input type="radio" name="system" value="seq2seq"><span>Window by window (seq2seq)</span></label>
+      </div>
+    </div>
+    <div class="options" id="modeopts">
       <span>Context between windows</span>
       <div class="seg">
         <label title="Guarded, and time signatures kept consistent along the piece: a window whose meter disagrees with its neighbours is redone with theirs (the best mode in the evaluation)"><input type="radio" name="mode" value="meter" checked><span>Guarded + meter</span></label>
@@ -126,6 +133,7 @@
     <div class="steps">
       <div class="step" data-s="transcribe"><div class="dot"></div><span>Transcribe audio</span></div>
       <div class="step" data-s="beats"><div class="dot"></div><span>Track beats</span></div>
+      <div class="step" data-s="grid"><div class="dot"></div><span>Find the bars</span></div>
       <div class="step" data-s="score"><div class="dot"></div><span>Write the score</span></div>
       <div class="step" data-s="engrave"><div class="dot"></div><span>Engrave</span></div>
     </div>
@@ -160,7 +168,7 @@
     </div>
   </section>
 
-  <footer>Transkun V2 → performance MIDI → Scoreformer (encoder–decoder transformer) → MusicXML. Everything runs on the machine serving this page.</footer>
+  <footer>Transkun V2 → performance MIDI → (v2) Beat This! beats → meter model: the bars of the piece → note labeller: every note in them · (seq2seq) Scoreformer, window by window → MusicXML. Everything runs on the machine serving this page.</footer>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.9.0/build/opensheetmusicdisplay.min.js"></script>
@@ -170,11 +178,24 @@ const $ = s => document.querySelector(s);
 const AUDIO = ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.opus', '.aiff', '.aif'];
 const MIDI = ['.mid', '.midi'];
 const LABELS = { musicxml: 'MusicXML', score_midi: 'Score MIDI', transcription_midi: 'Transcription MIDI', tokens: 'Tokens' };
-let poll = null, clock = null, osmd = null, beatModel = false;
+let poll = null, clock = null, osmd = null, systems = {};
 
+function system() { const c = document.querySelector('input[name=system]:checked'); return c ? c.value : 'seq2seq'; }
+function pill() {
+  const i = systems[system()] || {};
+  $('#model').textContent = system() === 'v2'
+    ? `v2: meter model + note labeller · ${i.params_M}M params · ${i.device}`
+    : `${i.arch} · ${i.params_M}M params${i.beats ? ' · beats' : ''} · ${i.device}`;
+  $('#modeopts').classList.toggle('hidden', system() === 'v2');
+}
 fetch('/api/info').then(r => r.json()).then(i => {
-  beatModel = !!i.beats;  // the model reads beats: audio input is beat-tracked before scoring
-  $('#model').textContent = `${i.arch} · ${i.params_M}M params${i.beats ? ' · beats' : ''} · ${i.device}`;
+  systems = i.systems || { seq2seq: i };
+  ['v2', 'seq2seq'].forEach(k => $(`#sys-${k}`).classList.toggle('hidden', !systems[k]));
+  $('#sysopts').classList.toggle('hidden', Object.keys(systems).length < 2);
+  const d = document.querySelector(`input[name=system][value="${i.default || 'seq2seq'}"]`);
+  if (d) d.checked = true;
+  document.querySelectorAll('input[name=system]').forEach(r => r.onchange = pill);
+  pill();
 }).catch(() => $('#model').textContent = 'server not reachable');
 
 const drop = $('#drop'), input = $('#file');
@@ -212,15 +233,18 @@ async function submit(file) {
   $('#pbar').style.width = '0'; $('#pbar').parentElement.classList.add('busy');
   $('#pmsg').textContent = 'uploading…'; $('#ppct').textContent = '';
   document.querySelectorAll('.step').forEach(s => s.className = 'step');
-  const isMidi = MIDI.includes(e);
+  const isMidi = MIDI.includes(e), v2 = system() === 'v2';
+  const beatModel = v2 || !!(systems[system()] || {}).beats;  // audio is beat-tracked before scoring
   if (isMidi) document.querySelector('.step[data-s="transcribe"]').classList.add('skip');
-  if (isMidi || !beatModel) document.querySelector('.step[data-s="beats"]').classList.add('skip');
+  if ((isMidi && !v2) || !beatModel) document.querySelector('.step[data-s="beats"]').classList.add('skip');
+  if (!v2) document.querySelector('.step[data-s="grid"]').classList.add('skip');
   const t0 = Date.now();
   clock = setInterval(() => $('#ptime').textContent = fmtTime((Date.now() - t0) / 1000), 500);
 
   const fd = new FormData();
   fd.append('file', file);
   fd.append('mode', document.querySelector('input[name=mode]:checked').value);
+  fd.append('system', system());
   let id;
   try {
     const r = await fetch('/api/jobs', { method: 'POST', body: fd });
@@ -232,7 +256,7 @@ async function submit(file) {
   poll = setInterval(async () => {
     let job;
     try { job = await (await fetch(`/api/jobs/${id}`)).json(); } catch (err) { return; }
-    const order = ['transcribe', 'beats', 'score', 'engrave'];
+    const order = ['transcribe', 'beats', 'grid', 'score', 'engrave'];
     const cur = order.indexOf(job.stage);
     document.querySelectorAll('.step').forEach(s => {
       if (s.classList.contains('skip')) return;
@@ -264,8 +288,25 @@ function showResult(id, job) {
   ];
   if (s.transcribe_s != null) items.push([fmtTime(s.transcribe_s), 'transcription']);
   if (s.beats_s != null) items.push([fmtTime(s.beats_s), 'beat tracking']);
-  items.push([fmtTime(s.score_s || 0), 'score model']);
   const word = (n, one, many) => (n === 1 ? one : many);
+  if (s.system === 'v2') {
+    if (s.grid_s != null) items.push([fmtTime(s.grid_s), 'meter model']);
+    if (s.score_s != null) items.push([fmtTime(s.score_s), 'note labeller']);
+    if (s.time_signature) {
+      const other = Object.keys(s.time_signatures || {}).length - 1;
+      items.push([s.time_signature, other > 0 ? `main time signature (+${other} other)` : 'time signature']);
+    }
+    if (s.key_signature != null) {
+      const k = s.key_signature;
+      items.push([k === 0 ? '♮' : `${Math.abs(k)}${k > 0 ? '♯' : '♭'}`, 'key signature']);
+    }
+    if (s.notes_deleted != null) {
+      const n = s.notes_deleted;
+      items.push([n, `${word(n, 'note', 'notes')} left out as transcription errors`]);
+    }
+  } else {
+    items.push([fmtTime(s.score_s || 0), 'score model']);
+  }
   if (['guarded', 'meter', 'piece', 'tsearch', 'tsearch_beat'].includes(s.mode)) {
     const n = s.guard_fallbacks ?? 0;
     items.push([n, `${word(n, 'window', 'windows')} redone without context`]);
@@ -274,11 +315,12 @@ function showResult(id, job) {
     const n = s.meter_fixes ?? 0;
     items.push([n, `${word(n, 'time signature', 'time signatures')} made consistent`]);
   }
-  if (s.time_signature) {
+  if (s.time_signature && s.system !== 'v2') {
     items.push([s.time_signature, `time signature kept (tried ${(s.ts_candidates || []).join(', ')})`]);
   }
   $('#stats').innerHTML = (s.beats && s.beats !== 'not used by this model'
-    ? `<div class="muted" style="grid-column: 1 / -1">Beats: ${s.beats}</div>` : '') + items.map(([v, l]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
+    ? `<div class="muted" style="grid-column: 1 / -1">Beats: ${s.beats}</div>` : '')
+    + items.filter(([v]) => v != null).map(([v, l]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
 
   const base = `/api/jobs/${id}/files/`;
   const has = k => job.downloads.includes(k);

@@ -1036,20 +1036,149 @@ written as 6/8, then 4/4 as 6/8 or 2/2, 2/4 as 4/4. 6/4 and 6/8 group the beats 
 at half the note values: the same sound, so which one the score uses is a convention only many
 pieces can teach. That is what the PERiScoPe works are for; the PACE runs measure it.
 
+### Meter model, second round: results
+
+PACE, up to 30,000 steps (batch 16, chunks of up to 1,024 beats), each run's best validation
+checkpoint with its tuned decoder (`outputs/compare/summary.md`, "Meter models (v2)" and "Note
+labeller (v2)"). The PERiScoPe test is the one to read: 576 performances of 91 works no model
+trained on, against ASAP's 59 performances of 14 pieces. The last two columns are `nl_base` on each
+grid:
+
+| run | data | note encoder | downbeat F | time sig | time sig per piece | labeller onset F1 | labeller bar F1 |
+|---|---|---|---|---|---|---|---|
+| tracked beats alone | | | 0.606 | | | | |
+| meter_base | A+R | no | 0.639 | 0.365 | 0.425 | 0.273 | 0.621 |
+| meter_v2_asap | A+R | yes | 0.629 | 0.393 | 0.471 | 0.243 | 0.632 |
+| meter_v2 | A+R+P | yes | 0.679 | 0.513 | 0.589 | 0.285 | 0.706 |
+| meter_v2_s1 | A+R+P | yes (seed 1) | 0.680 | 0.511 | 0.628 | 0.316 | 0.712 |
+| **meter_v2_nonote** | A+R+P | no | **0.747** | **0.604** | **0.708** | **0.353** | **0.754** |
+| true grid | | | | 1.000 | | 0.851 | 0.980 |
+
+On the ASAP test, `meter_v2_nonote` against `meter_base`: clean (simulated tracker) downbeat F 0.775
+vs 0.718, time signature 0.550 vs 0.416; real (Beat This!) 0.624 vs 0.638 and 0.384 vs 0.315.
+
+- **More works help.** With the note encoder, PERiScoPe's works add 0.05 downbeat F and 0.12
+  time-signature accuracy on the PERiScoPe test (`meter_v2` vs `meter_v2_asap`), and 0.05
+  time-signature accuracy on clean ASAP.
+- **The note encoder overfits at this scale.** Both seeds peaked at 4,000 steps and stopped early
+  at 14,000. Without it the model was still improving at 26,000 of 30,000 steps, and it wins on
+  every test set: PERiScoPe downbeat F 0.747 vs 0.679, time signature 0.604 vs 0.513. The local
+  ASAP-only check (4,000 steps) was too short to see the overfitting. From the third round
+  `--no-note-encoder` is the default.
+- **Seeds:** the PERiScoPe test barely moves between seeds (time signature 0.513 vs 0.511), but
+  the 14-piece ASAP test does (clean 0.446 vs 0.559, real 0.266 vs 0.340). On ASAP, differences
+  under about 0.1 are seed noise.
+- **The tuned decoder** adds 0.004-0.08 to the validation selection score. It helps the weakest
+  model most (`meter_v2_asap` 0.551 -> 0.630; its real time signature 0.147 -> 0.250). For the
+  best model it is within 0.01 of the default.
+- **What is left: half and double note values.** `meter_v2_nonote` has about 34,600 of
+  PERiScoPe's ~57,000 test bars right. About 12,000 of the wrong ones are the same grouping at half
+  or double the note values: 3/4 written 3/8 (4,723), 2/2 as 2/4 (3,111), 3/8 as 3/4 (2,360), 2/4
+  as 2/2 (846), 6/4 as 6/8 (644). Beat and downbeat F cannot see these (the beats and bar lines fall
+  at the same times), and the score reads the same at the other note value. But the window
+  metrics count every note in such a bar as wrong. The model writes 3/8 almost only where it is
+  wrong: 140 bars right, 2,360 of the 3/8 bars written 3/4, and 4,723 bars of 3/4 written 3/8. The
+  note value of a tracked beat is its weakest decision.
+
+**v2 against the seq2seq system** (onset F1 / bar F1 / time signature; the seq2seq model in meter
+mode, what its demo runs):
+
+| test set | v2: nl_base on meter_v2_nonote | seq2seq: sf_base_reg_cab_c128 | v2 with the true grid |
+|---|---|---|---|
+| clean | 0.333 / 0.671 / 0.477 | 0.348 / 0.689 / 0.446 | 0.771 / 0.981 / 1.000 |
+| periscope | 0.353 / 0.754 / 0.637 | 0.492 / 0.754 / 0.569 | 0.851 / 0.980 / 1.000 |
+| real | 0.295 / 0.606 / 0.300 | 0.357 / 0.681 / 0.391 | 0.797 / 0.981 / 1.000 |
+
+On PERiScoPe, v2 now matches the seq2seq system's bar lines and gets more time signatures right,
+but places fewer notes exactly. Note F1 shows a second loss (0.75 vs 0.93 on PERiScoPe): the
+labeller, trained only on true grids, deletes notes that a tracked-beat grid puts slightly off
+where it expects them.
+
+### Third round: the whole system, end to end
+
+`pace/v2.sh` (pace/README.md, 4k) runs every part of this round in one batch:
+
+- **Meter models without the note encoder, trained longer:** up to 60,000 steps, early stopping
+  after 8 evaluations without a gain. Each run is two chained 8-hour jobs: `--max-hours` stops one
+  cleanly, and `--resume` continues it. There are three seeds (`meter_v3`, `_s1`, `_s2`) and one
+  larger model (`meter_v3_large`: d 384, 8 layers, 14.2M parameters against 4.8M).
+- **The oracle grid** (`eval_meter.py --oracle`, run `meter_oracle`): no model. Every head is
+  certain of its training target on the same tracked beats, decoded like a model's output: the
+  best grid those beats allow. The labeller on it separates what the tracker's beats cost from what
+  the meter model's errors cost. On the local ASAP test with the simulated tracker it gets beat F
+  0.884, downbeat F 0.901 and time signature 0.992 (the first round's check, now a saved grid).
+- **A labeller trained with the tracker's timing** (`train_labeller.py --grid-noise 0.8`,
+  `src/notelabels.py GridNoise`). The grid the system gives the labeller is anchored on tracked
+  beats, not on the beats as played. So 80% of training windows get the fitted Beat This! errors on
+  their true grid, one performance profile per window:
+  - tempo octaves (anchors added at exact in-between positions, or every k-th kept);
+  - missed beats (the grid interpolates across them);
+  - spurious beats at the fitted phases, their position snapped to a meter step, so the grid bends
+    locally as a meter model's does;
+  - offset and jitter.
+
+  The bars and positions stay the same, so the labels still hold. Validation gets one fixed draw,
+  so model selection measures the labeller as it is used. `nl_base_gn` and `nl_base_gn_s1` (seed 1)
+  are each evaluated with `nl_base` on every grid: the oracle, `meter_v2_nonote` and the four new
+  meter models.
+- **Onset-scale F1** (`src/eval/metrics.py`): onset-shift F1 with the predicted note values as
+  written, all halved, or all doubled, whichever is best. It is the window version of beat
+  tracking's "allowed metrical levels", and close to what MUSTER does (its onset error forgives a
+  global scaling). It separates a notation convention from rhythm that is really wrong.
+  `scripts/rescore.py` adds it to every run's stored results from the saved predictions, so the
+  seq2seq models get it without decoding again. It updates a mode only when the re-scored onset F1
+  equals the stored one.
+- **v2 as a system** (`src/pipeline.py V2Pipeline`, used by the demo and the whole-piece
+  comparison). It takes the piece's beats, the meter model's grid of the whole piece with its tuned
+  decoder, and a key signature from the notes. The labeller runs on each window cut as the test
+  sets are, in its stretch of the grid. Every kept note is then rendered once, in the piece's own
+  bars (a window's frame records its first bar), as one score: no window guesses where it starts,
+  and nothing is stitched.
+- **Beats for a MIDI input:** Beat This! hears audio only, so a MIDI file is rendered first by a
+  small additive piano synthesizer (`src/synth.py`: about a second for a 10-minute piece, no extra
+  packages). For the clean ASAP test MIDI, `scripts/synth_beats.py` tracks every piece with the
+  Beat This! fold model that never trained on it. It records the beat F on the rendered MIDI next
+  to the same performances' real audio, so the cost of the rendered audio is on record.
+- **The whole-piece comparison with Beyer & Dai** (their MUSTER and score-similarity metrics,
+  `scripts/beyer_dai.py score --systems all`): six v2 systems (labeller x meter model), and the two
+  best seq2seq models with the same rendered-MIDI beats on clean MIDI (`sf_base_reg_cab_meter_sb`,
+  `sf_base_reg_cab_c128_meter_sb`), so the clean comparison is like for like. These sit next to
+  Beyer & Dai and the seq2seq systems already scored.
+- **Score export, two fixes found on the way:**
+  - Speed: without its own time signature, a measure made music21 guess one from its contents for
+    every rest it filled. Dense or tuplet-grid output took seconds per measure (an 80-note piece:
+    32 s), and now takes 0.5 s. Every measure carries its time signature while it is built, and
+    repeated ones are removed before writing.
+  - A last resort: the bars that cannot be exported even alone (or that break the export in
+    context) are emptied, the rest is written, and the result says which. A piece whose score still
+    cannot be written keeps its tokens and its error next to where the score would be. The batch
+    writes the four real pieces no seq2seq score was written for again
+    (`system_scores.py --only-missing`).
+
+Results: pending (the batch above).
+
 ## Demo: audio in, score out
 
-A small web app runs the whole system on one recording: Transkun V2 transcribes the audio, the
-score model writes the score window by window in meter mode, the best in the evaluation (guarded
-decoding: each window's context is the model's own previous output, and degenerate windows are
-redone without it; plus time signatures kept consistent along the piece; the page can also switch
-to guarded only, plain chained or no context), and the page shows the engraved score with playback
-and downloads. The default checkpoint is the best model, `sf_base_reg_cab`, which also takes the
-beats Beat This! finds in the audio. The page also offers the time-signature searches ("Meter
-search": 3 decodings of the piece, so about 3 times slower).
+A small web app runs the whole system on one recording. Transkun V2 transcribes the audio, a
+score system writes the score, and the page shows the engraved score with playback and downloads.
+Two systems, chosen per upload on the page (each is loaded when its checkpoints exist):
+
+- **v2 (default):** Beat This! tracks the beats, the meter model decodes the bars and time
+  signatures of the whole piece from them, and the note labeller places every note in them
+  (`src/pipeline.py V2Pipeline`; `--labeller`, `--meter`). A MIDI upload is rendered to audio for
+  Beat This! (`src/synth.py`). The page shows the main time signature, the key signature and how
+  many notes it left out as transcription errors.
+- **seq2seq:** the Scoreformer writes the score window by window (`--ckpt`, default
+  `sf_base_reg_cab`). It runs in meter mode by default, the best in its evaluation: guarded
+  decoding (each window's context is the model's own previous output, and degenerate windows are
+  redone without it), plus time signatures kept consistent along the piece. The page can also
+  switch to guarded only, plain chained, no context, or the time-signature searches ("Meter
+  search": 3 decodings of the piece, so about 3 times slower).
 
 ```bash
 pip install fastapi uvicorn python-multipart        # once (also listed in environment.yml)
-python demo/app.py --ckpt outputs/runs/sf_base_reg_cab/best.pt
+python demo/app.py                                   # v2 (nl_base_gn + meter_v3) and seq2seq, if present
+python demo/app.py --labeller outputs/runs/nl_base/best.pt --meter outputs/runs/meter_v2_nonote/best.pt
 # open http://127.0.0.1:7860 and drop in a WAV / MP3 / FLAC (or a .mid to skip transcription)
 ```
 
@@ -1061,6 +1190,7 @@ and the MIDI players use html-midi-player, both loaded from a CDN. Each job's fi
 `result.json`. The same pipeline from the command line:
 
 ```bash
+python scripts/audio_to_score.py recording.wav --v2      # v2 (--labeller, --meter)
 python scripts/audio_to_score.py recording.wav --ckpt outputs/runs/sf_base_reg_cab/best.pt
 ```
 
@@ -1136,8 +1266,12 @@ bash pace/system_eval.sh     # inputs, ours + theirs on every input, scoring -> 
   the same performances transcribed by Transkun V2, shifted onto the ASAP timeline and cut to their
   piece (a MAESTRO recording can hold a prelude and its fugue), each with its ASAP reference score.
 - **Ours** (`scripts/system_scores.py`): the demo pipeline on each file, exactly as the demo runs a MIDI
-  file (windows cut from the performance alone); a beat model gets the tracked beats on the real
-  transcriptions (what the demo gets from audio) and none on clean MIDI (like any MIDI input).
+  file (windows cut from the performance alone). A seq2seq beat model gets the tracked beats on the
+  real transcriptions (what the demo gets from audio) and none on clean MIDI (like any MIDI input),
+  or with `--midi-beats synth` Beat This!'s beats of the MIDI rendered to audio (system
+  `<run>_<mode>_sb`). v2 (`--v2 <labeller>+<meter>`, system `v2_<labeller>_<meter>`) always gets
+  beats: the tracked ones on real, the rendered MIDI's on clean (`scripts/synth_beats.py`). A piece
+  whose score cannot be written keeps its tokens and error (`<slug>.tokens.txt`, `.error.txt`).
 - **Theirs** (`scripts/beyer_dai.py predict`): their `quantize_path` (512-note chunks, 64 overlap), the
   score written with `makeNotation=False` as their code says.
 - **Scoring** (`scripts/beyer_dai.py score`): every predicted score is read back and cleaned with their
@@ -1249,7 +1383,8 @@ src/dataset.py     PyTorch Dataset / sampler / collate, context noise (ContextNo
 src/decoding.py                  chained / guarded / meter decoding of whole pieces (evaluation and demo)
 src/metrical.py                  per-note downbeat / beat-phase labels (alignment) and the aux loss
 scripts/build_metrical.py        precompute the metrical labels of every split (once per data build)
-src/pipeline.py                  audio / MIDI -> windows -> chained decoding -> MusicXML
+src/pipeline.py                  audio / MIDI -> MusicXML: ScorePipeline (seq2seq, window by window), V2Pipeline (grid + labeller)
+src/synth.py                     MIDI -> audio (additive piano), so Beat This! can track a MIDI input
 demo/app.py, demo/static/        web demo (FastAPI + one HTML page); scripts/audio_to_score.py: CLI
 scripts/train_model.py           train either model; scripts/evaluate_pieces.py: oracle/chained/none
 src/eval/plan.py                 evaluation options and mode names; what a run's results still lack
@@ -1259,7 +1394,9 @@ scripts/track_beats.py           Beat This! on the MAESTRO audio (held-out folds
 scripts/fit_beat_noise.py        tracker vs ground truth -> configs/beat_noise.json
 scripts/compare_runs.py          tables of every evaluated run -> outputs/compare/{summary,margins}.md, results.csv
 scripts/system_inputs.py         whole-piece test inputs (clean MIDI, cut Transkun transcriptions) + references
-scripts/system_scores.py         our pipeline on them -> one MusicXML per performance
+scripts/system_scores.py         our pipelines on them (seq2seq or v2) -> one MusicXML per performance
+scripts/synth_beats.py           Beat This! on the clean test MIDI rendered to audio (held-out folds) -> beats_synth.npz
+scripts/rescore.py               metrics added since an evaluation, from its saved predictions (onset-scale F1)
 scripts/beyer_dai.py             Baseline 3: Beyer & Dai's model (predict) and their metrics for every system (score)
 src/notelabels.py                v2: per-note score labels, tie-aware rendering back to tokens, grid features
 src/labeller.py                  v2: the note labeller (Scoreformer encoder + per-note heads), prediction -> tokens
@@ -1270,7 +1407,7 @@ scripts/eval_labeller.py         v2: evaluate it on the test sets (true grid: gr
 src/meter.py                     v2: the meter model (beat + note-encoder inputs, targets, alignment ground truth, augmentation, transformer, consistent Viterbi decoding)
 scripts/build_meter_data.py      v2: whole performances with ground-truth grids: ASAP annotations (+ transcriptions, tracked beats), PERiScoPe score alignments
 scripts/train_meter.py           v2: train the meter model (ASAP + real + PERiScoPe, per-source validation)
-scripts/eval_meter.py            v2: tune its decoder on validation, score its grids (clean / real / periscope), save them for the labeller
+scripts/eval_meter.py            v2: tune its decoder on validation, score its grids (clean / real / periscope), save them for the labeller; --oracle: the best grid the tracked beats allow
 pace/train.sbatch                PACE GPU job: train + evaluate
 pace/reevaluate.sh               evaluate finished runs: what is missing, one job per run or per test set
 pace/beats.sh                    the beat batch (ground-truth beats, Beat This!, 3 beat runs)
@@ -1279,7 +1416,8 @@ pace/bd_setup.sh                 Beyer & Dai's environment, code, forks and chec
 pace/system_eval.sh              system-level comparison: ours vs Beyer & Dai on whole pieces
 pace/labeller.sh                 v2 Phase 1: labels for every split, then two note labellers (true grid)
 pace/train_labeller.sbatch       one note labeller: train + evaluate (resumes from last.pt)
-pace/meter.sh                    v2 Phases 2 + 3: the meter model, then the labellers on its grids
+pace/meter.sh                    v2 Phases 2 + 3: the meter model, then the labellers on its grids (second round)
+pace/v2.sh                       v2 third round: meter models, oracle, grid-noise labellers, every labeller on every grid, whole-piece comparison
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model
 tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
@@ -1289,8 +1427,9 @@ tests/test_training_stop.py      LR schedule, early stopping, cooldown, resume, 
 tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --only-missing end to end
 tests/test_reevaluate.py         pace/reevaluate.sh (per run / per test set), pace/beats.sh, pace/tsearch.sh: what they submit
 tests/test_system_eval.py        system-level comparison: inputs, our pipeline on them, aggregation, job graph
-tests/test_notelabels.py         v2: labels, ties, rendering, grid features, dataset, labeller training / evaluation
-tests/test_meter.py              v2: meter targets, decoding (vs a plain Viterbi), note encoder, alignment ground truth, augmentation, end to end, job graph
+tests/test_notelabels.py         v2: labels, ties, rendering, grid features, GridNoise, dataset, labeller training / evaluation
+tests/test_meter.py              v2: meter targets, decoding (vs a plain Viterbi), oracle, note encoder, alignment ground truth, augmentation, time limit + resume, end to end, job graph
+tests/test_v2_system.py          v2 system: onset-scale F1, rescoring, the export's last resort, the synthesizer, V2Pipeline, the demo's two systems, pace/v2.sh
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
 tests/test_beats.py              beats vs ASAP annotations, features, tracker errors (bar classes, octave stretches, profiles, fit, vs Beat This!), tracker folds, train / eval / demo
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes

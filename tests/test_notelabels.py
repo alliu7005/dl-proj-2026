@@ -84,6 +84,36 @@ def test_grid_features_and_bars():
     assert not f.any() and not bar.any()
 
 
+def test_grid_noise():
+    """GridNoise moves a true grid's anchors as the tracker would, never its positions' meaning:
+    p = 0 changes nothing; every draw stays increasing in time and position, covers the window and
+    keeps the anchors on the true line within the jitter; a doubled tempo adds anchors at exact
+    in-between positions; spurious anchors sit at snapped positions of their beat."""
+    from src.beats import BeatNoise
+    from src.notelabels import EXTRA_SNAP, GridNoise
+    t = 0.5 * np.arange(24)
+    q = np.arange(24, dtype=float)
+    fitted = GridNoise.from_json(ROOT / "configs" / "beat_noise.json", p=1.0)
+    t0, q0 = GridNoise(fitted.bn, p=0.0)(t, q, np.random.default_rng(0))
+    assert np.array_equal(t0, t) and np.array_equal(q0, q)
+    for seed in range(40):
+        tt, qq = fitted(t, q, np.random.default_rng(seed))
+        assert len(tt) >= 2 and np.all(np.diff(tt) > 0.03) and np.all(np.diff(qq) > 0), seed
+        assert qq[0] <= 1e-9 + q[0] + 1 and qq[-1] >= q[-1] - 1, (seed, qq[[0, -1]])  # still covers the window
+    # only timing: anchors that are true beats stay within a few jitters of their time
+    quiet = BeatNoise(p_double=0.0, p_half=0.0, miss=0.0, extra=0.0, offset=0.0, jitter=0.01)
+    tt, qq = GridNoise(quiet, 1.0)(t, q, np.random.default_rng(1))
+    assert np.array_equal(qq, q) and np.abs(tt - t).max() < 0.06
+    double = BeatNoise(p_double=1.0, p_half=0.0, double_k=[1.0, 0.0, 0.0], miss=0.0, extra=0.0, offset=0.0, jitter=0.0)
+    tt, qq = GridNoise(double, 1.0)(t, q, np.random.default_rng(2))
+    assert len(tt) == 2 * len(t) - 1 and np.allclose(np.diff(qq), 0.5) and np.allclose(np.diff(tt), 0.25)
+    extra = BeatNoise(p_double=0.0, p_half=0.0, miss=0.0, extra=0.3, offset=0.0, jitter=0.0)
+    tt, qq = GridNoise(extra, 1.0)(t, q, np.random.default_rng(3))
+    frac = np.round(qq % 1.0, 9)
+    assert len(tt) > len(t) and set(frac[frac > 0]) <= {round(x, 9) for x in EXTRA_SNAP}, set(frac)
+    assert np.all(np.diff(tt) > 0.03) and np.all(np.diff(qq) > 0)
+
+
 def test_targets_and_transfer():
     space = LabelSpace(Vocab.load(str(V)).itos)
     rows = np.full((4, len(LABEL_COLS)), IGNORE, np.int32)
@@ -145,6 +175,16 @@ def test_dataset_items():
                              augment=AugmentConfig(), context_before=16, context_after=8)
     b = collate([tr[i] for i in range(6)])
     assert b["labels"].shape[:2] == b["notes"].shape[:2] and b["flags"].shape[-1] == N_FLAGS
+    # the tracker's timing on the grid: the grid features change, the notes and every label do not
+    from src.notelabels import GridNoise
+    plain = ds[3]
+    ds.grid_noise = GridNoise.from_json(ROOT / "configs" / "beat_noise.json", p=1.0)
+    moved = ds[3]
+    ng = 17  # N_GRID_FEATURES, the last columns
+    assert torch.equal(moved["notes"][:, :-ng], plain["notes"][:, :-ng]) and torch.equal(moved["roles"], plain["roles"])
+    assert not torch.equal(moved["notes"][:, -ng:], plain["notes"][:, -ng:])
+    assert torch.equal(moved["labels"][:, [0, 2, 3, 4, 5]], plain["labels"][:, [0, 2, 3, 4, 5]])
+    assert torch.equal(ds[3]["notes"], moved["notes"])  # the same draw for the same window and epoch
     assert ((b["labels"][..., 0] == 1) | (b["labels"][..., 0] == 0) | (b["labels"][..., 0] == -1)).all()
 
 

@@ -256,11 +256,18 @@ def table(results: dict) -> str:
     return "\n".join(lines)
 
 
+def all_systems(out: Path) -> list[str]:
+    """Every system with predictions under ``out`` (a folder with a summary.json), Beyer & Dai first."""
+    found = sorted(d.name for d in out.iterdir() if d.is_dir() and (d / "summary.json").exists()) if out.exists() else []
+    return sorted(found, key=lambda s: s != "beyer_dai")
+
+
 def score(args) -> None:
     from joblib import Parallel, delayed
     entries = load_manifest(args.manifest, args.conditions)
-    systems = [s for s in args.systems.split(",") if s] + [REFERENCE]
     out = Path(args.out)
+    names = all_systems(out) if args.systems == "all" else [s for s in args.systems.split(",") if s]
+    systems = names + [REFERENCE]
     jobs = [(s, e) for s in systems for e in entries]
     paths = [(args.repo, str(pred_path(out, s, e)) if pred_path(out, s, e).exists() else None, e["reference"])
              for s, e in jobs]
@@ -291,7 +298,8 @@ def main(argv=None):
         p.add_argument("--out", default="outputs/system_eval")
     sub.choices["predict"].add_argument("--ckpt", required=True, help="MIDI2ScoreTF.ckpt")
     sub.choices["score"].add_argument("--systems", required=True,
-                                      help="comma-separated folders under --out (beyer_dai, <run>_<mode>, ...)")
+                                      help="comma-separated folders under --out (beyer_dai, <run>_<mode>, ...), "
+                                           "or all: every folder with a summary.json")
     sub.choices["score"].add_argument("--jobs", type=int, default=8)
     args = ap.parse_args(argv)
     {"predict": predict, "score": score, "selftest": selftest}[args.cmd](args)

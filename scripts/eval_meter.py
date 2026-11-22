@@ -22,6 +22,11 @@ training script's selection score (mean of downbeat F and time-signature accurac
 outputs/runs/<run>/decode.json and used from then on. Every condition is also scored with the
 default decoder (``default`` in the results), so the tuning's effect is on record.
 
+--oracle: no model; each head certain of its training target on the same tracked beats (src/meter.py
+oracle_logp), decoded alike: the best grid these beats allow (``python scripts/eval_meter.py --run
+meter_oracle --oracle``). The labeller on it (scripts/eval_labeller.py --grid meter:meter_oracle)
+separates what the tracker's beats cost from what the meter model's errors cost.
+
 Writes outputs/runs/<run>/eval_meter.json (means per condition and per piece, the time-signature
 confusions), meter_scores_<condition>.json (per performance) and grids_<condition>.pkl ({key:
 grid, with its performance, its span and the key signature estimated from its notes:
@@ -44,7 +49,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import pick_device  # noqa: E402
 from scripts.train_meter import load  # noqa: E402
 from src.beats import MATCH_TOL, BeatNoise, f_measure  # noqa: E402
-from src.meter import DecodeConfig, build_meter_model, grid_from_logp, grid_scores, predict_logp  # noqa: E402
+from src.meter import (DecodeConfig, build_meter_model, grid_from_logp, grid_scores, oracle_logp,  # noqa: E402
+                       predict_logp)
 from src.notelabels import estimate_key  # noqa: E402
 
 CONDITIONS = {"clean": "test", "real": "test_transcribed", "periscope": "test_periscope"}
@@ -124,16 +130,27 @@ def main(argv=None):
     ap.add_argument("--tune-periscope", type=int, default=150, help="PERiScoPe val performances used by --tune")
     ap.add_argument("--tune-max", type=int, default=0, help="at most this many per validation source (0 = all)")
     ap.add_argument("--beat-noise", default="configs/beat_noise.json")
+    ap.add_argument("--oracle", action="store_true",
+                    help="no model: every head certain of the truth on the tracked beats (the best grid they allow)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--data", default="data/processed")
     ap.add_argument("--runs-dir", default="outputs/runs")
     args = ap.parse_args(argv)
     device = pick_device(args.device)
     run, data = Path(args.runs_dir) / args.run, Path(args.data)
-    ck = torch.load(run / args.ckpt, map_location=device, weights_only=False)
-    model = build_meter_model(ck["config"]).to(device)
-    model.load_state_dict(ck["model"])
     noise = BeatNoise.from_json(args.beat_noise)
+    if args.oracle:
+        if args.tune:
+            raise SystemExit("--oracle has no model to tune a decoder for")
+        run.mkdir(parents=True, exist_ok=True)
+        (run / "config.json").write_text(json.dumps({"arch": "meter_oracle", "beat_noise": args.beat_noise,
+                                                     "note": "no model: each head certain of the truth on the "
+                                                             "tracked beats (src/meter.py oracle_logp)"}, indent=1))
+        model = None
+    else:
+        ck = torch.load(run / args.ckpt, map_location=device, weights_only=False)
+        model = build_meter_model(ck["config"]).to(device)
+        model.load_state_dict(ck["model"])
     dfile = run / "decode.json"
     if args.tune:
         cfg, info = tune(model, data, noise, device, args.tune_periscope, max_perfs=args.tune_max)
@@ -152,7 +169,7 @@ def main(argv=None):
         confusion = Counter()
         for k, perf in enumerate(perfs):
             bt, bd = tracked(perf, k, noise)
-            lp = predict_logp(model, perf["notes"], bt, bd, device)
+            lp = oracle_logp(bt, perf["gt"]) if model is None else predict_logp(model, perf["notes"], bt, bd, device)
             grid = grid_from_logp(bt, lp, cfg)
             grid["key"] = estimate_key(perf["notes"])  # the key signature the rendered score gets
             grid["performance"] = perf["performance"]

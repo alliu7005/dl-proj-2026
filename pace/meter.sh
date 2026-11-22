@@ -1,5 +1,6 @@
 #!/bin/bash
-# Submit the meter model's second round, v2 Phases 2 + 3 (on the login node from the repo root, after git pull):
+# Submit the meter model's second round, v2 Phases 2 + 3 (on the login node from the repo root, after git pull;
+# the third round, and the whole v2 system: pace/v2.sh):
 #   bash pace/meter.sh
 #   SKIP_PREP=1 bash pace/meter.sh                 # data/processed/meter already has the PERiScoPe performances
 #   METERS="meter_v2" LABELLERS="nl_base" LARGE_ON="" bash pace/meter.sh   # a subset
@@ -36,12 +37,12 @@ METERS=${METERS:-"meter_v2 meter_v2_s1 meter_v2_nonote meter_v2_asap"}
 LABELLERS=${LABELLERS:-"nl_base"}
 LARGE_ON=${LARGE_ON-"meter_v2 meter_base"}  # empty = nl_large on none
 
-flags() {  # train_meter.py options of each meter run
+flags() {  # train_meter.py options of each meter run (no note encoder is the default since round 3)
   case "$1" in
-    meter_v2) echo "" ;;
-    meter_v2_s1) echo "--seed 1" ;;
+    meter_v2) echo "--note-encoder" ;;
+    meter_v2_s1) echo "--note-encoder --seed 1" ;;
     meter_v2_nonote) echo "--no-note-encoder" ;;
-    meter_v2_asap) echo "--no-periscope" ;;
+    meter_v2_asap) echo "--note-encoder --no-periscope" ;;
     *) echo "unknown meter run $1 (add it to flags() in pace/meter.sh)" >&2; return 1 ;;
   esac
 }

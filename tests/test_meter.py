@@ -29,7 +29,8 @@ sys.path.insert(0, str(ROOT))
 from src.beats import merge_performance, merge_performance_bars  # noqa: E402
 from src.meter import (GRID, N_BEAT_FEATURES, N_NOTE_FEATURES, Q_STEPS, TS_CLASSES, DecodeConfig,  # noqa: E402
                        aligned_grids, annotation_grid, bar_quarters, beat_features, build_meter_model, collate,
-                       decode, grid_beats, grid_from_states, grid_scores, is_clean, note_inputs, predict_logp,
+                       decode, grid_beats, grid_from_logp, grid_from_states, grid_scores, is_clean, note_inputs,
+                       predict_logp,
                        sample, stitch_notes, targets)
 from src.notelabels import Placed, estimate_key, render, window_frame  # noqa: E402
 
@@ -307,6 +308,27 @@ def test_augment():
     assert Augment(prob=0.0)(perf, rng) is perf
 
 
+def test_oracle_logp():
+    """A perfect meter model on tracked beats: certain of each training target, uniform where it is
+    unknown; decoded, it gives back the annotated grid on clean beats, and on tracked beats (missed
+    and extra ones) still the right time signature and every bar line the beats allow."""
+    from src.meter import oracle_logp
+    gt = annotation_grid(ann(beats_per_bar=(3,), ts_changes={0.5: ["3/4", 3]}, bars=10))
+    assert set(gt["ts_names"]) == {"3/4"}
+    lp = oracle_logp(gt["t"], gt)
+    tg = targets(gt["t"], gt)
+    assert set(lp) == {"bar", "step", "ts"} and lp["step"].shape == (len(gt["t"]), len(Q_STEPS))
+    assert (lp["ts"].argmax(1) == tg["ts"]).all() and np.allclose(lp["bar"].max(1), 0)
+    s = grid_scores(grid_from_logp(gt["t"], lp), gt)
+    assert s["beat_f"] == 1.0 and s["downbeat_f"] == 1.0 and s["ts_acc"] == 1.0, s
+    noisy = np.sort(np.concatenate([np.delete(gt["t"], [4, 9]), gt["t"][[2, 6]] + 0.21]))  # 2 missed, 2 extra
+    s = grid_scores(grid_from_logp(noisy, oracle_logp(noisy, gt)), gt)
+    # an extra beat's step is snapped to a Q_STEPS value (0.42 of a beat -> 1/2), which bends the grid
+    # locally: the bar line after it lands 83 ms early, outside the 70 ms tolerance (GridNoise's snap)
+    assert s["ts_acc"] == 1.0 and s["downbeat_f"] >= 0.9, s
+    assert oracle_logp(gt["t"][:1], gt) is None
+
+
 def test_window_frame():
     """A decoded grid in a window's frame: its first bar is the bar its first note falls in; a
     window takes the grid of the segment whose span holds it."""
@@ -328,6 +350,10 @@ def test_window_frame():
     assert len(win.bars) == 1 and len(win2.bars) == 1, (win.bars, win2.bars)
     t3, q3, win3 = window_frame(g, perf_t0, np.array([0.5, 2.6, 4.6]), key=0)  # notes at 2.5 / 4.6 / 6.6 s: bars at 2.5 / 4.5 / 6.5 s
     assert len(win3.bars) == 3, win3.bars
+    # which of the piece's bars the window starts with (V2Pipeline renders every window into them):
+    # bar 0 holds the pickup beat (0 s), bar 1 starts at 0.5 s, bar 2 at 2.5 s
+    assert (win.first_bar, win2.first_bar, win3.first_bar) == (2, 2, 2), (win.first_bar, win2.first_bar)
+    assert window_frame(g, 0.0, np.array([0.1]), key=0)[2].first_bar == 0    # the pickup bar
     segs = [dict(g, span=(0.0, 10.0), name="a"), dict(g, span=(30.0, 50.0), name="b")]
     assert grid_for(segs, 5.0)["name"] == "a" and grid_for(segs, 41.0)["name"] == "b"
     assert grid_for(segs, 26.0)["name"] == "b" and grid_for([g], 99.0) is g   # the nearest; no span = everywhere
@@ -336,8 +362,10 @@ def test_window_frame():
 def test_scripts_end_to_end():
     """Build the alignment ground truth of two ASAP test performances and check it against their
     annotations; train a tiny meter model, tune its decoder and evaluate it (grids with keys and
-    spans, per-performance scores); a tiny labeller on its grids and on the true grid: the results
-    land as modes grid_meter_<run> / grid_true and both grids' predictions are kept."""
+    spans, per-performance scores); one without the note encoder (the default) stopped by its time
+    limit and resumed; the oracle grids; a tiny labeller (and one trained with GridNoise) on the
+    model's grids, the oracle's and the true grid: the results land as modes grid_meter_<run> /
+    grid_true and every grid's predictions are kept."""
     if not (D / "meter" / "train.pkl").exists() or not (D / "test" / "notelabels.npz").exists():
         print("  (skipped: data/processed/meter or test/notelabels.npz missing)")
         return
@@ -356,12 +384,19 @@ def test_scripts_end_to_end():
         assert all(len(p["notes"]) and not p["real_notes"] for p in al)
         res = check(al, test)
         assert res["beat_f"] > 0.5 and res["ts_agreement"] > 0.9, res
-        train_meter(["--name", "m", "--steps", "6", "--eval-every", "3", "--batch", "2", "--chunk", "64", "--d-model", "64",
-                     "--layers", "2", "--device", "cpu", "--normal-priority", "--runs-dir", str(tmp), "--warmup", "2",
-                     "--workers", "0"])
+        tiny = ["--steps", "6", "--eval-every", "3", "--batch", "2", "--chunk", "64", "--d-model", "64", "--layers", "2",
+                "--device", "cpu", "--normal-priority", "--runs-dir", str(tmp), "--warmup", "2", "--workers", "0"]
+        train_meter(["--name", "m", "--note-encoder"] + tiny)
         assert (tmp / "m" / "best.pt").exists() and json.loads((tmp / "m" / "status.json").read_text())["phase"] == "done"
         cfg = json.loads((tmp / "m" / "config.json").read_text())
         assert cfg["model"]["n_note_features"] == N_NOTE_FEATURES and cfg["data"]["train_by_source"]["asap"] > 0
+        train_meter(["--name", "m0", "--max-hours", "1e-9"] + tiny)  # the time limit: one step, then stop
+        st = json.loads((tmp / "m0" / "status.json").read_text())
+        assert st["phase"] == "train" and st["step"] == 1 and not (tmp / "m0" / "best.pt").exists(), st
+        train_meter(["--name", "m0", "--resume"] + tiny)
+        st = json.loads((tmp / "m0" / "status.json").read_text())
+        assert st["phase"] == "done" and st["step"] == 6 and (tmp / "m0" / "best.pt").exists(), st
+        assert json.loads((tmp / "m0" / "config.json").read_text())["model"]["n_note_features"] == 0
         eval_meter(["--run", "m", "--conditions", "clean", "--device", "cpu", "--runs-dir", str(tmp), "--tune",
                     "--tune-max", "2"])
         dec = json.loads((tmp / "m" / "decode.json").read_text())
@@ -374,18 +409,39 @@ def test_scripts_end_to_end():
         assert {"default", "piece_mean", "ts_confusion", "decode"} <= set(res) and res["pieces"] <= res["performances"]
         per = json.loads((tmp / "m" / "meter_scores_clean.json").read_text())
         assert len(per) == res["performances"] and "true_ts" in per[0]
+        eval_meter(["--run", "oracle", "--oracle", "--conditions", "clean", "--device", "cpu", "--runs-dir", str(tmp)])
+        orc = json.loads((tmp / "oracle" / "eval_meter.json").read_text())["clean"]
+        assert json.loads((tmp / "oracle" / "config.json").read_text())["arch"] == "meter_oracle"
+        assert orc["tracker_beat_f"] == res["tracker_beat_f"]  # the same tracked beats as the model's
+        assert orc["grid_ts_acc"] > 0.9 and orc["grid_downbeat_f"] > max(res["grid_downbeat_f"], 0.7), orc
+        try:
+            eval_meter(["--run", "oracle", "--oracle", "--tune", "--runs-dir", str(tmp)])
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("--oracle --tune should refuse: no model to tune for")
         train_labeller(["--name", "nl", "--size", "small", "--max-steps", "2", "--eval-every", "2",
                         "--eval-loss-windows", "4", "--eval-decode-windows", "2", "--workers", "0", "--device", "cpu",
                         "--batch-notes", "2048", "--warmup", "1", "--normal-priority", "--runs-dir", str(tmp)])
         eval_labeller(["--run", "nl", "--grid", "meter:m", "--conditions", "clean,real", "--limit-perfs", "1",
+                       "--device", "cpu", "--normal-priority", "--runs-dir", str(tmp)])
+        eval_labeller(["--run", "nl", "--grid", "meter:oracle", "--conditions", "clean", "--limit-perfs", "1",
                        "--device", "cpu", "--normal-priority", "--runs-dir", str(tmp)])
         eval_labeller(["--run", "nl", "--grid", "true", "--conditions", "clean", "--limit-perfs", "1",
                        "--device", "cpu", "--normal-priority", "--runs-dir", str(tmp)])
         out = json.loads((tmp / "nl" / "eval_pieces_best.json").read_text())
         r = out["clean"]["grid_meter_m"]
         assert 0 <= r["onset_f1"] <= 1 and 0 <= r["key_acc"] <= 1 and "real" not in out  # no real grids here
+        assert 0 <= out["clean"]["grid_meter_oracle"]["onset_scaled_f1"] <= 1
+        assert r["onset_scaled_f1"] >= r["onset_shift_f1"] >= r["onset_f1"] - 1e-12  # each forgives more
         modes = {json.loads(ln)["mode"] for ln in open(tmp / "nl" / "pred_pieces_best_clean.jsonl")}
-        assert modes == {"grid_meter_m", "grid_true"}, modes   # each grid's predictions kept
+        assert modes == {"grid_meter_m", "grid_meter_oracle", "grid_true"}, modes   # each grid's predictions kept
+        train_labeller(["--name", "gn", "--size", "small", "--max-steps", "2", "--eval-every", "2", "--grid-noise", "0.8",
+                        "--eval-loss-windows", "4", "--eval-decode-windows", "2", "--workers", "0", "--device", "cpu",
+                        "--batch-notes", "2048", "--warmup", "1", "--normal-priority", "--runs-dir", str(tmp)])
+        gcfg = json.loads((tmp / "gn" / "config.json").read_text())["data"]
+        assert gcfg["grid_noise"] == 0.8 and gcfg["beat_noise"] == "configs/beat_noise.json", gcfg
+        assert json.loads((tmp / "nl" / "config.json").read_text())["data"]["grid_noise"] == 0.0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -421,8 +477,8 @@ def test_meter_batch():
         prep = by["metprep"]
         assert "build_meter_data.py --workers 8 --check" in prep[1] and "tests.test_meter" in prep[1]
         meters = ["meter_v2", "meter_v2_s1", "meter_v2_nonote", "meter_v2_asap"]
-        want = {"meter_v2": "--name meter_v2  --workers", "meter_v2_s1": "--seed 1", "meter_v2_nonote": "--no-note-encoder",
-                "meter_v2_asap": "--no-periscope"}
+        want = {"meter_v2": "--name meter_v2 --note-encoder --workers", "meter_v2_s1": "--note-encoder --seed 1",
+                "meter_v2_nonote": "--no-note-encoder", "meter_v2_asap": "--note-encoder --no-periscope"}
         for m in meters:
             jid, cmd = by["met_" + m]
             assert f"--dependency=afterok:{prep[0]}" in cmd and f"train_meter.py --name {m}" in cmd and want[m] in cmd

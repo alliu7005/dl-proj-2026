@@ -1,12 +1,16 @@
 """End-to-end inference: piano recording (or performance MIDI) -> engraved score.
 
+    ScorePipeline (seq2seq):
     audio --Transkun V2--> performance MIDI --note windows--> score model (meter) --> tokens
           --> MusicXML + score MIDI
+    V2Pipeline (v2, at the end of this file):
+    audio --Transkun V2--> performance MIDI, --Beat This!--> beats --meter model--> the piece's grid
+          --note labeller, every window in its stretch of the grid--> one score --> MusicXML + MIDI
 
-Used by the demo (demo/app.py) and by scripts/audio_to_score.py. Windows are cut exactly like the
-test sets (128 notes, cut at the largest onset gap nearby, carried-over notes and pedal included)
-and decoded by src/decoding.py, the same code scripts/evaluate_pieces.py scores, with the same
-per-window output budget. Modes:
+Used by the demo (demo/app.py), scripts/system_scores.py and scripts/audio_to_score.py. Windows
+are cut exactly like the test sets (128 notes, cut at the largest onset gap nearby, carried-over
+notes and pedal included). ScorePipeline decodes them with src/decoding.py, the same code
+scripts/evaluate_pieces.py scores, with the same per-window output budget. Modes:
   meter    (default) guarded, plus consistent time signatures: a window whose time signature
            disagrees with a clear majority of its neighbours is decoded again with that one forced,
            and the piece re-decoded from there (decoding.decode_pieces_meter). The best mode in the
@@ -107,6 +111,30 @@ def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
     return out
 
 
+def engrave(tokens: list[str], out: Path, res: "Result") -> dict:
+    """Tokens -> ``out``/score.musicxml and score.mid (``res.files``; failures in ``res.errors``).
+    Returns how the MusicXML export went (src/preprocessing/detokenize.py tokens_to_musicxml: the
+    fallback that worked, the bars it had to empty)."""
+    from .preprocessing.detokenize import tokens_to_musicxml, tokens_to_score
+    report = {}
+    try:
+        res.files["musicxml"] = Path(tokens_to_musicxml(tokens, str(out / "score.musicxml"), report=report))
+        for clip in (False, True):  # clip notes to their bars if the plain export fails
+            try:
+                tokens_to_score(tokens, clip=clip).write("midi", fp=str(out / "score.mid"))
+                res.files["score_midi"] = out / "score.mid"
+                break
+            except Exception as e:  # noqa: BLE001
+                if clip:
+                    res.errors.append(f"score MIDI: {type(e).__name__}: {e}")
+    except Exception as e:  # noqa: BLE001
+        res.errors.append(f"MusicXML: {type(e).__name__}: {e}")
+    if report.get("emptied_bars"):
+        res.errors.append(f"MusicXML: {len(report['emptied_bars'])} bars could not be engraved and were left "
+                          f"empty: {report['emptied_bars'][:20]}")
+    return report
+
+
 @dataclass
 class Result:
     tokens: list[str]
@@ -115,7 +143,45 @@ class Result:
     errors: list = field(default_factory=list)
 
 
-class ScorePipeline:
+class _FrontEnd:
+    """Audio -> performance MIDI (Transkun) and beats (Beat This!), loaded on first use. Needs
+    ``self.device``."""
+    _transkun = None
+    _tracker = None
+
+    def transcribe(self, audio: Path, midi_out: Path) -> Path:
+        if self._transkun is None:
+            import sys
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from scripts.transcribe import Transcriber
+            self._transkun = Transcriber("cuda" if self.device.type == "cuda" else "cpu")
+        self._transkun(str(audio), str(midi_out))
+        return midi_out
+
+    def track_beats(self, audio: Path, checkpoint: str = "final0"):
+        """(times, down) from Beat This! (``checkpoint``: final0, or the cross-validation model
+        fold<k> that never heard a test piece), or None if it is not installed."""
+        if self._tracker is None:
+            import sys
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from scripts.track_beats import Tracker
+            try:
+                self._tracker = Tracker("cuda" if self.device.type == "cuda" else "cpu")
+            except ImportError:
+                self._tracker = False
+        return self._tracker(audio, checkpoint) if self._tracker else None
+
+    def track_midi_beats(self, notes: np.ndarray, checkpoint: str = "final0"):
+        """Beats of a MIDI input: Beat This! on the notes rendered to audio (src/synth.py), or None
+        without Beat This!."""
+        import tempfile
+        from .synth import render, write_wav
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = write_wav(Path(tmp) / "performance.wav", render(notes))
+            return self.track_beats(wav, checkpoint)
+
+
+class ScorePipeline(_FrontEnd):
     """Loads the score model (and, on first audio input, Transkun) once; ``run`` per file."""
 
     def __init__(self, ckpt: str | Path, vocab: str | Path | None = None, device: str = "auto",
@@ -157,27 +223,6 @@ class ScorePipeline:
         raise FileNotFoundError(f"{name} not found next to {ckpt} or in data/processed")
 
     # ------------------------------------------------------------------ steps
-    def transcribe(self, audio: Path, midi_out: Path) -> Path:
-        if self._transkun is None:
-            import sys
-            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-            from scripts.transcribe import Transcriber
-            self._transkun = Transcriber("cuda" if self.device.type == "cuda" else "cpu")
-        self._transkun(str(audio), str(midi_out))
-        return midi_out
-
-    def track_beats(self, audio: Path):
-        """(times, down) from Beat This!, or None if it is not installed."""
-        if self._tracker is None:
-            import sys
-            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-            from scripts.track_beats import Tracker
-            try:
-                self._tracker = Tracker("cuda" if self.device.type == "cuda" else "cpu")
-            except ImportError:
-                self._tracker = False
-        return self._tracker(audio) if self._tracker else None
-
     def features(self, w: dict) -> torch.Tensor:
         """Model input for a window: its notes, plus context notes and beat features if the model
         was trained with them (the same layout as src/dataset.py)."""
@@ -264,10 +309,12 @@ class ScorePipeline:
 
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, mode: str = MODES[0],
-            progress: Progress = _noop, guard_margin: float = GUARD_MARGIN, beats: tuple | None = None) -> Result:
+            progress: Progress = _noop, guard_margin: float = GUARD_MARGIN, beats: tuple | None = None,
+            midi_beats: bool = False) -> Result:
         """``beats``: (times, down) in the input's seconds, given instead of tracking them (e.g. the
         tracked beats of a transcription already made; scripts/system_scores.py). Only used by a
-        model trained with beats."""
+        model trained with beats. ``midi_beats``: a MIDI input without given beats gets Beat This!'s
+        beats of the notes rendered to audio (src/synth.py) instead of none."""
         src, out = Path(src), Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         timing, files = {}, {}
@@ -298,6 +345,14 @@ class ScorePipeline:
                 timing["beats_s"] = round(time.perf_counter() - t, 1)
                 beat_info = (f"Beat This!: {len(beats[0])} beats, {int(beats[1].sum())} downbeats" if beats is not None
                              else "none (Beat This! not installed: pip install beat-this rotary-embedding-torch einops)")
+            elif midi_beats:
+                progress("beats", 0.0, "tracking beats with Beat This! (MIDI rendered to audio)")
+                t = time.perf_counter()
+                beats = self.track_midi_beats(notes)
+                timing["beats_s"] = round(time.perf_counter() - t, 1)
+                beat_info = (f"Beat This! on the MIDI rendered to audio: {len(beats[0])} beats, "
+                             f"{int(beats[1].sum())} downbeats" if beats is not None
+                             else "none (Beat This! not installed: pip install beat-this rotary-embedding-torch einops)")
             else:
                 beat_info = "none (MIDI input)"
         windows = performance_windows(notes, pedal, self.window_notes,
@@ -312,24 +367,210 @@ class ScorePipeline:
 
         progress("engrave", 0.0, "writing MusicXML")
         res = Result(tokens, files)
-        try:
-            from .preprocessing.detokenize import tokens_to_musicxml, tokens_to_score
-            files["musicxml"] = Path(tokens_to_musicxml(tokens, str(out / "score.musicxml")))
-            for clip in (False, True):  # clip notes to their bars if the plain export fails
-                try:
-                    tokens_to_score(tokens, clip=clip).write("midi", fp=str(out / "score.mid"))
-                    files["score_midi"] = out / "score.mid"
-                    break
-                except Exception as e:  # noqa: BLE001
-                    if clip:
-                        res.errors.append(f"score MIDI: {type(e).__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            res.errors.append(f"MusicXML: {type(e).__name__}: {e}")
+        export = engrave(tokens, out, res)
 
         dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())
         res.stats = {**self.info, "mode": mode, "duration_s": round(dur, 1), "notes": int(len(notes)),
                      "pedal_presses": int(len(pedal)), "windows": len(windows), "beats": beat_info, **counts,
-                     "bars": tokens.count("bar"), "tokens": len(tokens), **timing}
+                     "bars": tokens.count("bar"), "tokens": len(tokens), "export": export, **timing}
+        (out / "result.json").write_text(json.dumps({"stats": res.stats, "errors": res.errors,
+                                                     "files": {k: str(v) for k, v in files.items()}}, indent=1))
+        return res
+
+
+# ---------------------------------------------------------------------------------------------
+# v2: the metrical grid of the whole piece first, then every note labelled against it
+# ---------------------------------------------------------------------------------------------
+
+class V2Pipeline(_FrontEnd):
+    """v2 (README "v2: grid first, then label every note"): the piece's beats (Beat This! on the
+    audio; a MIDI input rendered to audio first, src/synth.py), the meter model's grid of the whole
+    piece over them (src/meter.py: bars, time signatures; its tuned decoder, decode.json) and a key
+    signature from the notes, then the note labeller on every window cut as the test sets are,
+    each in its stretch of the grid (src/notelabels.py window_frame), and all the labelled notes
+    rendered as ONE score in the grid's bars: no window guesses where it starts, nothing is
+    stitched.
+
+        pipe = V2Pipeline("outputs/runs/nl_base/best.pt", "outputs/runs/meter_v3/best.pt")
+        res = pipe.run("recording.mp3", "outputs/demo/x")     # or a .mid
+    """
+
+    def __init__(self, labeller_ckpt: str | Path, meter_ckpt: str | Path, vocab: str | Path | None = None,
+                 device: str = "auto", window_notes: int = 128):
+        from .labeller import load_labeller
+        from .meter import DecodeConfig, build_meter_model
+        from .notelabels import LabelSpace
+        labeller_ckpt, meter_ckpt = Path(labeller_ckpt), Path(meter_ckpt)
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
+        self.amp = self.device.type == "cuda" and torch.cuda.is_bf16_supported()
+        self.labeller = load_labeller(labeller_ckpt, self.device)
+        self.cfg = self.labeller.cfg
+        ck = torch.load(meter_ckpt, map_location=self.device, weights_only=False)
+        self.meter = build_meter_model(ck["config"]).to(self.device).eval()
+        self.meter.load_state_dict(ck["model"])
+        dfile = meter_ckpt.parent / "decode.json"
+        self.decode_cfg = (DecodeConfig.from_dict(json.loads(dfile.read_text())["decode"]) if dfile.exists()
+                           else DecodeConfig())
+        vocab_path = ScorePipeline._find(vocab, labeller_ckpt, "vocab.json")
+        self.vocab = Vocab.load(str(vocab_path))
+        self.space = LabelSpace(self.vocab.itos)
+        if (self.space.n_sub, self.space.n_dur) != (self.cfg.n_sub, self.cfg.n_dur):
+            raise ValueError(f"{vocab_path} gives {self.space.n_sub} sub-positions / {self.space.n_dur} lengths but "
+                             f"the labeller has {self.cfg.n_sub} / {self.cfg.n_dur}: use the vocab.json of its data")
+        self.scale = (np.array([1, 2, 3, 4]), np.asarray(self.cfg.feat_mean, np.float32),
+                      np.asarray(self.cfg.feat_std, np.float32))
+        self.window_notes = window_notes
+        n_lab = sum(p.numel() for p in self.labeller.parameters())
+        n_met = sum(p.numel() for p in self.meter.parameters())
+        self.info = {"system": "v2", "labeller": str(labeller_ckpt), "meter": str(meter_ckpt),
+                     "params_M": round((n_lab + n_met) / 1e6, 1), "device": str(self.device),
+                     "decode": self.decode_cfg.to_dict()}
+
+    # ------------------------------------------------------------------ steps
+    def grid(self, notes: np.ndarray, beats: tuple) -> dict:
+        """The meter model's grid of the whole performance on these beats, with its key signature."""
+        from .meter import predict_grid
+        from .notelabels import estimate_key
+        g = predict_grid(self.meter, notes, np.asarray(beats[0], np.float64), np.asarray(beats[1], bool),
+                         self.device, self.decode_cfg)
+        g["key"] = estimate_key(notes)
+        return g
+
+    def items(self, windows: list[dict], grid: dict) -> tuple[list[dict], list]:
+        """The labeller's input for every window (the layout of src/dataset.py with notelabels and
+        context notes: note features, standardised, then where the grid puts each note), and each
+        window's frame in the grid."""
+        from .dataset import assembly
+        from .notelabels import grid_features, window_frame
+        items, frames = [], []
+        cols, mean, std = self.scale
+        for w in windows:
+            notes, roles, _ = assembly(w["notes"], w["before"], w["after"])
+            f = note_features(notes, w["pedal"], roles)
+            f[:, cols] = (f[:, cols] - mean) / std
+            g_t, g_q, win = window_frame(grid, w["t0"], w["notes"][:, 1], int(grid.get("key", 0)))
+            gf, bar_est, pos_est = grid_features(notes[:, 1], g_t, g_q, win)
+            f = np.concatenate([f, gf], axis=1)[: self.cfg.max_notes]
+            n = len(f)
+            items.append({"notes": torch.from_numpy(f.astype(np.float32)), "roles": torch.from_numpy(roles[:n]),
+                          "target": torch.zeros(1, dtype=torch.long), "prompt_len": 0,
+                          "bar_est": torch.from_numpy(bar_est[:n].astype(np.int64)),
+                          "pos_est": torch.from_numpy(pos_est[:n].astype(np.float32))})
+            frames.append(win)
+        return items, frames
+
+    def label(self, notes: np.ndarray, pedal: np.ndarray, grid: dict,
+              progress: Progress = _noop) -> tuple[list[str], dict]:
+        """Every note labelled in its window, all rendered in the grid's bars as one score."""
+        import sys
+        from fractions import Fraction
+        from .labeller import predict_placed
+        from .notelabels import Window, grid_position, render
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from scripts.train import TruncatingCollate
+        windows = performance_windows(notes, pedal, self.window_notes, context_before=int(self.cfg.context_before),
+                                      context_after=int(self.cfg.context_after))
+        progress("score", 0.0, f"labelling {len(windows)} windows")
+        items, frames = self.items(windows, grid)
+        coll = TruncatingCollate(self.cfg.max_notes, 10 ** 9)
+        placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False)
+        notes_out = []
+        for win, pl in zip(frames, placed):
+            for p in pl:
+                p.bar += win.first_bar
+                notes_out.append(p)
+        key = int(grid.get("key", 0))
+        bars = [(ts, key) for ts in grid["bars"]] or [("4/4", key)]
+        opens = True
+        if len(grid["t"]) >= 2:
+            # a pickup: the first bar is written from the first note on
+            q0, q1 = grid_position(np.array([float(notes[:, ONSET].min()), float(notes[:, OFFSET].max())]),
+                                   grid["t"], grid["q"])[0]
+            opens = float(q0) < 1 / 24
+            # the score ends with the bar the last note ends in (beats past the music add no bars)
+            last = int(np.searchsorted(np.asarray(grid["bar_q"], np.float64), q1 - 1e-6, side="right")) - 1
+            last = max([last] + [p.bar for p in notes_out])
+            bars = bars[: max(last, 0) + 1]
+        piece = Window(bars=bars, opens_with_bar=opens, start_pos=Fraction(0) if opens else None)
+        tokens = render(piece, notes_out)
+        own = int(sum(int((it["roles"] == 0).sum()) for it in items))
+        return tokens, {"windows": len(windows), "notes_kept": len(notes_out), "notes_deleted": own - len(notes_out),
+                        "bar_ts": [ts for ts, _ in bars]}
+
+    # ------------------------------------------------------------------ all of it
+    def run(self, src: str | Path, out_dir: str | Path, progress: Progress = _noop, beats: tuple | None = None,
+            beat_checkpoint: str = "final0", **_) -> Result:
+        """``beats``: (times, down) in the input's seconds, given instead of tracking them.
+        ``beat_checkpoint``: the Beat This! model that tracks them (scripts/system_scores.py gives
+        each ASAP test piece the cross-validation model that never heard it)."""
+        from collections import Counter
+        src, out = Path(src), Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        timing, files = {}, {}
+        t = time.perf_counter()
+        ext = src.suffix.lower()
+        if ext in MIDI_EXT:
+            midi = src
+        elif ext in AUDIO_EXT:
+            progress("transcribe", 0.0, "transcribing audio with Transkun")
+            midi = self.transcribe(src, out / "transcription.mid")
+            timing["transcribe_s"] = round(time.perf_counter() - t, 1)
+        else:
+            raise ValueError(f"unsupported file type {ext!r} (audio: {sorted(AUDIO_EXT)}, or .mid)")
+        files["transcription_midi"] = midi
+        notes, pedal = load_performance(midi)
+        if len(notes) == 0:
+            raise ValueError("no notes found (silent recording, or not a piano?)")
+        t = time.perf_counter()
+        if beats is not None:
+            beats = (np.asarray(beats[0], np.float64), np.asarray(beats[1], bool))
+            beat_info = f"given: {len(beats[0])} beats, {int(beats[1].sum())} downbeats"
+        else:
+            if ext in AUDIO_EXT:
+                progress("beats", 0.0, "tracking beats with Beat This!")
+                beats = self.track_beats(src, beat_checkpoint)
+                beat_info = "Beat This!"
+            else:
+                progress("beats", 0.0, "tracking beats with Beat This! (MIDI rendered to audio)")
+                beats = self.track_midi_beats(notes, beat_checkpoint)
+                beat_info = "Beat This! on the MIDI rendered to audio"
+            if beats is not None:
+                beat_info += f" ({beat_checkpoint}): {len(beats[0])} beats, {int(beats[1].sum())} downbeats"
+        timing["beats_s"] = round(time.perf_counter() - t, 1)
+        res = Result([], files)
+        if beats is not None:  # only the beats of the music (a recording can hold more than this piece)
+            span = (beats[0] >= float(notes[:, ONSET].min()) - 1.0) & (beats[0] <= float(notes[:, OFFSET].max()) + 1.0)
+            beats = (beats[0][span], beats[1][span])
+        if beats is None or len(beats[0]) < 2:
+            res.errors.append("v2 needs the beats: " + ("Beat This! is not installed (pip install beat-this "
+                                                        "rotary-embedding-torch einops)" if beats is None
+                                                        else "fewer than 2 found"))
+            res.stats = {**self.info, "beats": "none", "notes": int(len(notes)), "pedal_presses": int(len(pedal)),
+                         "duration_s": round(float(notes[:, OFFSET].max() - notes[:, ONSET].min()), 1), **timing}
+            return res
+        progress("grid", 0.0, "the metrical grid of the piece")
+        t = time.perf_counter()
+        grid = self.grid(notes, beats)
+        timing["grid_s"] = round(time.perf_counter() - t, 1)
+        t = time.perf_counter()
+        tokens, counts = self.label(notes, pedal, grid, progress)
+        timing["score_s"] = round(time.perf_counter() - t, 1)
+        res.tokens = tokens
+        (out / "tokens.txt").write_text(" ".join(tokens))
+        files["tokens"] = out / "tokens.txt"
+        progress("engrave", 0.0, "writing MusicXML")
+        export = engrave(tokens, out, res)
+        written = counts.pop("bar_ts")  # the score's bars (the grid's, up to the bar the music ends in)
+        ts = Counter(written)
+        dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())
+        res.stats = {**self.info, "duration_s": round(dur, 1), "notes": int(len(notes)),
+                     "pedal_presses": int(len(pedal)), "beats": beat_info, "bars": len(written),
+                     "grid_bars": len(grid["bars"]),
+                     "time_signature": ts.most_common(1)[0][0] if ts else None,
+                     "time_signatures": dict(ts.most_common()), "key_signature": int(grid.get("key", 0)),
+                     **counts, "tokens": len(tokens), "export": export, **timing}
         (out / "result.json").write_text(json.dumps({"stats": res.stats, "errors": res.errors,
                                                      "files": {k: str(v) for k, v in files.items()}}, indent=1))
         return res

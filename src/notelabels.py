@@ -55,10 +55,12 @@ class ScoreNote:
 @dataclass
 class Window:
     """The score frame of a window's tokens: per bar its time / key signature, whether the first
-    bar starts at a bar line, and the position the first bar starts at."""
+    bar starts at a bar line, and the position the first bar starts at (and, for a frame cut from a
+    piece's estimated grid, which of the piece's bars it starts with)."""
     bars: list = field(default_factory=list)   # [(ts, key)]
     opens_with_bar: bool = True
     start_pos: Fraction | None = Fraction(0)   # None: the renderer takes the first note's position
+    first_bar: int = 0                         # window_frame: the grid's bar index of bars[0]
 
 
 def score_notes(tokens: list[str]) -> tuple[list[ScoreNote], Window]:
@@ -396,6 +398,86 @@ def grid_features(onsets: np.ndarray, grid_t: np.ndarray, grid_q: np.ndarray, wi
     return feats, bar, pos
 
 
+EXTRA_SNAP = (1 / 4, 1 / 3, 1 / 2, 2 / 3, 3 / 4)  # where in its beat a spurious beat's q is put
+
+
+class GridNoise:
+    """The beat tracker's timing on a window's TRUE grid, for training the labeller (``p`` of the
+    windows): the grid the real system gives it is anchored on tracked beats, not on the beats as
+    the notes were played (the true grid, timed through the note alignment). Same bars, same
+    positions, so the labels stay valid; only the grid's anchors move: the fitted Beat This! errors
+    of src/beats.py BeatNoise (``configs/beat_noise.json``), one performance profile per window:
+      tempo octave   p_double: k - 1 more anchors evenly into every beat (their q exact, as the meter
+                     model's 1/k steps give them); p_half: every k-th anchor only
+      miss           anchors dropped (the grid interpolates across them)
+      extra          spurious anchors between two beats at the fitted phases, their q snapped to the
+                     nearest EXTRA_SNAP of the beat (the meter model's step): off by the tracker's
+                     phase error, so the grid bends locally
+      offset/jitter  every anchor's time moved by offset + N(0, jitter)
+    The bar and time-signature errors of a meter model are not simulated (the labels would no
+    longer hold): those are measured by the meter grids themselves."""
+
+    def __init__(self, beat_noise, p: float = 0.8):
+        self.bn, self.p = beat_noise, float(p)
+
+    @classmethod
+    def from_json(cls, path, p: float = 0.8) -> "GridNoise":
+        from .beats import BeatNoise
+        return cls(BeatNoise.from_json(path), p)
+
+    def __call__(self, t: np.ndarray, q: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+        t, q = np.asarray(t, np.float64).copy(), np.asarray(q, np.float64).copy()
+        if len(t) < 3 or self.p <= 0 or rng.random() >= self.p:
+            return t, q
+        order = np.argsort(t, kind="stable")
+        t, q = t[order], q[order]
+        bn = self.bn
+        r = bn.rates(rng)
+        u = rng.random()
+        if u < bn.p_double:
+            k = bn._factor(bn.double_k, rng)
+            frac = np.arange(1, k) / k
+            t = np.concatenate([t, (t[:-1, None] + frac * np.diff(t)[:, None]).ravel()])
+            q = np.concatenate([q, (q[:-1, None] + frac * np.diff(q)[:, None]).ravel()])
+        elif u < bn.p_double + bn.p_half:
+            k = bn._factor(bn.half_k, rng)
+            keep = (np.arange(len(t)) - int(rng.integers(k))) % k == 0
+            if keep.sum() >= 2:
+                t, q = t[keep], q[keep]
+        order = np.argsort(t, kind="stable")
+        t, q = t[order], q[order]
+        if r["miss"] > 0 and len(t) > 2:
+            keep = rng.random(len(t)) >= r["miss"]
+            keep[[0, -1]] = True  # the window stays covered
+            t, q = t[keep], q[keep]
+        if r["extra"] > 0 and len(t) >= 2:
+            e = min(r["extra"], 0.9)
+            n = int(rng.binomial(len(t), e / (1 - e)))
+            if n:
+                j = rng.integers(len(t) - 1, size=n)
+                if bn.extra_phase:
+                    pp = np.asarray(bn.extra_phase, np.float64)
+                    b = rng.choice(len(pp), size=n, p=pp / pp.sum())
+                    phase = (b + rng.random(n)) / len(pp)
+                else:
+                    phase = rng.random(n)
+                snap = np.asarray(EXTRA_SNAP)[np.abs(phase[:, None] - np.asarray(EXTRA_SNAP)[None]).argmin(1)]
+                t = np.concatenate([t, t[j] + phase * (t[j + 1] - t[j])])
+                q = np.concatenate([q, q[j] + snap * (q[j + 1] - q[j])])
+        t = t + r["offset"] + (rng.normal(0, r["jitter"], len(t)) if r["jitter"] > 0 else 0.0)
+        order = np.lexsort((q, t))
+        t, q = t[order], q[order]
+        # a grid's anchors increase in time and position: drop any the jitter put out of order
+        keep = np.ones(len(t), bool)
+        last_t, last_q = t[0], q[0]
+        for i in range(1, len(t)):
+            if t[i] - last_t > 0.03 and q[i] > last_q + 1e-9:
+                last_t, last_q = t[i], q[i]
+            else:
+                keep[i] = False
+        return t[keep], q[keep]
+
+
 # ---------------------------------------------------------------------------------------------
 # training targets of one item (src/dataset.py, notelabels=True)
 # ---------------------------------------------------------------------------------------------
@@ -491,5 +573,5 @@ def window_frame(grid: dict, perf_t0: float, onsets: np.ndarray, key: int):
     b0 = max(0, int(np.searchsorted(bq, qf + 1e-6, side="right")) - 1)
     b1 = max(b0, int(np.searchsorted(bq, ql + 1e-6, side="right")) - 1)
     bars = [(ts, key) for ts in grid["bars"][b0:b1 + 1]] or [(grid["bars"][-1], key)]
-    win = Window(bars=bars, opens_with_bar=(qf - bq[b0]) < 1 / 24, start_pos=None)
+    win = Window(bars=bars, opens_with_bar=(qf - bq[b0]) < 1 / 24, start_pos=None, first_bar=b0)
     return t, q - bq[b0], win

@@ -638,6 +638,26 @@ def predict_logp(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarra
         return {k: torch.log_softmax(v[0].float(), -1).cpu().numpy() for k, v in out.items()}
 
 
+def oracle_logp(beat_t: np.ndarray, gt: dict, eps: float = 1e-4) -> dict | None:
+    """The log-probabilities of a perfect meter model on these (tracked) beats: each head certain
+    of its training target (``targets``), uniform where the target is unknown (a beat whose
+    length is no Q_STEPS value, or outside the annotated span). Decoded like a model's, it gives
+    the best grid the tracked beats allow: what a meter model could reach at most (None with
+    fewer than 2 beats)."""
+    beat_t = np.asarray(beat_t, np.float64)
+    if len(beat_t) < 2:
+        return None
+    tg = targets(beat_t, gt)
+
+    def onehot(y, n):
+        lp = np.full((len(y), n), math.log(eps))
+        lp[y >= 0, y[y >= 0]] = 0.0
+        lp[y < 0] = math.log(1.0 / n)
+        return lp
+    return {"bar": onehot(tg["bar"], 2), "step": onehot(tg["step"], len(Q_STEPS)),
+            "ts": onehot(tg["ts"], len(TS_CLASSES))}
+
+
 def grid_from_logp(beat_t: np.ndarray, lp: dict | None, cfg: DecodeConfig = DecodeConfig()) -> dict:
     """``predict_logp``'s output decoded into a grid (a single bar without it)."""
     if lp is None:

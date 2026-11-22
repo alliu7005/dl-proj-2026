@@ -171,13 +171,13 @@ def load_labeller(path, device) -> NoteLabeller:
 
 
 @torch.no_grad()
-def predict_windows(model, items: list[dict], windows: list, coll, device, amp: bool, space,
-                    batch_size: int = 32) -> list[list[str]]:
-    """Label dataset items (ScoreSegmentDataset(notelabels=True)) and render each as tokens in the
-    frame ``windows[k]`` (src/notelabels.py Window: its bars' time / key signatures; Phase 1 gives
-    the target's own). Returns one token list per item, in order."""
-    from .dataset import ROLE_CARRIED
-    from .notelabels import render
+def predict_placed(model, items: list[dict], coll, device, amp: bool, space, batch_size: int = 32,
+                   carried: bool = True) -> list[list[Placed]]:
+    """Label dataset items (ScoreSegmentDataset(notelabels=True), or src/pipeline.py V2Pipeline's
+    windows): the notes each keeps, placed in its window's bars. ``carried``: also the notes carried
+    over from the window before (a window's target writes their continuation; a whole piece
+    places each note once, in its own window)."""
+    from .dataset import ROLE_CARRIED, ROLE_WINDOW
     model.eval()
     res = [None] * len(items)
     order = sorted(range(len(items)), key=lambda k: len(items[k]["notes"]))
@@ -189,7 +189,16 @@ def predict_windows(model, items: list[dict], windows: list, coll, device, amp: 
         out = {k: v.float() for k, v in out.items()}
         for r, i in enumerate(idx):
             it = items[i]
-            own = (it["roles"] <= ROLE_CARRIED).numpy()
-            placed = placed_notes(out, r, it["notes"][:, 0].numpy(), it["bar_est"].numpy(), own, space)
-            res[i] = render(windows[i], placed)
+            own = (it["roles"] <= (ROLE_CARRIED if carried else ROLE_WINDOW)).numpy()
+            res[i] = placed_notes(out, r, it["notes"][:, 0].numpy(), it["bar_est"].numpy(), own, space)
     return res
+
+
+def predict_windows(model, items: list[dict], windows: list, coll, device, amp: bool, space,
+                    batch_size: int = 32) -> list[list[str]]:
+    """Label dataset items (ScoreSegmentDataset(notelabels=True)) and render each as tokens in the
+    frame ``windows[k]`` (src/notelabels.py Window: its bars' time / key signatures; Phase 1 gives
+    the target's own). Returns one token list per item, in order."""
+    from .notelabels import render
+    placed = predict_placed(model, items, coll, device, amp, space, batch_size)
+    return [render(w, pl) for w, pl in zip(windows, placed)]
