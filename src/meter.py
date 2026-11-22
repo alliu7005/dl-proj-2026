@@ -11,22 +11,28 @@ TRACKED beats and predicts, for each:
            or tripled tempo, a missed or an extra beat
   ts       the time signature of its bar (TS_CLASSES)
 from per-beat features of the notes around it (``beat_features``: where notes fall inside the
-beat, how loud / low / long the notes on the beat are, the change of harmony across it, the
-tracker's own downbeat flag, the beat's length). A transformer over the piece's beat sequence
-makes the predictions; ``decode`` then picks the most probable CONSISTENT grid (a Viterbi search
+beat, how loud / low / long the notes on the beat are, the harmony and its change across it, the
+tracker's own downbeat flag, the beat's length) and, with a note encoder (``note_inputs``), a
+learned summary of every note in the beat: each note's place in the beat, length, loudness,
+pitch and chord are embedded and pooled per beat (mean and max), so the cues the hand-made
+features miss are learned. A transformer over the piece's beat sequence makes the predictions; ``decode`` then picks the most probable CONSISTENT grid (a Viterbi search
 over time signature x position in the bar: bars add up to their time signature, which changes only
 at a bar line), and ``grid_from_states`` turns it into (beat time, quarters from the first bar line)
 anchors plus the bars' time signatures.
 
 Training targets (``targets``) come from ASAP's annotations (``annotation_grid``): the annotated
 beats with their quarter-note positions (beat_layout of each bar's time signature) and downbeats,
-mapped onto the tracked beats by time.
+mapped onto the tracked beats by time. PERiScoPe has no beat annotations but every window is
+aligned to its score: ``aligned_grids`` turns the score's beats timed through those alignments
+(src/beats.py window_grid, merge_performance_bars) into the same ground truth, and
+``stitch_notes`` joins the windows' notes back into the performance (6x the works ASAP has).
 """
 from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
 from fractions import Fraction
+from functools import lru_cache
 
 import numpy as np
 
@@ -109,13 +115,72 @@ def targets(beat_t: np.ndarray, gt: dict) -> dict:
     return {"bar": bar.astype(np.int64), "step": step.astype(np.int64), "ts": ts.astype(np.int64)}
 
 
+def aligned_grids(times, bars, beats, ts_names, min_beats: int = 16) -> list[dict]:
+    """Ground truth from a score alignment instead of annotations (PERiScoPe): the merged beats of
+    a performance's windows (src/beats.py merge_performance_bars: time, global bar, beat in the
+    bar, the bar's time signature) -> ``annotation_grid``-style dicts, one per run of consecutive
+    bars (a bar no window timed, e.g. a dropped window, splits the performance: what lies in it is
+    unknown) with at least ``min_beats`` beats. Quarter positions come from the bars' lengths, so a
+    beat missing inside a bar does not shift the ones after it; q = 0 at the run's first bar line.
+    Key signature: 0 (unused)."""
+    times, bars, beats = (np.asarray(x) for x in (times, bars, beats))
+    out = []
+    if not len(times):
+        return out
+    cut = np.nonzero(np.diff(bars) > 1)[0] + 1
+    for seg in np.split(np.arange(len(times)), cut):
+        if len(seg) < min_beats:
+            continue
+        b0, b1 = int(bars[seg[0]]), int(bars[seg[-1]])
+        bar_ts = {}
+        for i in seg:
+            bar_ts.setdefault(int(bars[i]), ts_names[i])
+        start, q_of_bar = 0.0, {}
+        for b in range(b0, b1 + 1):
+            q_of_bar[b] = start
+            tsb = bar_ts.setdefault(b, bar_ts.get(b - 1, "4/4"))
+            try:
+                start += float(bar_quarters(tsb))
+            except (ValueError, ZeroDivisionError):
+                start += 4.0
+        names = [bar_ts[int(bars[i])] for i in seg]
+        q = np.array([q_of_bar[int(bars[i])] + int(beats[i]) * beat_layout(n)[1] for i, n in zip(seg, names)])
+        out.append({"t": np.asarray(times[seg], np.float64), "q": q, "down": np.asarray(beats[seg] == 0),
+                    "ts": np.array([TS_CLASSES.index(n) if n in TS_CLASSES else IGNORE for n in names]),
+                    "key": np.zeros(len(seg), np.int64), "ts_names": names})
+    return out
+
+
+def stitch_notes(windows, dedupe_s: float = 0.002) -> np.ndarray:
+    """A performance's notes from its windows: ``windows`` = [(perf_t0, notes [n, 4] as stored:
+    pitch, onset from the window start, duration, velocity)] -> [N, 4] pitch, onset, offset,
+    velocity (load_performance's columns) on the performance's timeline. Notes carried over from
+    before a window (onset < 0) are the previous window's; a note in two overlapping windows is
+    kept once (same pitch within ``dedupe_s``)."""
+    parts = []
+    for t0, n in windows:
+        n = np.asarray(n, np.float64)
+        n = n[n[:, 1] >= 0]
+        if len(n):
+            on = n[:, 1] + float(t0)
+            parts.append(np.stack([n[:, 0], on, on + n[:, 2], n[:, 3]], axis=1))
+    if not parts:
+        return np.zeros((0, 4), np.float32)
+    a = np.concatenate(parts)
+    a = a[np.lexsort((a[:, 1], a[:, 0]))]
+    keep = np.ones(len(a), bool)
+    keep[1:] = ~((a[1:, 0] == a[:-1, 0]) & (a[1:, 1] - a[:-1, 1] < dedupe_s))
+    a = a[keep]
+    return a[np.argsort(a[:, 1], kind="stable")].astype(np.float32)
+
+
 # ---------------------------------------------------------------------------------------------
 # per-beat features from the notes
 # ---------------------------------------------------------------------------------------------
 
 N_PHASE_BINS = 12
 AT_BEAT = 0.05      # seconds: a note "on" the beat
-N_BEAT_FEATURES = 5 + N_PHASE_BINS + 8 + 2
+N_BEAT_FEATURES = 27 + 12   # the first 27 (26 used) are the first meter model's, then the pitch classes
 
 
 def beat_features(notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray) -> np.ndarray:
@@ -127,7 +192,8 @@ def beat_features(notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray) -> 
       the notes on the beat: how many (log), loudest velocity, velocity vs the beat's mean, lowest
         pitch, any below middle-C's octave (bass), their longest duration (log2 s)
       change of harmony across the beat (1 - cosine of the pitch-class profiles of the beat and
-        the previous one), lowest pitch of the beat's notes"""
+        the previous one), lowest pitch of the beat's notes
+      the beat's pitch-class profile (12, weighted by duration up to 2 s, summing to 1)"""
     k = len(beat_t)
     f = np.zeros((k, N_BEAT_FEATURES), np.float32)
     if k == 0:
@@ -166,8 +232,73 @@ def beat_features(notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray) -> 
         na, nb = np.linalg.norm(chroma), np.linalg.norm(prev_chroma)
         f[j, c + 7] = 1.0 - (chroma @ prev_chroma) / (na * nb) if na > 0 and nb > 0 else 0.0
         f[j, c + 8] = pitch[lo:hi].min() / 128.0 if hi > lo else 0.0
+        if hi > lo:
+            w = np.bincount(pitch[lo:hi] % 12, weights=np.minimum(dur[lo:hi], 2.0), minlength=12)
+            f[j, 27:39] = w / max(w.sum(), 1e-9)  # (index 26 is unused: always 0, as before)
         prev_chroma = chroma
     return f
+
+
+N_NOTE_FEATURES = 20
+CHORD_S = 0.03          # onsets this close form one chord
+MAX_NOTES_PER_BEAT = 32
+
+
+def note_inputs(notes: np.ndarray, beat_t: np.ndarray):
+    """Every note's input to the note encoder, in the frame of the tracked beat it starts in (from
+    AT_BEAT before the beat to AT_BEAT before the next one, as ``beat_features``): returns
+    (features float32 [M, N_NOTE_FEATURES], pitch int64 [M], beat index int64 [M]) for the M notes
+    inside the beats (at most MAX_NOTES_PER_BEAT per beat on average). Features: its phase in the
+    beat and sin / cos of it at 1, 2, 3, 4, 6 and 12 cycles per beat (where the subdivisions fall),
+    its length in beats (log2), velocity and velocity relative to the beat's mean, lowest / highest
+    of its chord, the chord's size, its pitch above the beat's lowest note."""
+    k = len(beat_t)
+    empty = (np.zeros((0, N_NOTE_FEATURES), np.float32), np.zeros(0, np.int64), np.zeros(0, np.int64))
+    if k == 0 or not len(notes):
+        return empty
+    t = np.asarray(beat_t, np.float64)
+    ln = np.diff(t)
+    ln = np.concatenate([ln, ln[-1:]]) if k > 1 else np.array([0.5])
+    ln = np.clip(ln, 0.05, 5.0)
+    on = notes[:, 1].astype(np.float64)
+    order = np.argsort(on, kind="stable")
+    on, pitch = on[order], notes[order, 0].astype(np.int64)
+    dur = np.clip(notes[order, 2] - notes[order, 1], 0.01, 20.0).astype(np.float64)
+    vel = notes[order, 3].astype(np.float64)
+    j = np.searchsorted(t, on + AT_BEAT, side="right") - 1
+    inside = (j >= 0) & (on < t[-1] + ln[-1] - AT_BEAT)
+    if not inside.any():
+        return empty
+    on, pitch, dur, vel, j = on[inside], pitch[inside], dur[inside], vel[inside], j[inside]
+    cap = MAX_NOTES_PER_BEAT * k
+    if len(on) > cap:  # an absurdly dense input: keep an even sample
+        pick = np.linspace(0, len(on) - 1, cap).round().astype(int)
+        on, pitch, dur, vel, j = on[pick], pitch[pick], dur[pick], vel[pick], j[pick]
+    m = len(on)
+    ph = np.clip((on - t[j]) / ln[j], -0.25, 1.0)
+    f = np.zeros((m, N_NOTE_FEATURES), np.float32)
+    f[:, 0] = ph
+    for c, cyc in enumerate((1, 2, 3, 4, 6, 12)):
+        f[:, 1 + 2 * c] = np.sin(2 * np.pi * cyc * ph)
+        f[:, 2 + 2 * c] = np.cos(2 * np.pi * cyc * ph)
+    f[:, 13] = np.clip(np.log2(dur / ln[j]), -6, 4) / 4.0
+    f[:, 14] = vel / 127.0
+    cnt = np.bincount(j, minlength=k)
+    mean_v = np.bincount(j, weights=vel, minlength=k) / np.maximum(cnt, 1)
+    f[:, 15] = (vel - mean_v[j]) / 32.0
+    chord = np.concatenate([[0], np.cumsum(np.diff(on) > CHORD_S)])
+    lo_p = np.full(chord[-1] + 1, 999)
+    hi_p = np.full(chord[-1] + 1, -1)
+    np.minimum.at(lo_p, chord, pitch)
+    np.maximum.at(hi_p, chord, pitch)
+    size = np.bincount(chord)
+    f[:, 16] = pitch == lo_p[chord]
+    f[:, 17] = pitch == hi_p[chord]
+    f[:, 18] = np.log1p(size[chord]) / 2.0
+    low = np.full(k, 999)
+    np.minimum.at(low, j, pitch)
+    f[:, 19] = (pitch - low[j]) / 24.0
+    return f, np.clip(pitch, 0, 127), j.astype(np.int64)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -179,9 +310,14 @@ class DecodeConfig:
     ts_change: float = math.log(1e-3)     # log-prob of a new time signature at a bar line
     mid_step_bar: float = math.log(1e-2)  # log-prob of a bar line falling between two tracked beats
     ts_weight: float = 1.0                # weight of the time-signature head's log-probs
+    bar_weight: float = 1.0               # weight of the bar head's log-probs
 
     def to_dict(self):
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict | None):
+        return cls(**{k: float(v) for k, v in (d or {}).items() if k in cls.__dataclass_fields__})
 
 
 def _states(ts_idx: tuple[int, ...]):
@@ -191,46 +327,64 @@ def _states(ts_idx: tuple[int, ...]):
     return states, dict(zip(ts_idx, lens))
 
 
+@lru_cache(maxsize=8)
+def _machine(ts_idx: tuple[int, ...]):
+    """The decoder's transitions for a set of time signatures: the states, and for every state the
+    moves into it (source state, step, passes the bar line?), padded with source n (a dummy state
+    scored -inf). A state's moves are listed by descending (source, step), so ``argmax`` breaks
+    ties as the first decoder did (the last of equal candidates)."""
+    states, lens = _states(ts_idx)
+    n = len(states)
+    index = {s: i for i, s in enumerate(states)}
+    steps = [int(s * GRID) for s in Q_STEPS]
+    inc = [[] for _ in range(n)]
+    for i, (c, p) in enumerate(states):
+        for j, s in enumerate(steps):
+            q = p + s
+            over = False
+            if q >= lens[c]:
+                over = q > lens[c]
+                q = (q - lens[c]) % lens[c]
+            inc[index[(c, q)]].append((i, j, over))
+    m = max(len(x) for x in inc)
+    src = np.full((n, m), n, np.int64)
+    stp = np.zeros((n, m), np.int64)
+    mid = np.zeros((n, m), bool)
+    for t, lst in enumerate(inc):
+        for r, (i, j, over) in enumerate(reversed(lst)):
+            src[t, r], stp[t, r], mid[t, r] = i, j, over
+    st_c = np.array([c for c, _ in states])
+    st_p = np.array([p for _, p in states])
+    return states, src, stp, mid, st_c, st_p == 0
+
+
 def decode(logp_bar: np.ndarray, logp_step: np.ndarray, logp_ts: np.ndarray, cfg: DecodeConfig = DecodeConfig(),
            ts_idx: tuple[int, ...] | None = None) -> list[tuple[int, int]]:
     """Most probable consistent (time signature, position in the bar) per tracked beat.
     logp_bar [K, 2] (no / yes), logp_step [K, len(Q_STEPS)], logp_ts [K, len(TS_CLASSES)].
     Beat k+1's position = beat k's + its step; reaching the bar length exactly starts a bar on beat
     k+1 (where the time signature may change), passing it puts the bar line between the two
-    (penalised: a tracker that missed the downbeat's beat)."""
-    ts_idx = tuple(range(len(TS_CLASSES))) if ts_idx is None else ts_idx
-    states, lens = _states(ts_idx)
+    (penalised: a tracker that missed the downbeat's beat). ``cfg`` weighs the bar and
+    time-signature heads and sets the two penalties (tuned on validation by scripts/eval_meter.py
+    --tune)."""
+    ts_idx = tuple(range(len(TS_CLASSES))) if ts_idx is None else tuple(ts_idx)
+    states, src, stp, mid, st_c, at0 = _machine(ts_idx)
     n, k = len(states), len(logp_bar)
-    index = {s: i for i, s in enumerate(states)}
-    steps = [int(s * GRID) for s in Q_STEPS]
-    nxt = np.zeros((n, len(steps)), np.int64)
-    pen = np.zeros((n, len(steps)))
-    for i, (c, p) in enumerate(states):
-        for j, s in enumerate(steps):
-            q = p + s
-            if q >= lens[c]:
-                if q > lens[c]:
-                    pen[i, j] = cfg.mid_step_bar
-                q = (q - lens[c]) % lens[c]
-            nxt[i, j] = index[(c, q)]
-    st_c = np.array([c for c, _ in states])
-    st_p = np.array([p for _, p in states])
-    at0 = st_p == 0
+    pen = np.where(mid, cfg.mid_step_bar, 0.0)
+    rows = np.arange(n)
+    starts = np.nonzero(at0)[0]
 
     def emit(j):
-        return np.where(at0, logp_bar[j, 1], logp_bar[j, 0]) + cfg.ts_weight * logp_ts[j, st_c]
+        return cfg.bar_weight * np.where(at0, logp_bar[j, 1], logp_bar[j, 0]) + cfg.ts_weight * logp_ts[j, st_c]
     score = emit(0)
     back = np.zeros((k, n), np.int64)
     for j in range(1, k):
-        cand = score[:, None] + logp_step[j - 1][None, :] + pen  # [n, steps]
-        new = np.full(n, -np.inf)
-        arg = np.zeros(n, np.int64)
-        flat_to, flat_val = nxt.ravel(), cand.ravel()
-        order = np.argsort(flat_val, kind="stable")             # ascending: the last write is the max
-        new[flat_to[order]] = flat_val[order]
-        arg[flat_to[order]] = (np.arange(n * len(steps))[order]) // len(steps)
+        ext = np.append(score, -np.inf)
+        cand = ext[src] + logp_step[j - 1][stp] + pen               # [n, moves]
+        a = cand.argmax(1)
+        new = cand[rows, a]
+        arg = src[rows, a]
         # a new time signature at a bar line: from the best bar start of any other time signature
-        starts = np.nonzero(at0)[0]
         best = starts[np.argmax(new[starts])]
         alt = new[best] + cfg.ts_change
         better = alt > new[starts]
@@ -282,12 +436,51 @@ def grid_from_states(beat_t: np.ndarray, states: list[tuple[int, int]]) -> dict:
 # training samples, the model, its loss, prediction and the grid's scores
 # ---------------------------------------------------------------------------------------------
 
-def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, note_noise=None):
+def is_clean(perf: dict) -> bool:
+    """Clean performance MIDI (ASAP): its notes get the synthetic transcription noise. Real
+    transcriptions (a tracker's beats, or PERiScoPe's ``real_notes``) never do."""
+    return perf.get("beats") is None and not perf.get("real_notes", False)
+
+
+@dataclass
+class Augment:
+    """Training-time augmentation of a whole performance (as the labeller's src/dataset.py
+    AugmentConfig): with only a few hundred pieces a model learns to recognise a piece by its exact
+    tempo and pitches instead of reading its meter, so each sample is stretched in time (the notes,
+    the ground-truth beats and any tracked beats together), transposed (keeping the notes on the
+    keyboard) and its velocities scaled."""
+    tempo: tuple = (0.85, 1.18)
+    transpose: tuple = (-6, 6)
+    velocity: tuple = (0.8, 1.2)
+    prob: float = 0.9
+
+    def __call__(self, perf: dict, rng: np.random.Generator) -> dict:
+        if rng.random() >= self.prob:
+            return perf
+        s = float(np.exp(rng.uniform(np.log(self.tempo[0]), np.log(self.tempo[1]))))
+        notes = np.array(perf["notes"], np.float64, copy=True)
+        if len(notes):
+            lo = max(self.transpose[0], int(21 - notes[:, 0].min()))   # shifts keeping every note on the keyboard
+            hi = min(self.transpose[1], int(108 - notes[:, 0].max()))
+            k = int(rng.integers(lo, hi + 1)) if lo <= hi else 0
+            notes[:, 0] += k
+            notes[:, 1:3] *= s
+            notes[:, 3] = np.clip(np.round(notes[:, 3] * rng.uniform(*self.velocity)), 1, 127)
+        out = dict(perf, notes=notes.astype(np.float32), gt=dict(perf["gt"], t=np.asarray(perf["gt"]["t"]) * s))
+        if perf.get("beats") is not None:
+            out["beats"] = (np.asarray(perf["beats"][0]) * s, perf["beats"][1])
+        return out
+
+
+def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, note_noise=None, augment=None):
     """One training / validation sample of a performance: its tracked beats (the real tracker's if
     it has them, else the annotated beats corrupted by ``noise``, a src/beats.py BeatNoise; exact
     without), their features and targets, cut to a random ``chunk`` of beats (0 = all).
-    ``note_noise``: a src/preprocessing/noise.py NoiseModel for the notes (clean MIDI -> like a
-    transcription). Returns (features [K, F], targets {bar, step, ts}, beat times [K])."""
+    ``note_noise``: a src/preprocessing/noise.py NoiseModel for the notes of a clean performance
+    (clean MIDI -> like a transcription; ``is_clean``); ``augment``: an ``Augment`` (training).
+    Returns (features [K, F], targets {bar, step, ts}, beat times [K], note inputs: ``note_inputs``)."""
+    if augment is not None:
+        perf = augment(perf, rng)
     gt, notes = perf["gt"], perf["notes"]
     if perf.get("beats") is not None:
         bt, bd = perf["beats"]
@@ -296,14 +489,41 @@ def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, not
     else:
         bt, bd = gt["t"], gt["down"]
     bt, bd = np.asarray(bt, np.float64), np.asarray(bd, bool)
-    if note_noise is not None and len(notes):
+    if note_noise is not None and len(notes) and is_clean(perf):
         store = np.stack([notes[:, 0], notes[:, 1], notes[:, 2] - notes[:, 1], notes[:, 3]], axis=1).astype(np.float32)
         noisy, _ = note_noise(store, np.zeros((0, 2), np.float32), rng)
         notes = np.stack([noisy[:, 0], noisy[:, 1], noisy[:, 1] + noisy[:, 2], noisy[:, 3]], axis=1)
     if chunk and len(bt) > chunk:
         a = int(rng.integers(0, len(bt) - chunk + 1))
         bt, bd = bt[a:a + chunk], bd[a:a + chunk]
-    return beat_features(notes, bt, bd), targets(bt, gt), bt
+    return beat_features(notes, bt, bd), targets(bt, gt), bt, note_inputs(notes, bt)
+
+
+def collate(samples: list, device="cpu"):
+    """[(features [K, F], targets or None, beat times, note inputs)] -> (x [B, K, F], mask [B, K],
+    notes (features [B, M, NF], pitch [B, M], beat [B, M]; beat -1 = padding), targets {head:
+    [B, K]}, -1 where there is none)."""
+    import torch
+    b = len(samples)
+    k = max(len(s[0]) for s in samples)
+    m = max(max(len(s[3][0]) for s in samples), 1)
+    x = torch.zeros(b, k, samples[0][0].shape[1])
+    mask = torch.zeros(b, k, dtype=torch.bool)
+    nf = torch.zeros(b, m, N_NOTE_FEATURES)
+    npitch = torch.zeros(b, m, dtype=torch.long)
+    nbeat = torch.full((b, m), -1, dtype=torch.long)
+    tg = {h: torch.full((b, k), IGNORE, dtype=torch.long) for h in ("bar", "step", "ts")}
+    for i, (f, t, _, (a, p, j)) in enumerate(samples):
+        x[i, :len(f)] = torch.from_numpy(f)
+        mask[i, :len(f)] = True
+        nf[i, :len(a)] = torch.from_numpy(a)
+        npitch[i, :len(p)] = torch.from_numpy(p)
+        nbeat[i, :len(j)] = torch.from_numpy(j)
+        if t is not None:
+            for h in tg:
+                tg[h][i, :len(f)] = torch.from_numpy(t[h])
+    notes = (nf.to(device), npitch.to(device), nbeat.to(device))
+    return x.to(device), mask.to(device), notes, {h: v.to(device) for h, v in tg.items()}
 
 
 @dataclass
@@ -316,6 +536,8 @@ class MeterConfig:
     dropout: float = 0.1
     n_steps: int = len(Q_STEPS)
     n_ts: int = len(TS_CLASSES)
+    n_note_features: int = 0     # > 0: the note encoder over note_inputs (N_NOTE_FEATURES); 0 = none
+    d_note: int = 64
 
     def to_dict(self):
         return asdict(self)
@@ -323,7 +545,9 @@ class MeterConfig:
 
 def build_meter_model(cfg: dict):
     """The beat-sequence transformer (Scoreformer encoder layers, rotary positions over the beat
-    index) with the bar / step / ts heads."""
+    index) with the bar / step / ts heads. With ``n_note_features``, a note encoder (a per-note
+    MLP over ``note_inputs`` + a pitch embedding) pooled per beat (mean and max) joins each beat's
+    features. Beat features beyond ``n_features`` are ignored (the first meter model had 27)."""
     import torch
     import torch.nn as nn
 
@@ -339,16 +563,43 @@ def build_meter_model(cfg: dict):
             self.cfg = c
             enc = ScoreformerConfig(vocab_size=1, d_model=c.d_model, n_heads=c.n_heads, enc_layers=c.layers,
                                     dec_layers=0, ff=c.ff, dropout=c.dropout)
-            self.inp = nn.Sequential(nn.Linear(c.n_features, c.d_model), nn.LayerNorm(c.d_model), nn.Dropout(c.dropout))
+            extra = 2 * c.d_note if c.n_note_features else 0
+            if c.n_note_features:
+                self.note_in = nn.Linear(c.n_note_features, c.d_note)
+                self.pitch = nn.Embedding(128, c.d_note)
+                self.note_mlp = nn.Sequential(nn.GELU(), nn.Linear(c.d_note, c.d_note), nn.GELU(),
+                                              nn.Linear(c.d_note, c.d_note))
+            self.inp = nn.Sequential(nn.Linear(c.n_features + extra, c.d_model), nn.LayerNorm(c.d_model),
+                                     nn.Dropout(c.dropout))
             self.layers = nn.ModuleList(EncoderLayer(enc) for _ in range(c.layers))
             self.norm = nn.LayerNorm(c.d_model)
             self.head = nn.Linear(c.d_model, 2 + c.n_steps + c.n_ts)
             dh = c.d_model // c.n_heads
             self.register_buffer("freq", 1.0 / (10000 ** (torch.arange(0, dh, 2).float() / dh)), persistent=False)
 
-        def forward(self, x, mask):
+        def pool_notes(self, notes, b, k):
+            """Per-note embeddings pooled into their beats: [B, K, 2 d_note] (mean, max; 0 for a
+            beat without notes)."""
+            feat, pitch, beat = notes
+            e = self.note_mlp(self.note_in(feat) + self.pitch(pitch))
+            valid = beat >= 0
+            idx = (beat.clamp(min=0) + torch.arange(b, device=beat.device)[:, None] * k)[valid]
+            v = e[valid]
+            d = e.shape[-1]
+            tot = torch.zeros(b * k, d, device=e.device, dtype=e.dtype).index_add_(0, idx, v)
+            cnt = torch.zeros(b * k, device=e.device, dtype=e.dtype).index_add_(0, idx, torch.ones_like(v[:, 0]))
+            mx = torch.zeros(b * k, d, device=e.device, dtype=e.dtype).scatter_reduce_(
+                0, idx[:, None].expand(-1, d), v, reduce="amax", include_self=False)
+            return torch.cat([tot / cnt.clamp(min=1)[:, None], mx], -1).view(b, k, 2 * d)
+
+        def forward(self, x, mask, notes=None):
             pos = torch.arange(x.shape[1], device=x.device)[None].expand(x.shape[0], -1)
             cos, sin = rope_angles(pos, self.freq)
+            x = x[..., :c.n_features]
+            if c.n_note_features:
+                if notes is None:
+                    raise ValueError("this meter model has a note encoder: pass the note inputs")
+                x = torch.cat([x, self.pool_notes(notes, x.shape[0], x.shape[1])], -1)
             h = self.inp(x)
             m = mask[:, None, None, :]
             for layer in self.layers:
@@ -372,20 +623,33 @@ def meter_loss(out: dict, tg: dict):
     return total, parts
 
 
+def predict_logp(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, device="cpu") -> dict | None:
+    """The model's per-beat log-probabilities {bar, step, ts} for a whole performance (None with
+    fewer than 2 beats)."""
+    import torch
+    beat_t = np.asarray(beat_t, np.float64)
+    feats = beat_features(notes, beat_t, beat_d)
+    if len(feats) < 2:
+        return None
+    model.eval()
+    with torch.no_grad():
+        x, mask, nin, _ = collate([(feats, None, beat_t, note_inputs(notes, beat_t))], device)
+        out = model(x, mask, nin)
+        return {k: torch.log_softmax(v[0].float(), -1).cpu().numpy() for k, v in out.items()}
+
+
+def grid_from_logp(beat_t: np.ndarray, lp: dict | None, cfg: DecodeConfig = DecodeConfig()) -> dict:
+    """``predict_logp``'s output decoded into a grid (a single bar without it)."""
+    if lp is None:
+        return grid_from_states(beat_t, [(0, 0)] * len(beat_t))
+    return grid_from_states(beat_t, decode(lp["bar"], lp["step"], lp["ts"], cfg))
+
+
 def predict_grid(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, device="cpu",
                  cfg: DecodeConfig = DecodeConfig()) -> dict:
     """A whole performance: the model's per-beat log-probabilities, decoded into a consistent grid
     (``decode``, ``grid_from_states``)."""
-    import torch
-    feats = beat_features(notes, beat_t, beat_d)
-    if len(feats) < 2:
-        return grid_from_states(beat_t, [(0, 0)] * len(beat_t))
-    model.eval()
-    with torch.no_grad():
-        x = torch.from_numpy(feats)[None].to(device)
-        out = model(x, torch.ones(1, len(feats), dtype=torch.bool, device=device))
-        lp = {k: torch.log_softmax(v[0].float(), -1).cpu().numpy() for k, v in out.items()}
-    return grid_from_states(beat_t, decode(lp["bar"], lp["step"], lp["ts"], cfg))
+    return grid_from_logp(beat_t, predict_logp(model, notes, beat_t, beat_d, device), cfg)
 
 
 def grid_beats(grid: dict) -> tuple[np.ndarray, np.ndarray]:

@@ -186,6 +186,52 @@ def test_no_runs_and_selection():
         assert "No run has been evaluated at more than one margin" in (out / "margins.md").read_text(encoding="utf-8")
 
 
+def test_meter_tables():
+    """Meter models (outputs/runs/<run>/eval_meter.json): one table per test set, their data and
+    note encoder from config.json (the first meter model's older config too), the tuned and the
+    default decoder, the per-piece means, the most frequent wrong time signatures; a meter model
+    alone (no seq2seq run) is enough for a summary."""
+    def cond(base, n=59):
+        return {"grid_beat_f": base + 0.2, "grid_downbeat_f": base + 0.1, "grid_ts_acc": base,
+                "tracker_beat_f": 0.81, "tracker_downbeat_f": 0.62, "performances": n, "pieces": 14,
+                "default": {"grid_downbeat_f": base + 0.05, "grid_ts_acc": base - 0.05},
+                "piece_mean": {"grid_downbeat_f": base + 0.08, "grid_ts_acc": base + 0.02},
+                "ts_confusion": [["4/4", "4/4", 900], ["6/4", "3/4", 300], ["2/4", "4/4", 120]]}
+    with tempfile.TemporaryDirectory() as t:
+        runs, out = Path(t) / "runs", Path(t) / "compare"
+        for name, res, config in (
+                ("meter_base", {"clean": cond(0.39), "real": cond(0.32, 24)},
+                 {"params": 4.75e6, "model": {}, "data": {"train": 841, "real_transcriptions": 85}}),
+                ("meter_v2", {"clean": cond(0.6), "real": cond(0.5, 24), "periscope": cond(0.7, 480)},
+                 {"params": 5.1e6, "args": {"seed": 0}, "model": {"n_note_features": 20},
+                  "data": {"train_by_source": {"asap": 756, "real": 85, "periscope": 6000}}}),
+                ("meter_v2_asap", {"clean": cond(0.5)},
+                 {"params": 5.1e6, "args": {"seed": 0}, "model": {"n_note_features": 20},
+                  "data": {"train_by_source": {"asap": 756, "real": 85, "periscope": 0}}})):
+            d = runs / name
+            d.mkdir(parents=True)
+            (d / "eval_meter.json").write_text(json.dumps(res))
+            (d / "config.json").write_text(json.dumps(config))
+            (d / "status.json").write_text(json.dumps({"phase": "done"}))
+        assert compare_runs.main(["--runs-dir", str(runs), "--out", str(out), "--quiet"]) == 0
+        s = (out / "summary.md").read_text(encoding="utf-8")
+        sec = s.split("## Meter models (v2) per test set")[1]
+        clean = sec.split("### clean: ")[1].split("###")[0]
+        rows = {ln.split("|")[1].strip(): [c.strip() for c in ln.split("|")[1:-1]]
+                for ln in clean.splitlines() if ln.startswith("| meter")}
+        assert set(rows) == {"meter_base", "meter_v2", "meter_v2_asap"}
+        assert rows["meter_base"][1:4] == ["A+R", "no", "4.8M"] and rows["meter_v2"][1:3] == ["A+R+P", "yes"]
+        assert rows["meter_v2_asap"][1] == "A+R"
+        assert rows["meter_v2"][7] == "**0.600**" and rows["meter_base"][7] == "0.390"   # tuned time sig
+        assert rows["meter_v2"][11] == "**0.550**"                                       # default decoder
+        assert rows["meter_v2"][-1] == "6/4->3/4 300, 2/4->4/4 120"
+        periscope = sec.split("### periscope: ")[1]
+        assert "| meter_v2 " in periscope and "meter_base" not in periscope
+        for block in sec.split("\n\n"):
+            lines = [ln for ln in block.splitlines() if ln.startswith("|")]
+            assert len({len(ln) for ln in lines}) <= 1, block
+
+
 def test_login_node_python():
     """Runs with the login node's system python3: standard library only, Python 3.6 syntax."""
     src = (ROOT / "scripts" / "compare_runs.py").read_text(encoding="utf-8")

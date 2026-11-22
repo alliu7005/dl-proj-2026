@@ -928,7 +928,8 @@ TRACKED beats. A transformer over the piece's beat sequence (4.75M parameters) p
 whether a bar starts on it, how many quarter notes it lasts until the next tracked beat (1/4 to 4:
 this absorbs a doubled or tripled tempo and missed or extra beats), and its bar's time signature,
 from per-beat note features (where notes fall inside the beat, how loud / low / long the notes on
-it are, the change of harmony across it, Beat This!'s own downbeat flag, the beat's length). A
+it are, the harmony and its change across it, Beat This!'s own downbeat flag, the beat's length)
+and, since the second round, a note encoder pooling every note of the beat (below). A
 Viterbi search then picks the most probable CONSISTENT grid over (time signature, position in the
 bar): bars add up to their time signature, which changes only at a bar line. Given the true answers
 it reproduces the annotated grid (validation: beat / downbeat F 0.996, time signature 1.000).
@@ -937,7 +938,7 @@ it reproduces the annotated grid (validation: beat / downbeat F 0.996, time sign
   val / 59 test) with its annotated grid (beats with quarter positions, bar starts, time and key
   signatures), the tracker's errors simulated anew each time (the validated BeatNoise) and synthetic
   transcription noise on the notes; plus the real-transcription performances with Beat This!'s own
-  beats.
+  beats; since the second round also PERiScoPe (below).
 - **First signal** (1,200 steps on a laptop CPU, batch 8): validation downbeat F 0.615 against the
   tracker's own 0.578 on the same beats, beat F equal (0.808 vs 0.807), time signature 0.45.
 - **Evaluation** (`scripts/eval_meter.py`): every test performance's grid scored against the
@@ -949,6 +950,91 @@ it reproduces the annotated grid (validation: beat / downbeat F 0.996, time sign
 meter model's grid. Each window takes its bars, time signatures and key from the decoded grid
 (`window_frame`: its first bar is the bar the grid puts its first note in), so nothing comes from
 the score: mode `grid_meter_<run>`, next to `grid_true` in the comparison tables.
+
+### v2 results, first round: the labeller works, the grid is the bottleneck
+
+Onset F1 (the labeller trained 26-60 minutes):
+
+| test set | nl_base, true grid | nl_large, true grid | XGBoost, true grid | nl_base, meter_base grid | nl_large, meter_base grid |
+|---|---|---|---|---|---|
+| clean | 0.771 | 0.767 | 0.718 | 0.293 | 0.316 |
+| synthetic | 0.738 | 0.738 | | 0.291 | 0.312 |
+| periscope | 0.851 | 0.853 | | | |
+| real | **0.797** | 0.789 | 0.738 | 0.263 | 0.287 |
+
+Given the right grid the labeller is the best system on every test set (bar F1 0.98, duration
+0.85-0.87). On the first meter model's grid it falls to the seq2seq models' level: bar F1 0.54,
+time signature 0.26-0.35, and with notes landing where the grid makes them implausible the keep
+head deletes more (note F1 0.90 -> 0.77-0.86). `meter_base` itself (`eval_meter.json`):
+
+| test set | grid beat F | tracker beat F | grid downbeat F | tracker downbeat F | time signature |
+|---|---|---|---|---|---|
+| clean (simulated tracker) | 0.844 | 0.814 | 0.680 | 0.618 | 0.394 |
+| real (Beat This!) | 0.663 | 0.711 | 0.617 | 0.596 | 0.322 |
+
+Where that comes from:
+- **Not the decoder.** Given perfect head outputs on the simulated tracker's beats, the Viterbi
+  decoding gets beat F 0.882, downbeat F 0.895 and time signature 0.992 on the clean test set: the
+  ceiling the tracked beats allow is far above 0.68 / 0.39. The heads are the limit.
+- **Too few pieces.** ASAP's 756 training performances are 156 pieces. A meter model trained on them
+  alone overfits within ~2k steps on a laptop: validation time-signature accuracy peaks at
+  0.56-0.58 and falls to 0.40-0.47 while training continues, step accuracy with it (0.69 -> 0.59).
+  It learns the pieces, not meter.
+- **A small, lopsided test set.** 59 performances of 14 pieces: Chopin's Ballade No. 1 (6/4 with
+  4/4 passages) is 18 of them, Ravel's Ondine (48 time-signature changes in 94 bars) 7. "Always
+  4/4" gets 0.28 of the test bars right (0.38 of train, 0.54 of val). Both the per-performance and
+  the per-piece means are reported from now on.
+- **Real transcriptions got synthetic noise on top** in training (the note noise was applied to
+  every performance, not only clean MIDI). Fixed.
+
+### Meter model, second round
+
+- **6x the pieces.** PERiScoPe has no beat annotations, but every window is aligned to its score,
+  so the score's beats timed through the alignments are a ground truth (`scripts/build_meter_data.py`:
+  window grids joined by global bar number, one grid per run of consecutive bars; the windows'
+  notes stitched back into the performance). Checked against ASAP's human annotations on the ASAP
+  test performances, built the same way: the same time signature for 99.97% of beats and the same
+  bar structure, beat times within 70 ms for 81% (beat F 0.81, downbeat F 0.80: a beat no note
+  falls on is interpolated). That adds 971 training works (5,260 performances of real Transkun
+  output, the tracker simulated) to ASAP's 156, 78 validation works and a test set of 104 works no
+  model has seen (`periscope`, scored against the alignment beats).
+- **A note encoder.** Besides the hand-made beat features, every note of a beat (its phase in the
+  beat and sin / cos of it at 1-12 cycles per beat, length in beats, velocity and velocity against
+  the beat's mean, lowest / highest of its chord, chord size, height above the beat's bass, a pitch
+  embedding) goes through a small MLP and is pooled per beat (mean and max). Plus the beat's
+  pitch-class profile.
+- **Augmentation**: each training sample stretched in time (x0.85-1.18; notes, ground-truth and
+  tracked beats together), transposed (+-6) and velocity-scaled, so a piece is not recognised by
+  its tempo and pitches.
+- **Longer chunks** (256-1,024 beats, close to whole pieces at test time), **piece-balanced
+  sampling** (a piece played 20 times is not drawn 20 times as often), **model selection** on what
+  the labeller needs (validation downbeat F + time-signature accuracy, per source: ASAP, real,
+  PERiScoPe), and a **tuned decoder** (`eval_meter.py --tune`: bar / time-signature head weights and
+  the two penalties chosen on validation; the untuned decoder's scores are kept next to it). The
+  decoder is now vectorised (8.5x faster, identical paths, tested against a plain Viterbi).
+- **Ablations** (`pace/meter.sh`): `meter_v2` (everything), `meter_v2_s1` (seed 1), `meter_v2_nonote`
+  (no note encoder), `meter_v2_asap` (no PERiScoPe), and `meter_base` re-evaluated with a tuned
+  decoder and on the PERiScoPe test. `nl_base` labels every meter model's grids, `nl_large` the best
+  candidates', on clean, synthetic, real and periscope.
+
+**Local check** (ASAP only, 0.8M-parameter models, 3-4k steps on a laptop CPU; best validation
+checkpoint of each, untuned decoder):
+
+| run | val downbeat F | val time sig | selection score | later |
+|---|---|---|---|---|
+| first design (beat features) | 0.642 | 0.564 | 0.603 | falls (time sig 0.47 at 3k) |
+| + note encoder | 0.622 | 0.579 | 0.600 | collapses (time sig 0.40 at 2k) |
+| first design + augmentation | 0.647 | 0.534 | 0.591 | stable |
+| **note encoder + augmentation** | **0.663** | **0.580** | **0.621** | stable (0.606 at 4k) |
+
+Augmentation is what stops the memorising, and the note encoder only pays with it. The tuned
+decoder adds to every model (validation 0.622 -> 0.663 for the last; it weighs the bar head up, the
+time-signature head down and makes changes of time signature rarer). On the ASAP test set these
+small ASAP-only models reach meter_base's downbeat F (0.679-0.683 tuned) but not a better time
+signature (0.33-0.47), and the confusions say why: 3,071 of the wrong bars are the 6/4 Ballade
+written as 6/8, then 4/4 as 6/8 or 2/2, 2/4 as 4/4. 6/4 and 6/8 group the beats the same way
+at half the note values: the same sound, so which one the score uses is a convention only many
+pieces can teach. That is what the PERiScoPe works are for; the PACE runs measure it.
 
 ## Demo: audio in, score out
 
@@ -1181,10 +1267,10 @@ scripts/build_notelabels.py      v2: labels + true grids per split -> <split>/no
 scripts/label_ceiling.py         v2: every window rendered from its true labels (the labeller's ceiling)
 scripts/train_labeller.py        v2: train the note labeller
 scripts/eval_labeller.py         v2: evaluate it on the test sets (true grid: grid_true; a meter model's: grid_meter_<run>)
-src/meter.py                     v2: the meter model (beat features, targets, transformer, consistent Viterbi decoding)
-scripts/build_meter_data.py      v2: whole performances with annotated grids (+ transcriptions, tracked beats)
-scripts/train_meter.py           v2: train the meter model
-scripts/eval_meter.py            v2: score its grids against the annotations, save them for the labeller
+src/meter.py                     v2: the meter model (beat + note-encoder inputs, targets, alignment ground truth, augmentation, transformer, consistent Viterbi decoding)
+scripts/build_meter_data.py      v2: whole performances with ground-truth grids: ASAP annotations (+ transcriptions, tracked beats), PERiScoPe score alignments
+scripts/train_meter.py           v2: train the meter model (ASAP + real + PERiScoPe, per-source validation)
+scripts/eval_meter.py            v2: tune its decoder on validation, score its grids (clean / real / periscope), save them for the labeller
 pace/train.sbatch                PACE GPU job: train + evaluate
 pace/reevaluate.sh               evaluate finished runs: what is missing, one job per run or per test set
 pace/beats.sh                    the beat batch (ground-truth beats, Beat This!, 3 beat runs)
@@ -1204,7 +1290,7 @@ tests/test_eval_plan.py          src/eval/plan.py rules + evaluate_pieces.py --o
 tests/test_reevaluate.py         pace/reevaluate.sh (per run / per test set), pace/beats.sh, pace/tsearch.sh: what they submit
 tests/test_system_eval.py        system-level comparison: inputs, our pipeline on them, aggregation, job graph
 tests/test_notelabels.py         v2: labels, ties, rendering, grid features, dataset, labeller training / evaluation
-tests/test_meter.py              v2: meter targets, consistent decoding, grid scores, key estimate, end to end
+tests/test_meter.py              v2: meter targets, decoding (vs a plain Viterbi), note encoder, alignment ground truth, augmentation, end to end, job graph
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
 tests/test_beats.py              beats vs ASAP annotations, features, tracker errors (bar classes, octave stretches, profiles, fit, vs Beat This!), tracker folds, train / eval / demo
 tests/test_context_noise.py      context corruption: off = unchanged, on = only the context changes

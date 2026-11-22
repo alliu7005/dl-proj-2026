@@ -277,13 +277,28 @@ evaluates. The comparison: `python3 scripts/compare_runs.py`, section "Note labe
 ## 4j. v2 Phases 2 + 3: the meter model, and the labeller on its grids
 
 ```bash
-bash pace/meter.sh           # metprep (CPU: whole performances + tests) -> meter_base (GPU: train,
-                             # evaluate, save grids) -> v2_<labeller> (GPU: each labeller on the grids)
+bash pace/meter.sh           # metprep (CPU: whole performances, ASAP + PERiScoPe, the alignment check,
+                             # tests) -> met_<meter> (GPU: train, tune the decoder, evaluate, save grids)
+                             # + metev_meter_base -> v2_<labeller>@<meter> (GPU: labellers on the grids)
+SKIP_PREP=1 bash pace/meter.sh                # the data is built already
+METERS="meter_v2" LABELLERS="nl_base" LARGE_ON="" bash pace/meter.sh   # a subset
 ```
 
+The second round (the first, `meter_base`, got a third of the test bars' time signatures right):
+`meter_v2` (PERiScoPe's 971 works added, the note encoder, augmentation, longer chunks),
+`meter_v2_s1` (seed 1), `meter_v2_nonote` (no note encoder), `meter_v2_asap` (no PERiScoPe), each
+trained for up to 30k steps (early stopping on validation downbeat F + time signature), then
+`eval_meter.py --tune`; `metev_meter_base` re-evaluates the first model with a tuned decoder and on
+the PERiScoPe test. `nl_base` labels every meter model's grids, `nl_large` those of `meter_v2` and
+`meter_base` (`LABELLERS`, `LARGE_ON`), on clean, synthetic, real and periscope.
+
 The `v2_*` jobs also wait for any `labeller` job still queued or running, so submit this whenever.
-`outputs/runs/meter_base/eval_meter.json` has the grid's beat / downbeat F and time-signature
-accuracy next to Beat This!'s own; `python3 scripts/compare_runs.py` puts each labeller's true-grid
+`metprep` prints how well the alignment-derived ground truth matches ASAP's annotations
+(`data/processed/meter/check.json`). `outputs/runs/<meter>/eval_meter.json` has each grid's beat /
+downbeat F and time-signature accuracy next to the tracker's own, with the untuned decoder's and
+per-piece numbers, the time-signature confusions (`meter_scores_<condition>.json`: per performance);
+`decode.json` the tuned decoder. `python3 scripts/compare_runs.py` tables the meter models ("Meter
+models (v2)") and puts each labeller's true-grid
 and meter-grid results side by side ("Note labeller (v2)").
 
 ## 5. Compare the runs and bring results back

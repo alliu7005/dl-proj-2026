@@ -1,18 +1,31 @@
 """Train the meter model (v2, Phase 2: src/meter.py) on whole performances.
 
     python scripts/build_meter_data.py                  # once: data/processed/meter/<split>.pkl
-    python scripts/train_meter.py --name meter_base
-    python scripts/train_meter.py --name meter_base --resume
+    python scripts/train_meter.py --name meter_v2
+    python scripts/train_meter.py --name meter_v2 --resume
 
-Training: every step draws --batch performances (the clean ASAP training performances and, when
-built, the real-transcription ones in their natural proportion), cuts a random --chunk of beats
-from each, and for a clean one simulates the tracker on its annotated beats (configs/beat_noise.json:
-octave errors, missed / extra beats, jitter, downbeat errors; a new draw every time) and, with
---note-noise, transcription noise on its notes. Validation (every --eval-every steps): the heads'
-accuracies on the validation performances (fixed tracker draw) and their DECODED grids scored
-against the annotations (src/meter.py grid_scores: beat F, downbeat F, time-signature accuracy),
-next to the raw tracker's beat / downbeat F on the same beats. The best validation downbeat F
-keeps best.pt; early stopping, resume and atomic checkpoints as in the other training scripts.
+Training data (every source that data/processed/meter has):
+  ASAP           the clean training performances: the tracker simulated on the annotated beats
+                 (configs/beat_noise.json: octave errors, missed / extra beats, jitter, downbeat
+                 errors; a new draw every time) and synthetic transcription noise on the notes
+                 (--note-noise)
+  real           the Transkun transcriptions of ASAP training audio with Beat This!'s own beats
+  PERiScoPe      real Transkun transcriptions of 971 more works, the grid from their score
+                 alignment (scripts/build_meter_data.py); the tracker simulated, the notes as they
+                 are (--no-periscope leaves them out)
+Every step draws --batch performances (--balance piece: each piece in proportion to its length,
+however many performances it has; beats: each performance in proportion to its length), augments
+each (src/meter.py Augment: tempo stretch, transposition, velocity; --no-augment turns it off: on
+ASAP alone a model then memorises its 156 pieces within ~2k steps, validation time-signature
+accuracy falling while training goes on) and cuts a random stretch of --chunk-min .. --chunk beats
+from each. --workers processes make the samples.
+
+Validation (every --eval-every steps), per source (ASAP val, real val, a fixed --val-periscope
+PERiScoPe val performances): the heads' accuracies and the DECODED grids scored against the
+ground truth (src/meter.py grid_scores: beat F, downbeat F, time-signature accuracy) next to the
+raw tracker's beat / downbeat F on the same beats. best.pt keeps the best mean over the sources of
+(downbeat F + time-signature accuracy) / 2: the bar lines and meters the note labeller is given.
+Early stopping, resume and atomic checkpoints as in the other training scripts.
 """
 from __future__ import annotations
 
@@ -23,6 +36,7 @@ import os
 import pickle
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -32,61 +46,90 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import lower_priority, pick_device  # noqa: E402
 from scripts.train_model import learning_rate  # noqa: E402
 from src.beats import BeatNoise, f_measure  # noqa: E402
-from src.meter import (DecodeConfig, MeterConfig, build_meter_model, decode, grid_from_states, grid_scores,  # noqa: E402
-                       meter_loss, sample)
+from src.meter import (N_BEAT_FEATURES, N_NOTE_FEATURES, Augment, DecodeConfig, MeterConfig,  # noqa: E402
+                       build_meter_model, collate, decode, grid_from_states, grid_scores, meter_loss, sample)
 from src.preprocessing.noise import NoiseModel  # noqa: E402
+
+FIRST_FEATURES = 27  # the first meter model's beat features (--beat-features first)
+HEADS = ("bar", "step", "ts")
 
 
 def load(data: Path, split: str) -> list:
+    """data/processed/meter/<split>.pkl ([] when it was not built); every performance gets a
+    ``piece`` (its folder for the ASAP ones built before pieces were stored)."""
     p = data / "meter" / f"{split}.pkl"
-    return pickle.load(open(p, "rb")) if p.exists() else []
+    perfs = pickle.load(open(p, "rb")) if p.exists() else []
+    for x in perfs:
+        x.setdefault("piece", str(Path(x["performance"]).parent))
+    return perfs
 
 
-def batch(samples: list, device) -> tuple:
-    k = max(len(s[0]) for s in samples)
-    x = torch.zeros(len(samples), k, samples[0][0].shape[1])
-    mask = torch.zeros(len(samples), k, dtype=torch.bool)
-    tg = {h: torch.full((len(samples), k), -1, dtype=torch.long) for h in ("bar", "step", "ts")}
-    for i, (f, t, _) in enumerate(samples):
-        x[i, :len(f)] = torch.from_numpy(f)
-        mask[i, :len(f)] = True
-        for h in tg:
-            tg[h][i, :len(f)] = torch.from_numpy(t[h])
-    return x.to(device), mask.to(device), {h: v.to(device) for h, v in tg.items()}
+def weights(perfs: list, balance: str) -> np.ndarray:
+    """Sampling weights: ``beats`` = each performance by its length; ``piece`` = each piece by its
+    (mean performance) length, shared by its performances, so a piece played 20 times is not
+    drawn 20 times as often as one played once."""
+    n = np.array([len(p["gt"]["t"]) for p in perfs], float)
+    if balance == "piece":
+        count = Counter(p["piece"] for p in perfs)
+        n = n / np.array([count[p["piece"]] for p in perfs], float)
+    return n / n.sum()
+
+
+class Stream(torch.utils.data.IterableDataset):
+    """Endless training batches (collated on the CPU), each worker with its own random stream."""
+
+    def __init__(self, perfs, w, noise, note_noise, batch, chunk, chunk_min, seed, augment=None):
+        self.perfs, self.w, self.noise, self.note_noise, self.augment = perfs, w, noise, note_noise, augment
+        self.batch, self.chunk, self.chunk_min, self.seed = batch, chunk, chunk_min, seed
+
+    def __iter__(self):
+        info = torch.utils.data.get_worker_info()
+        rng = np.random.default_rng((self.seed, info.id if info else 0))
+        while True:
+            length = int(rng.integers(self.chunk_min, self.chunk + 1))
+            idx = rng.choice(len(self.perfs), self.batch, p=self.w)
+            yield collate([sample(self.perfs[i], rng, self.noise, length, self.note_noise, self.augment)
+                           for i in idx])
 
 
 @torch.no_grad()
-def validate(model, val: list, device, noise, seed: int = 0) -> dict:
-    """Head accuracies and decoded-grid scores over every validation performance (the tracker
-    simulated with a fixed seed per performance; the real one where it exists)."""
+def validate(model, groups: dict, device, noise, seed: int = 0) -> dict:
+    """Per validation source: head accuracies and decoded-grid scores (the tracker simulated with a
+    fixed seed per performance; the real one where it exists); ``select`` = the mean over the
+    sources of (downbeat F + time-signature accuracy) / 2."""
     model.eval()
-    ok = {h: 0 for h in ("bar", "step", "ts")}
-    n = {h: 0 for h in ok}
-    scores, raw = [], []
-    for k, perf in enumerate(val):
-        rng = np.random.default_rng((seed, k))
-        f, tg, bt = sample(perf, rng, noise)
-        if len(f) < 2:
+    res, sel = {}, []
+    ok = {h: 0 for h in HEADS}
+    n = {h: 0 for h in HEADS}
+    for gi, (name, perfs) in enumerate(groups.items()):
+        scores, raw = [], []
+        for k, perf in enumerate(perfs):
+            f, tg, bt, nin = sample(perf, np.random.default_rng((seed, gi, k)), noise)
+            if len(f) < 2:
+                continue
+            x, mask, notes, _ = collate([(f, None, bt, nin)], device)
+            out = model(x, mask, notes)
+            lp = {h: torch.log_softmax(v[0].float(), -1).cpu().numpy() for h, v in out.items()}
+            for h in HEADS:
+                m = tg[h] >= 0
+                ok[h] += int((lp[h].argmax(-1) == tg[h])[m].sum())
+                n[h] += int(m.sum())
+            grid = grid_from_states(bt, decode(lp["bar"], lp["step"], lp["ts"], DecodeConfig()))
+            scores.append(grid_scores(grid, perf["gt"]))
+            gt = perf["gt"]
+            rng2 = np.random.default_rng((seed, gi, k))  # the same tracked beats again, for the tracker's own scores
+            tb, tdn = perf["beats"] if perf.get("beats") is not None else noise(gt["t"], gt["down"], rng2)
+            raw.append({"beat_f": f_measure(gt["t"], tb), "downbeat_f": f_measure(gt["t"][gt["down"]], tb[tdn])})
+        if not scores:
             continue
-        x = torch.from_numpy(f)[None].to(device)
-        out = model(x, torch.ones(1, len(f), dtype=torch.bool, device=device))
-        lp = {h: torch.log_softmax(v[0].float(), -1).cpu().numpy() for h, v in out.items()}
-        for h in ok:
-            m = tg[h] >= 0
-            ok[h] += int((lp[h].argmax(-1) == tg[h])[m].sum())
-            n[h] += int(m.sum())
-        grid = grid_from_states(bt, decode(lp["bar"], lp["step"], lp["ts"], DecodeConfig()))
-        scores.append(grid_scores(grid, perf["gt"]))
-        gt = perf["gt"]
-        rng2 = np.random.default_rng((seed, k))  # the same tracked beats again, for the tracker's own scores
-        tb, tdn = perf["beats"] if perf.get("beats") is not None else noise(gt["t"], gt["down"], rng2)
-        raw.append({"beat_f": f_measure(gt["t"], tb), "downbeat_f": f_measure(gt["t"][gt["down"]], tb[tdn])})
+        for key in ("beat_f", "downbeat_f", "ts_acc"):
+            res[f"{name}_grid_{key}"] = float(np.mean([s[key] for s in scores]))
+        for key in ("beat_f", "downbeat_f"):
+            res[f"{name}_tracker_{key}"] = float(np.mean([s[key] for s in raw]))
+        sel.append((res[f"{name}_grid_downbeat_f"] + res[f"{name}_grid_ts_acc"]) / 2)
     model.train()
-    res = {f"{h}_acc": ok[h] / max(n[h], 1) for h in ok}
-    for key in ("beat_f", "downbeat_f", "ts_acc"):
-        res[f"grid_{key}"] = float(np.mean([s[key] for s in scores])) if scores else 0.0
-    for key in ("beat_f", "downbeat_f"):
-        res[f"tracker_{key}"] = float(np.mean([s[key] for s in raw])) if raw else 0.0
+    res.update({f"{h}_acc": ok[h] / max(n[h], 1) for h in HEADS})
+    res["select"] = float(np.mean(sel)) if sel else 0.0
     return res
 
 
@@ -96,17 +139,30 @@ def main(argv=None):
     ap.add_argument("--d-model", type=int, default=256)
     ap.add_argument("--layers", type=int, default=6)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--note-encoder", action=argparse.BooleanOptionalAction, default=True,
+                    help="pool a learned embedding of every note into its beat (--no-note-encoder: beat features only)")
+    ap.add_argument("--d-note", type=int, default=64)
+    ap.add_argument("--beat-features", choices=("all", "first"), default="all",
+                    help="first = the first meter model's 27 (no pitch-class profile)")
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--min-lr-frac", type=float, default=0.05)
     ap.add_argument("--warmup", type=int, default=500)
     ap.add_argument("--weight-decay", type=float, default=0.05)
-    ap.add_argument("--steps", type=int, default=20000)
+    ap.add_argument("--steps", type=int, default=30000)
     ap.add_argument("--batch", type=int, default=16)
-    ap.add_argument("--chunk", type=int, default=384, help="beats per training sample")
+    ap.add_argument("--chunk", type=int, default=1024, help="most beats per training sample")
+    ap.add_argument("--chunk-min", type=int, default=0, help="fewest beats per training sample (0 = chunk / 4)")
+    ap.add_argument("--balance", choices=("piece", "beats"), default="piece")
+    ap.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True,
+                    help="tempo stretch, transposition and velocity scaling of every training sample")
+    ap.add_argument("--periscope", action=argparse.BooleanOptionalAction, default=True,
+                    help="train (and validate) on the PERiScoPe performances too, when built")
+    ap.add_argument("--val-periscope", type=int, default=150, help="PERiScoPe validation performances (fixed draw)")
     ap.add_argument("--beat-noise", default="configs/beat_noise.json")
     ap.add_argument("--note-noise", default="configs/noise_stats.json", help="'none' = clean notes")
-    ap.add_argument("--eval-every", type=int, default=1000)
-    ap.add_argument("--patience", type=int, default=6, help="evaluations without a better downbeat F (0 = off)")
+    ap.add_argument("--eval-every", type=int, default=2000)
+    ap.add_argument("--patience", type=int, default=5, help="evaluations without a better selection score (0 = off)")
+    ap.add_argument("--workers", type=int, default=6, help="processes making training samples (0 = in the main one)")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="auto")
@@ -120,14 +176,24 @@ def main(argv=None):
     device = pick_device(args.device)
     data, run = Path(args.data), Path(args.runs_dir) / args.name
     run.mkdir(parents=True, exist_ok=True)
-    train = load(data, "train") + load(data, "train_transcribed")
-    val = load(data, "val") + load(data, "val_transcribed")
-    if not train or not val:
+    sources = {"asap": load(data, "train"), "real": load(data, "train_transcribed"),
+               "periscope": load(data, "train_periscope") if args.periscope else []}
+    train = [p for v in sources.values() for p in v]
+    groups = {"asap": load(data, "val"), "real": load(data, "val_transcribed")}
+    if args.periscope:
+        pv = load(data, "val_periscope")
+        if len(pv) > args.val_periscope:
+            pv = [pv[i] for i in sorted(np.random.default_rng(0).choice(len(pv), args.val_periscope, replace=False))]
+        groups["periscope"] = pv
+    groups = {k: v for k, v in groups.items() if v}
+    if not train or not groups:
         raise SystemExit(f"{data / 'meter'}: no train / val performances: run scripts/build_meter_data.py first")
     noise = BeatNoise.from_json(args.beat_noise)
     note_noise = None if args.note_noise == "none" else NoiseModel.from_json(args.note_noise)
-    cfg = MeterConfig(d_model=args.d_model, layers=args.layers, dropout=args.dropout,
-                      n_heads=max(4, args.d_model // 32), ff=4 * args.d_model).to_dict()
+    cfg = MeterConfig(n_features=N_BEAT_FEATURES if args.beat_features == "all" else FIRST_FEATURES,
+                      d_model=args.d_model, layers=args.layers, dropout=args.dropout,
+                      n_heads=max(4, args.d_model // 32), ff=4 * args.d_model,
+                      n_note_features=N_NOTE_FEATURES if args.note_encoder else 0, d_note=args.d_note).to_dict()
     ck = None
     if args.resume and (run / "last.pt").exists():
         ck = torch.load(run / "last.pt", map_location=device, weights_only=False)
@@ -142,12 +208,17 @@ def main(argv=None):
         opt.load_state_dict(ck["opt"])
         step, best, best_step, done = ck["step"], ck["best"], ck["best_step"], ck.get("done", False)
     n_params = sum(p.numel() for p in model.parameters())
+    counts = {k: len(v) for k, v in sources.items()}
+    pieces = {k: len({p["piece"] for p in v}) for k, v in sources.items()}
     json.dump({"args": vars(args), "arch": "meter", "model": cfg, "params": n_params,
-               "data": {"train": len(train), "val": len(val),
-                        "real_transcriptions": sum(p.get("beats") is not None for p in train)}},
+               "data": {"train": len(train), "train_by_source": counts, "pieces_by_source": pieces,
+                        "val_by_source": {k: len(v) for k, v in groups.items()},
+                        "real_transcriptions": counts["real"]}},
               open(run / "config.json", "w"), indent=1)
-    print(f"meter model: {n_params / 1e6:.2f}M parameters on {device} | {len(train)} training performances "
-          f"({sum(p.get('beats') is not None for p in train)} with real tracked beats), {len(val)} validation", flush=True)
+    print(f"meter model: {n_params / 1e6:.2f}M parameters on {device} (note encoder: "
+          f"{'yes' if cfg.get('n_note_features') else 'no'}, {cfg['n_features']} beat features) | training: "
+          + ", ".join(f"{k} {counts[k]} performances / {pieces[k]} pieces" for k in counts)
+          + " | validation: " + ", ".join(f"{k} {len(v)}" for k, v in groups.items()), flush=True)
 
     def save(path):
         tmp = path.with_name(path.name + ".tmp")
@@ -159,19 +230,24 @@ def main(argv=None):
                                   "best": best, "best_step": best_step}))
         os.replace(st, run / "status.json")
 
-    rng = np.random.default_rng(args.seed + step)
-    w = np.array([len(p["gt"]["t"]) for p in train], float)
-    w /= w.sum()  # longer performances hold more beats: sample in proportion
+    stream = Stream(train, weights(train, args.balance), noise, note_noise, args.batch, args.chunk,
+                    args.chunk_min or max(args.chunk // 4, 2), args.seed * 100003 + step,
+                    Augment() if args.augment else None)
+    loader = torch.utils.data.DataLoader(stream, batch_size=None, num_workers=args.workers,
+                                         prefetch_factor=4 if args.workers else None,
+                                         persistent_workers=bool(args.workers))
+    batches = iter(loader)
     log_path, t0, run_loss = run / "log.csv", time.time(), 0.0
     model.train()
     try:
         while not done:
-            idx = rng.choice(len(train), args.batch, p=w)
-            x, mask, tg = batch([sample(train[i], rng, noise, args.chunk, note_noise) for i in idx], device)
+            x, mask, notes, tg = next(batches)
+            x, mask, tg = x.to(device), mask.to(device), {h: v.to(device) for h, v in tg.items()}
+            notes = tuple(v.to(device) for v in notes)
             for g in opt.param_groups:
                 g["lr"] = learning_rate(step, lr=args.lr, warmup=args.warmup, total_steps=args.steps,
                                         min_lr_frac=args.min_lr_frac)
-            loss, parts = meter_loss(model(x, mask), tg)
+            loss, parts = meter_loss(model(x, mask, notes), tg)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -182,7 +258,7 @@ def main(argv=None):
                 print(f"step {step}/{args.steps} loss {run_loss / 100:.4f} ({time.time() - t0:.0f} s)", flush=True)
                 run_loss = 0.0
             if step % args.eval_every == 0 or step >= args.steps:
-                res = validate(model, val, device, noise, args.seed)
+                res = validate(model, groups, device, noise, args.seed)
                 res.update(step=step, minutes=round((time.time() - t0) / 60, 1))
                 new = not log_path.exists()
                 with open(log_path, "a", newline="") as f:
@@ -191,8 +267,8 @@ def main(argv=None):
                         wr.writeheader()
                     wr.writerow(res)
                 print("  eval " + " | ".join(f"{k}={v:.3f}" for k, v in res.items() if isinstance(v, float)), flush=True)
-                if res["grid_downbeat_f"] > best:
-                    best, best_step = res["grid_downbeat_f"], step
+                if res["select"] > best:
+                    best, best_step = res["select"], step
                     save(run / "best.pt")
                 if step >= args.steps or (args.patience and (step - best_step) >= args.patience * args.eval_every):
                     done = True
@@ -200,7 +276,8 @@ def main(argv=None):
     except KeyboardInterrupt:
         save(run / "last.pt")
         sys.exit(130)
-    print(f"done: {step} steps; best validation downbeat F {best:.3f} at step {best_step} -> {run / 'best.pt'}")
+    print(f"done: {step} steps; best validation score {best:.3f} (mean of downbeat F and time-signature "
+          f"accuracy) at step {best_step} -> {run / 'best.pt'}")
 
 
 if __name__ == "__main__":

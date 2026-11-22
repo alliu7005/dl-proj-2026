@@ -8,8 +8,10 @@ log.csv, and writes to outputs/compare/:
 
   summary.md    the runs (size, settings, validation loss, how training ended), then per test set
                 the system output (meter mode: what the demo runs), onset / bar F1 in every
-                context mode, and the time-signature search (meter vs ts_true vs tsearch /
-                tsearch_beat: onset F1, bar F1, time signature). Bold = best in its column.
+                context mode, the note labeller (v2) on every grid, the time-signature search
+                (meter vs ts_true vs tsearch / tsearch_beat: onset F1, bar F1, time signature),
+                and the meter models (outputs/runs/<run>/eval_meter.json: their grids' beat /
+                downbeat F and time-signature accuracy). Bold = best in its column.
   margins.md    the guard-margin sweeps (runs evaluated with --extra-margins), per test set
   results.csv   every number: one row per run, test set and mode, for a spreadsheet
 
@@ -51,6 +53,18 @@ MODE_HELP = ("oracle = the true score before each window (upper bound); chained 
              "that output matches the input notes better; meter = guarded + consistent time signatures; "
              "piece = meter with one time signature per piece unless it changes for a long stretch")
 DASH = "-"  # ASCII: prints the same in every terminal
+METER_CONDITIONS = [  # (key in eval_meter.json, description)
+    ("clean", "ASAP test, clean MIDI, the tracker's errors simulated; against the annotations"),
+    ("real", "ASAP test transcribed by Transkun V2, Beat This!'s own beats; against the annotations"),
+    ("periscope", "PERiScoPe test (104 unseen works), real transcriptions, the tracker simulated; against the "
+                  "score's beats timed by the note alignment"),
+]
+METER_HELP = ("The grid each meter model decodes from the tracked beats of a whole piece (scripts/eval_meter.py): "
+              "beat F / downbeat F of the notated beats it implies, time sig = share of bars with the right time "
+              "signature, per performance and averaged (per piece: each piece once, however often it was played). "
+              "default = the same model with the untuned decoder (the tuned one: decode.json, chosen on validation). "
+              "tracker = the tracked beats themselves, the input. Data: A = ASAP, R = real ASAP transcriptions "
+              "with Beat This!'s beats, P = PERiScoPe")
 
 
 def num(x, pct=False, digits=3):
@@ -174,7 +188,62 @@ def find_runs(runs_dir, only, exclude):
     return out
 
 
-def summary(runs, res, info, now):
+def meter_info(d):
+    """Settings of one meter-model run (missing files -> dashes)."""
+    cfg = load_json(d / "config.json")
+    model, data = cfg.get("model", {}), cfg.get("data", {})
+    by = data.get("train_by_source")
+    if by:
+        src = "+".join(label for key, label in (("asap", "A"), ("real", "R"), ("periscope", "P")) if by.get(key))
+    else:  # the first meter model recorded only the real-transcription count
+        src = "A+R" if data.get("real_transcriptions") else ("A" if cfg else DASH)
+    status = load_json(d / "status.json")
+    return {"params": "{:.1f}M".format(cfg["params"] / 1e6) if cfg.get("params") else DASH,
+            "notes": DASH if not cfg else ("yes" if model.get("n_note_features") else "no"),
+            "data": src, "seed": cfg.get("args", {}).get("seed", DASH) if cfg else DASH,
+            "ended": DASH if not status else ("done" if status.get("phase") == "done" else "training")}
+
+
+def meter_section(meters):
+    """The meter models' tables: {run: (eval_meter.json, meter_info)}."""
+    if not meters:
+        return []
+    out = ["## Meter models (v2) per test set", "", METER_HELP + ".", ""]
+    for cond, desc in METER_CONDITIONS:
+        rows = []
+        for r in sorted(meters):
+            v = meters[r][0].get(cond)
+            if not isinstance(v, dict):
+                continue
+            mi, dflt, pm = meters[r][1], v.get("default", {}), v.get("piece_mean", {})
+            wrong = [c for c in v.get("ts_confusion", []) if c[0] != c[1]][:2]
+            rows.append([r, mi["data"], mi["notes"], mi["params"], mi["seed"],
+                         num(v.get("grid_beat_f")), num(v.get("grid_downbeat_f")), num(v.get("grid_ts_acc")),
+                         num(pm.get("grid_downbeat_f")), num(pm.get("grid_ts_acc")),
+                         num(dflt.get("grid_downbeat_f")), num(dflt.get("grid_ts_acc")),
+                         num(v.get("tracker_beat_f")), num(v.get("tracker_downbeat_f")),
+                         str(v.get("performances", DASH)),
+                         ", ".join("{}->{} {}".format(*c) for c in wrong) or DASH])
+        if rows:
+            hdr = ["run", "data", "note encoder", "params", "seed", "beat F", "downbeat F", "time sig",
+                   "downbeat F per piece", "time sig per piece", "downbeat F default", "time sig default",
+                   "tracker beat F", "tracker downbeat F", "n", "most bars wrong"]
+            out += ["### {}: {}".format(cond, desc), "",
+                    table(hdr, rows, {k: "max" for k in range(5, 12)}), ""]
+    return out
+
+
+def find_meters(runs_dir, only, exclude):
+    out = {}
+    for f in sorted(Path(runs_dir).glob("*/eval_meter.json")):
+        name = f.parent.name
+        if (only and name not in only) or any(fnmatch.fnmatch(name, pat) for pat in exclude):
+            continue
+        out[name] = (load_json(f), meter_info(f.parent))
+    return out
+
+
+def summary(runs, res, info, now, meters=None):
     out = ["# Run comparison", "",
            "Generated {} from `outputs/runs/*/eval_pieces_best.json` (each run's `best.pt`). Higher is "
            "better, except validation loss. **Bold** = best in its column; {} = not evaluated."
@@ -245,6 +314,7 @@ def summary(runs, res, info, now):
                 + [num(res[r][cond].get("tsearch", {}).get("ts_switch_rate"), True)] for r in have]
         out += ["### {}: {}".format(cond, desc), "",
                 table(hdr, rows, {k + 1: "max" for k in range(len(keys) * len(TS_MODES))}), ""]
+    out += meter_section(meters or {})
     return "\n".join(out)
 
 
@@ -331,23 +401,26 @@ def main(argv=None):
     ap.add_argument("--quiet", action="store_true", help="do not print summary.md")
     args = ap.parse_args(argv)
     only = [r for r in args.runs.split(",") if r]
-    runs = find_runs(args.runs_dir, only, [p for p in args.exclude.split(",") if p])
-    if not runs:
-        print("no evaluated runs in {} (looked for */eval_pieces_best.json)".format(args.runs_dir))
+    exclude = [p for p in args.exclude.split(",") if p]
+    runs = find_runs(args.runs_dir, only, exclude)
+    meters = find_meters(args.runs_dir, only, exclude)
+    if not runs and not meters:
+        print("no evaluated runs in {} (looked for */eval_pieces_best.json and */eval_meter.json)".format(args.runs_dir))
         return 1
     res = {r: load_json(Path(args.runs_dir) / r / "eval_pieces_best.json") for r in runs}
     info = {r: run_info(Path(args.runs_dir) / r) for r in runs}
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    text = summary(runs, res, info, now)
+    text = summary(runs, res, info, now, meters)
     (out / "summary.md").write_text(text + "\n", encoding="utf-8")
     (out / "margins.md").write_text(margins(runs, res, now) + "\n", encoding="utf-8")
     write_csv(out / "results.csv", runs, res)
     if not args.quiet:
         print(text)
         print()
-    print("wrote {0}/summary.md, {0}/margins.md, {0}/results.csv ({1} runs)".format(out, len(runs)))
+    print("wrote {0}/summary.md, {0}/margins.md, {0}/results.csv ({1} runs, {2} meter models)".format(
+        out, len(runs), len(meters)))
     return 0
 
 

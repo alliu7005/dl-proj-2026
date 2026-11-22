@@ -12,8 +12,9 @@ through the note alignment (Phase 1: the labeller given the right grid, as the b
 are given the annotated beats); ``meter:<run>`` = the grid a meter model decoded from the tracked
 beats (Phase 3, the real system: scripts/eval_meter.py --run <run> saves it per performance; clean
 and synthetic use its grids of the clean test performances with the simulated tracker, real its
-grids of the transcriptions with Beat This!'s beats), each window's bars, time signatures and key
-signature taken from it (src/notelabels.py window_frame), so nothing comes from the score. The
+grids of the transcriptions with Beat This!'s beats, periscope its grids of the PERiScoPe test
+transcriptions with the simulated tracker, one per segment: a window takes the one whose span
+holds it), each window's bars, time signatures and key signature taken from it (src/notelabels.py window_frame), so nothing comes from the score. The
 result is stored as mode ``grid_true`` / ``grid_meter_<run>`` in the run's
 eval_pieces_<ckpt>.json, next to the other systems' modes, so scripts/compare_runs.py tables it;
 per-head accuracies are kept with it. Conditions: clean (ASAP test, clean MIDI), synthetic (the
@@ -42,7 +43,35 @@ from src.notelabels import LABEL_FILE, score_notes, window_frame  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 
 SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed", "periscope": "test_periscope"}
-METER_GRIDS = {"clean": "clean", "synthetic": "clean", "real": "real"}  # condition -> eval_meter.py's grids
+METER_GRIDS = {"clean": "clean", "synthetic": "clean", "real": "real", "periscope": "periscope"}  # -> eval_meter.py's grids
+
+
+def grid_for(cands: list, t: float) -> dict:
+    """The grid of a performance (one per segment) whose span holds time ``t``, else the nearest."""
+    def gap(g):
+        lo, hi = g.get("span") or (-np.inf, np.inf)
+        return 0.0 if lo <= t <= hi else min(abs(t - lo), abs(t - hi))
+    return min(cands, key=gap)
+
+
+def merge_predictions(path: Path, mode: str, rows: list) -> None:
+    """Replace one mode's lines of a condition's prediction file (the other modes stay: the
+    labeller on other grids), under a lock as the results (scripts/evaluate_pieces.py
+    merge_results): evaluations on other grids may be writing the same file."""
+    import os
+    with open(path.with_suffix(".lock"), "w") as lock:
+        try:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except ImportError:  # Windows: one evaluation at a time
+            pass
+        old = [ln for ln in open(path) if ln.strip()] if path.exists() else []
+        tmp = path.with_suffix(".jsonl.tmp")
+        with open(tmp, "w") as f:
+            f.writelines(ln for ln in old if json.loads(ln).get("mode") != mode)
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+        os.replace(tmp, path)
 
 
 def grid_mode(grid: str) -> str:
@@ -92,7 +121,7 @@ def main(argv=None):
         ds = ScoreSegmentDataset(str(data / split), str(data / "vocab.json"), notelabels=True, **ctx, **kw)
         grids = None
         if args.grid != "true":
-            if cond not in METER_GRIDS:  # no annotated performances to decode (PERiScoPe)
+            if cond not in METER_GRIDS:
                 print(f"skip {cond}: the meter model's grids cover {', '.join(METER_GRIDS)} only")
                 continue
             gfile = Path(args.runs_dir) / args.grid[6:] / f"grids_{METER_GRIDS[cond]}.pkl"
@@ -100,7 +129,9 @@ def main(argv=None):
                 print(f"skip {cond}: {gfile} missing (scripts/eval_meter.py --run {args.grid[6:]})")
                 continue
             import pickle
-            grids = pickle.load(open(gfile, "rb"))
+            grids = defaultdict(list)
+            for key, g in pickle.load(open(gfile, "rb")).items():
+                grids[g.get("performance", key)].append(g)
         perfs = defaultdict(list)
         for i, m in enumerate(ds.store.meta):
             perfs[m["performance"]].append(i)
@@ -114,8 +145,10 @@ def main(argv=None):
         if grids is not None:  # each window's grid, bars and key from the decoded grid, nothing from the score
             for i in windows:
                 m = ds.store.meta[i]
-                g = grids[m["performance"]]
-                frames[i] = window_frame(g, float(m["perf_t0"]), ds.store.get(i)[0][:, 1], int(g.get("key", 0)))
+                on = ds.store.get(i)[0][:, 1]
+                t_mid = float(m["perf_t0"]) + (float(np.median(on[on >= 0])) if (on >= 0).any() else 0.0)
+                g = grid_for(grids[m["performance"]], t_mid)
+                frames[i] = window_frame(g, float(m["perf_t0"]), on, int(g.get("key", 0)))
             ds.grid_override = frames
         items = [ds[i] for i in windows]
         gts = [ds.vocab.decode(it["target"][it["prompt_len"]:-1].tolist()) for it in items]
@@ -141,10 +174,9 @@ def main(argv=None):
         if cond == "real":
             new["real_unseen_audio"] = {mode: stamp(acc_unseen.result(), None, args.limit_perfs)}
         merge_results(out_file, new)
-        with open(run / f"pred_pieces_{Path(args.ckpt).stem}_{cond}.jsonl", "w") as f:
-            for i, p in zip(windows, preds):
-                m = ds.store.meta[i]
-                f.write(json.dumps({"performance": m["performance"], "win": m["win"], "mode": mode, "pred": p}) + "\n")
+        merge_predictions(run / f"pred_pieces_{Path(args.ckpt).stem}_{cond}.jsonl", mode,
+                          [{"performance": ds.store.meta[i]["performance"], "win": ds.store.meta[i]["win"],
+                            "mode": mode, "pred": p} for i, p in zip(windows, preds)])
         print(f"{cond} ({len(windows)} windows, grid {args.grid}): onset F1 {res['onset_f1']:.3f}, onset-shift "
               f"{res['onset_shift_f1']:.3f}, duration {res['duration_acc']:.3f}, staff {res['staff_acc']:.3f}, bar F1 "
               f"{res['bar_f1']:.3f}, note F1 {res['note_f1']:.3f} | heads: keep {res['head_keep_acc']:.3f} pos "

@@ -103,14 +103,14 @@ def _time_map(pairs, sq, pt, max_ratio: float = 3.0):
 def window_grid(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str], max_extrap: float = 1.0) -> dict | None:
     """The score's beats of one window, timed in the window's frame. Returns arrays bar (window bar
     index, 0 = the target's first bar), beat (index in its bar), t (seconds), extrap (quarters
-    outside the aligned notes; 0 = interpolated), or None if fewer than MIN_PAIRS notes align.
-    Beats more than ``max_extrap`` quarter notes outside the aligned notes are left out."""
+    outside the aligned notes; 0 = interpolated), ts (its bar's time signature), or None if fewer
+    than MIN_PAIRS notes align. Beats more than ``max_extrap`` quarter notes outside the aligned notes are left out."""
     fit = fit_alignment(np.asarray(onsets, np.float64), np.asarray(pitches), tokens)
     if fit is None or len(fit[3]) < MIN_PAIRS:
         return None
     _, sq, _, pairs, pt = fit
     uq, ut, slope = _time_map(pairs, sq, pt)
-    bars, beats, qs = [], [], []
+    bars, beats, qs, tss = [], [], [], []
     start = 0.0
     for j, b in enumerate(parse_tokens(tokens)):
         n, qpb = beat_layout(b.ts)
@@ -118,6 +118,7 @@ def window_grid(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str], max_
             bars.append(j)
             beats.append(k)
             qs.append(start + k * qpb)
+            tss.append(b.ts or "4/4")
         try:
             num, den = (int(x) for x in b.ts.split("/"))
             start += num * 4 / den
@@ -131,7 +132,7 @@ def window_grid(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str], max_
     extrap = np.maximum(uq[0] - q, 0) + np.maximum(q - uq[-1], 0)
     keep = extrap <= max_extrap  # beyond the aligned notes the map is a guess: leave those out
     return {"bar": np.asarray(bars, np.int64)[keep], "beat": np.asarray(beats, np.int64)[keep],
-            "t": t[keep], "extrap": extrap[keep]}
+            "t": t[keep], "extrap": extrap[keep], "ts": np.asarray(tss, object)[keep]}
 
 
 def merge_performance(windows) -> tuple[np.ndarray, np.ndarray]:
@@ -139,24 +140,36 @@ def merge_performance(windows) -> tuple[np.ndarray, np.ndarray]:
     perf_t0, grid or None)]. Each beat (global bar, beat in bar) comes from the window that timed it
     with the least extrapolation (windows overlap at their edges in training splits); times must
     increase, so a beat that does not is dropped. Returns (times, down)."""
+    times, down, _, _, _ = merge_performance_bars(windows)
+    return times, down
+
+
+def merge_performance_bars(windows):
+    """``merge_performance`` with every beat's place in the score: (times, down, global bar, beat
+    in its bar, its bar's time signature; "4/4" from a grid without them)."""
     best = {}
     for bar_start, t0, g in windows:
         if g is None:
             continue
-        for b, k, t, e in zip(g["bar"], g["beat"], g["t"], g["extrap"]):
+        ts = g.get("ts")
+        ts = ["4/4"] * len(g["t"]) if ts is None else ts
+        for b, k, t, e, s in zip(g["bar"], g["beat"], g["t"], g["extrap"], ts):
             key = (int(bar_start) + int(b), int(k))
             if key not in best or e < best[key][1]:
-                best[key] = (float(t0) + float(t), float(e))
-    keys = sorted(best)
-    times, down, last = [], [], -np.inf
-    for key in keys:
+                best[key] = (float(t0) + float(t), float(e), str(s))
+    times, down, bars, beats, tss, last = [], [], [], [], [], -np.inf
+    for key in sorted(best):
         t = best[key][0]
         if t <= last:
             continue
         times.append(t)
         down.append(key[1] == 0)
+        bars.append(key[0])
+        beats.append(key[1])
+        tss.append(best[key][2])
         last = t
-    return np.asarray(times, np.float64), np.asarray(down, bool)
+    return (np.asarray(times, np.float64), np.asarray(down, bool), np.asarray(bars, np.int64),
+            np.asarray(beats, np.int64), tss)
 
 
 # ---------------------------------------------------------------------------------------------
