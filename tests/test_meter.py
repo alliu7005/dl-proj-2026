@@ -26,6 +26,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from tests.batch_env import batch_env  # noqa: E402
 from src.beats import merge_performance, merge_performance_bars  # noqa: E402
 from src.meter import (GRID, N_BEAT_FEATURES, N_NOTE_FEATURES, Q_STEPS, TS_CLASSES, DecodeConfig,  # noqa: E402
                        aligned_grids, annotation_grid, bar_quarters, beat_features, build_meter_model, collate,
@@ -495,7 +496,7 @@ def test_meter_batch():
             if (tmp / "jobs.txt").exists():
                 (tmp / "jobs.txt").unlink()
             r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/meter.sh'], cwd=tmp,
-                               env=dict(os.environ, SUBMITS=str(tmp / "jobs.txt"), USER="me", **(env or {})),
+                               env=batch_env(SUBMITS=str(tmp / "jobs.txt"), USER="me", **(env or {})),
                                capture_output=True, text=True)
             assert r.returncode == 0, r.stdout + r.stderr
             return [(ln.split("\t")[0], ln.split("\t")[1]) for ln in (tmp / "jobs.txt").read_text().splitlines()]

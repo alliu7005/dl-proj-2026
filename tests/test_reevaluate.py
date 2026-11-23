@@ -18,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from tests.batch_env import batch_env  # noqa: E402
 from src.eval.plan import DEFAULT_MODES, margins_of, mode_names, stamp  # noqa: E402
 
 ALL = DEFAULT_MODES.split(",")
@@ -78,7 +79,7 @@ def setup(tmp: Path):
 
 def reevaluate(tmp, bin_, *runs, **env):
     submits = tmp / f"submits_{len(list(tmp.glob('submits_*')))}.txt"
-    e = dict(os.environ, USER="me", SUBMITS=str(submits), **env)
+    e = batch_env(USER="me", SUBMITS=str(submits), **env)
     r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash pace/reevaluate.sh "$@"',
                         "x", *runs], cwd=tmp, env=e, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -150,12 +151,12 @@ def test_reevaluate():
         assert "-t 3:00:00" in j[2] and "-t 1:30:00" in jobs["no_real@real"][2], j  # 45M vs 10M parameters
         assert "old@real: job 1000  (3:00:00) computes: ts_true,tsearch" in first, first
         assert "skip done_all: nothing missing" in first, first
-        e = dict(os.environ, USER="me", SUBMITS=str(tmp / "pc.txt"), PER_CONDITION="1", FORCE="1")
+        e = batch_env(USER="me", SUBMITS=str(tmp / "pc.txt"), PER_CONDITION="1", FORCE="1")
         r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/reevaluate.sh'],
                            cwd=tmp, env=e, capture_output=True, text=True)
         assert r.returncode != 0 and "do not combine" in r.stdout and not (tmp / "pc.txt").exists(), r.stdout
         # a bad argument stops the script before anything is submitted
-        e = dict(os.environ, USER="me", SUBMITS=str(tmp / "bad.txt"), ARGS="--modes guardd")
+        e = batch_env(USER="me", SUBMITS=str(tmp / "bad.txt"), ARGS="--modes guardd")
         r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash pace/reevaluate.sh'],
                            cwd=tmp, env=e, capture_output=True, text=True)
         assert r.returncode != 0 and "unknown mode" in r.stdout and not (tmp / "bad.txt").exists(), r.stdout
@@ -176,7 +177,7 @@ def test_beats_batch():
                                      'printf "%s\\t%s\\t%s\\t%s\\n" "$n" "$NAME" "$ARGS" "$*" >> "$SUBMITS"\n'
                                      'echo $n\n')
         (bin_ / "sbatch").chmod(0o755)
-        e = dict(os.environ, USER="me", SUBMITS=str(tmp / "jobs.txt"))
+        e = batch_env(USER="me", SUBMITS=str(tmp / "jobs.txt"))
         r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/beats.sh'],
                            cwd=tmp, env=e, capture_output=True, text=True)
         assert r.returncode == 0, r.stdout + r.stderr
@@ -205,7 +206,7 @@ def test_beats_batch():
         # STAGE=beat-runs: only the two beat runs, from scratch, with the same arguments, no dependency
         def stage(**env):
             out = tmp / f"stage_{len(list(tmp.glob('stage_*')))}.txt"
-            e = {**os.environ, "USER": "me", "SUBMITS": str(out), "STAGE": "beat-runs", **env}
+            e = {**batch_env(), "USER": "me", "SUBMITS": str(out), "STAGE": "beat-runs", **env}
             r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/beats.sh'],
                                cwd=tmp, env=e, capture_output=True, text=True)
             return r, [ln.split("	") for ln in out.read_text().splitlines()] if out.exists() else []
@@ -266,7 +267,7 @@ def test_tsearch_batch():
             res = {c: {n: stamp({"note_f1": 0.5}, margins.get(n)) for n in names} for c in conds}
             res["real_unseen_audio"] = res["real"]
             (d / "eval_pieces_best.json").write_text(json.dumps(res))
-        e = dict(os.environ, USER="me", SUBMITS=str(tmp / "jobs.txt"))
+        e = batch_env(USER="me", SUBMITS=str(tmp / "jobs.txt"))
         r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/tsearch.sh'],
                            cwd=tmp, env=e, capture_output=True, text=True)
         assert r.returncode == 0, r.stdout + r.stderr

@@ -25,6 +25,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from tests.batch_env import batch_env  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.notelabels import Placed, Window, render  # noqa: E402
 
@@ -382,7 +383,7 @@ def test_v2_batch():
                 if f.exists():
                     f.unlink()
             r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash pace/v2.sh {wave}'],
-                               cwd=tmp, env=dict(os.environ, SUBMITS=str(tmp / "jobs.txt"), BD=str(bd), **(env or {})),
+                               cwd=tmp, env=batch_env(SUBMITS=str(tmp / "jobs.txt"), BD=str(bd), **(env or {})),
                                capture_output=True, text=True)
             assert r.returncode == 0, r.stdout + r.stderr
             rows = [ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()]
@@ -396,9 +397,10 @@ def test_v2_batch():
         assert "tests.test_meter" in tests[3] and "tests.test_v2_system" in tests[3] and "--gres" not in tests[3]
         for grp, runs in (("meter_v3+meter_v3_s1", "meter_v3 meter_v3_s1"), ("meter_v3_s2+meter_v3_large", "meter_v3_s2 meter_v3_large")):
             a, b = by["met_" + grp]
-            assert f"--dependency=afterok:{tests[0]}" in a[3] and f"--dependency=afterany:{a[0]}" in b[3]
+            # the second job resumes the first, and also only runs if the tests passed
+            assert f"--dependency=afterok:{tests[0]}" in a[3] and f"--dependency=afterok:{tests[0]},afterany:{a[0]}" in b[3]
             assert all(f"bash pace/v2_jobs.sh meters {runs}" in x[3] and "--gres=gpu:1" in x[3] for x in (a, b))
-            assert "--kill-on-invalid-dep=yes" in a[3] and "--kill-on-invalid-dep" not in b[3]
+            assert "--kill-on-invalid-dep=yes" in a[3] and "--kill-on-invalid-dep=yes" in b[3]
         lab = by["labellers"][0]
         assert "v2_jobs.sh labellers nl_base_gn nl_base_gn_s1" in lab[3] and f"afterok:{tests[0]}" in lab[3]
         grids = by["v2grids"][0]
@@ -461,7 +463,7 @@ def test_rebuild_batch():
                 if f.exists():
                     f.unlink()
             r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash {script}'], cwd=tmp,
-                               env=dict(os.environ, SUBMITS=str(tmp / "jobs.txt"), BD=str(tmp / "nobd"), **(env or {})),
+                               env=batch_env(SUBMITS=str(tmp / "jobs.txt"), BD=str(tmp / "nobd"), **(env or {})),
                                capture_output=True, text=True)
             rows = [ln.split("	") for ln in (tmp / "jobs.txt").read_text().splitlines()] if (tmp / "jobs.txt").exists() else []
             return r, rows
@@ -520,7 +522,7 @@ exit 0
             if calls.exists():
                 calls.unlink()
             r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash pace/v2_jobs.sh {args}'],
-                               cwd=tmp, env=dict(os.environ, CALLS=str(calls), DONE=done, SLURM_JOB_ID="77"),
+                               cwd=tmp, env=batch_env(CALLS=str(calls), DONE=done, SLURM_JOB_ID="77"),
                                capture_output=True, text=True)
             return r.returncode, (calls.read_text().splitlines() if calls.exists() else []), r.stdout + r.stderr
         code, calls, out = run("meters meter_v3 meter_v3_large", done="meter_v3")

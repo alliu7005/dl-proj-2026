@@ -22,6 +22,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from tests.batch_env import batch_env  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.notelabels import (IGNORE, LABEL_COLS, N_FLAGS, LabelSpace, Placed, Window, align_notes,  # noqa: E402
                             bar_of, flags_of, grid_features, oracle_placed, render, score_notes, targets,
@@ -236,7 +237,7 @@ def test_labeller_batch():
                                             'echo $n > "$SUBMITS.n"\nprintf "%s\\t%s\\t%s\\t%s\\n" "$n" "$NAME" "$ARGS" "$*" >> "$SUBMITS"\necho $n\n')
         (tmp / "bin" / "sbatch").chmod(0o755)
         r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/labeller.sh'], cwd=tmp,
-                           env=dict(os.environ, SUBMITS=str(tmp / "jobs.txt")), capture_output=True, text=True)
+                           env=batch_env(SUBMITS=str(tmp / "jobs.txt")), capture_output=True, text=True)
         assert r.returncode == 0, r.stdout + r.stderr
         jobs = [ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()]
         prep = jobs[0]

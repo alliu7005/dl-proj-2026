@@ -83,7 +83,8 @@ python -m tests.test_preprocessing && python -m tests.test_context_notes && pyth
     submit "met_${grp//,/+}" "${G[@]}" -c 16 --mem=120G -t 8:00:00 --dependency=afterok:$tests \
         --wrap="$JOBS meters $runs"
     a=$ID
-    submit "met_${grp//,/+}" "${G[@]}" -c 16 --mem=120G -t 8:00:00 --dependency=afterany:$a \
+    # the second job: once the first has ended (however), and only if the tests passed
+    submit "met_${grp//,/+}" "${G[@]}" -c 16 --mem=120G -t 8:00:00 --dependency=afterok:$tests,afterany:$a \
         --wrap="$JOBS meters $runs"
     b=$ID
     ids+=("$a" "$b")

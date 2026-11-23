@@ -24,6 +24,7 @@ import pretty_midi
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from tests.batch_env import batch_env  # noqa: E402
 from scripts import beyer_dai, system_inputs, system_scores  # noqa: E402
 from src.beats import beats_path, save_beats  # noqa: E402
 from src.preprocessing.performance import load_performance  # noqa: E402
@@ -235,7 +236,7 @@ def test_system_eval_batch():
                                      'echo $n > "$SUBMITS.n"\nprintf "%s\\t%s\\n" "$n" "$*" >> "$SUBMITS"\necho $n\n')
         (bin_ / "sbatch").chmod(0o755)
         bd = tmp / "bd"
-        env = dict(os.environ, SUBMITS=str(tmp / "jobs.txt"), BD=str(bd))
+        env = batch_env(SUBMITS=str(tmp / "jobs.txt"), BD=str(bd))
         cmd = [shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/system_eval.sh']
         r = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True)
         assert r.returncode != 0 and "bash pace/bd_setup.sh first" in r.stdout and not (tmp / "jobs.txt").exists()
