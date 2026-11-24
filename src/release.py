@@ -18,9 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = Path("models")
 
-# The Hugging Face model repo the release is uploaded to, "<user or org>/<name>" (set once it exists;
-# scripts/download_models.py --repo overrides it).
-HF_REPO = ""
+# The Hugging Face model repo the release is uploaded to (scripts/download_models.py --repo overrides it).
+HF_REPO = "dat-dev/scoreformer"
 
 # name -> its file in models/, and the training run's checkpoint used when models/ does not have it.
 # The release's sources (export_models.py defaults) are the round-4 winners (docs/experiments.md,

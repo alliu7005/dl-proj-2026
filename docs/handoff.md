@@ -274,7 +274,7 @@ combination, builds `models/`, then uploads it (pace/README.md, "4m").
 
 **To use the models:**
 ```bash
-python scripts/download_models.py     # needs HF_REPO in src/release.py, or --repo <user>/<name>
+python scripts/download_models.py     # from dat-dev/scoreformer (src/release.py HF_REPO)
 ```
 The demo and the CLI pick up `models/` on their own. On a training machine they fall back to
 `outputs/runs/`.

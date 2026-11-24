@@ -3,10 +3,9 @@ checking every file against its manifest; tag the upload with the release's name
 can ask for exactly this version (download_models.py --revision <tag>).
 
     hf auth login                                          # once: a token with write access
-    python scripts/upload_models.py --repo <user or org>/piano-score-models
-    python scripts/upload_models.py --repo <user>/<name> --private     # visible only to you (and an org's members)
-
-Then set HF_REPO in src/release.py to the repo, so download_models.py needs no --repo.
+    python scripts/upload_models.py                        # to src/release.py HF_REPO (dat-dev/scoreformer)
+    python scripts/upload_models.py --private              # created private: you (and an org's members) only
+    python scripts/upload_models.py --repo <user>/<name>   # another repo (then set HF_REPO to it)
 """
 from __future__ import annotations
 
@@ -17,12 +16,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.download_models import verify  # noqa: E402
-from src.release import MODELS, ROOT  # noqa: E402
+from src.release import HF_REPO, MODELS, ROOT  # noqa: E402
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--repo", required=True, help="<user or org>/<name>; created if it does not exist")
+    ap.add_argument("--repo", default=HF_REPO,
+                    help=f"<user or org>/<name>, created if it does not exist (default: {HF_REPO})")
     ap.add_argument("--models", default=str(ROOT / MODELS))
     ap.add_argument("--private", action="store_true", help="create the repo private (an existing repo keeps its setting)")
     ap.add_argument("--no-tag", action="store_true", help="do not tag the upload with the release's name")
@@ -50,7 +50,9 @@ def main(argv=None):
         else:
             api.create_tag(args.repo, tag=release, repo_type="model")
             print(f"tagged {release}")
-    print(f"next: set HF_REPO = \"{args.repo}\" in src/release.py; teammates then run python scripts/download_models.py")
+    if args.repo != HF_REPO:
+        print(f"next: set HF_REPO = \"{args.repo}\" in src/release.py (it names {HF_REPO or 'no repo'})")
+    print("teammates get the models with: python scripts/download_models.py")
 
 
 if __name__ == "__main__":

@@ -442,12 +442,12 @@ cd ~/scratch/dl-proj-2026 && module load anaconda3 && conda activate dl-proj && 
 ```
 
 ```bash
-cd ~/scratch/dl-proj-2026 && module load anaconda3 && conda activate dl-proj && python scripts/download_models.py --check && python scripts/upload_models.py --repo <hf-user>/piano-score-models
+cd ~/scratch/dl-proj-2026 && module load anaconda3 && conda activate dl-proj && python scripts/download_models.py --check && python scripts/upload_models.py --repo dat-dev/scoreformer
 ```
 
 `--private` keeps the repo to you (and an organization's members). The upload is tagged with the
 release's name (`v2-round4`), so `download_models.py --revision v2-round4` always gets this
-version. Then set `HF_REPO` in `src/release.py`, and anyone gets the models with
+version. `HF_REPO` in `src/release.py` names this repo, so anyone gets the models with
 `python scripts/download_models.py`.
 
 To bring the results back (PACE, then Windows):
