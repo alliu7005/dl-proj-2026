@@ -396,7 +396,7 @@ def main():
                 res[mode]["meter_fix_rate"] = len(forced.get(mode, {})) / len(windows)
             if mode in switched:  # ts_true / tsearch: windows whose time signature it changed
                 res[mode]["ts_switch_rate"] = switched[mode]
-            if cond == "real":
+            if cond == "real" and acc_unseen.c["windows"]:  # none with --limit-perfs on a MAESTRO-train piece
                 new.setdefault("real_unseen_audio", {})[mode] = stamp(
                     acc_unseen.result(), margins[mode] if guarded else None, args.limit_perfs)
         new[cond] = res

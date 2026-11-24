@@ -248,6 +248,15 @@ def test_labeller_batch():
         assert all(f"--dependency=afterok:{prep[0]}" in j[3] and "train_labeller.sbatch" in j[3] for j in runs.values())
 
 
+def test_empty_accumulator():
+    """No windows (a subset with nothing in it, e.g. real_unseen_audio under --limit-perfs): rates
+    are nan, not a ZeroDivisionError (it stopped pace/v2_gangqinpu.sh's tests on PACE)."""
+    import math
+    r = Accumulator().result()
+    assert r["windows"] == 0 and math.isnan(r["ts_acc"]) and math.isnan(r["key_acc"])
+    assert math.isnan(r["onset_f1"]) and math.isnan(r["duration_acc"])
+
+
 def main():
     tests = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     for t in tests:
