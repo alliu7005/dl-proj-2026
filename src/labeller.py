@@ -141,14 +141,28 @@ def head_counts(out: dict, labels: torch.Tensor) -> dict:
     return c
 
 
-def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, staves: int = 0) -> list[Placed]:
+def keep_mask(keep_logits: torch.Tensor, delete_above: float = 0.5) -> torch.Tensor:
+    """The notes kept: a note is deleted only when the keep head's probability of "delete" is above
+    ``delete_above`` (0.5: the head's own decision, as trained and evaluated; 1 or more: none).
+    ``delete_above`` trades notes wrongly left out against transcription errors kept: the "delete"
+    label is "the alignment paired no score note with it", which also covers notes really played
+    (on clean MIDI, 34% of what the head deletes at 0.5 had a score note; at 0.8, 16%)."""
+    if delete_above >= 1.0:
+        return torch.ones_like(keep_logits, dtype=torch.bool)
+    t = float(np.log(delete_above / (1.0 - delete_above)))  # p(delete) > d  <=>  logit(keep) < -logit(d)
+    return keep_logits > -t
+
+
+def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, staves: int = 0,
+                 delete_above: float = 0.5) -> list[Placed]:
     """Item ``b`` of a batch's predictions -> the notes to render: every own note (window or
     carried, ``own`` mask over the item's notes; context notes belong to other windows) the keep
     head keeps, at its predicted bar (grid bar + correction, never before bar 0), position,
     length, staff and flags. ``pitches`` / ``bar_est``: the item's notes (performed pitches).
-    ``staves``: only the first that many staves (each note on its likeliest of them; 0 = all)."""
+    ``staves``: only the first that many staves (each note on its likeliest of them; 0 = all).
+    ``delete_above``: see keep_mask."""
     n = min(len(own), out["keep"].shape[1])  # the batch pads every item to its longest one
-    keep = (out["keep"][b, :n] > 0).cpu().numpy()
+    keep = keep_mask(out["keep"][b, :n], delete_above).cpu().numpy()
     pick = {k: out[k][b, :n].argmax(-1).cpu().numpy() for k in ("delta", "pos", "sub", "dur")}
     staff_logits = out["staff"][b, :n]
     if staves:
@@ -177,11 +191,11 @@ def load_labeller(path, device) -> NoteLabeller:
 
 @torch.no_grad()
 def predict_placed(model, items: list[dict], coll, device, amp: bool, space, batch_size: int = 32,
-                   carried: bool = True, staves: int = 0) -> list[list[Placed]]:
+                   carried: bool = True, staves: int = 0, delete_above: float = 0.5) -> list[list[Placed]]:
     """Label dataset items (ScoreSegmentDataset(notelabels=True), or src/pipeline.py V2Pipeline's
     windows): the notes each keeps, placed in its window's bars. ``carried``: also the notes carried
     over from the window before (a window's target writes their continuation; a whole piece
-    places each note once, in its own window). ``staves``: see placed_notes."""
+    places each note once, in its own window). ``staves``, ``delete_above``: see placed_notes."""
     from .dataset import ROLE_CARRIED, ROLE_WINDOW
     model.eval()
     res = [None] * len(items)
@@ -195,7 +209,8 @@ def predict_placed(model, items: list[dict], coll, device, amp: bool, space, bat
         for r, i in enumerate(idx):
             it = items[i]
             own = (it["roles"] <= (ROLE_CARRIED if carried else ROLE_WINDOW)).numpy()
-            res[i] = placed_notes(out, r, it["notes"][:, 0].numpy(), it["bar_est"].numpy(), own, space, staves)
+            res[i] = placed_notes(out, r, it["notes"][:, 0].numpy(), it["bar_est"].numpy(), own, space, staves,
+                                  delete_above)
     return res
 
 

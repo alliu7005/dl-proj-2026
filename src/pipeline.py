@@ -426,6 +426,7 @@ def piece_staves(staffs: list[int]) -> int:
     return max([2] + [s + 1 for s in kept])
 
 
+DELETE_ABOVE = 0.5     # v2 leaves a note out when the labeller's p(delete) is above this (as evaluated)
 GRACE_REACH = 1        # quarters: a grace note joins a main note of its staff at most this far after it
 GRACE_AS_NOTE = 0.25   # quarters: the longest written length of a "grace" note with no main note to join
 
@@ -501,7 +502,7 @@ class V2Pipeline(_FrontEnd):
     """
 
     def __init__(self, labeller_ckpt: str | Path, meter_ckpt: str | Path, vocab: str | Path | None = None,
-                 device: str = "auto", window_notes: int = 128):
+                 device: str = "auto", window_notes: int = 128, delete_above: float = DELETE_ABOVE):
         from .labeller import load_labeller
         from .meter import DecodeConfig, build_meter_model
         from .notelabels import LabelSpace
@@ -531,6 +532,7 @@ class V2Pipeline(_FrontEnd):
         self.window_notes = window_notes
         n_lab = sum(p.numel() for p in self.labeller.parameters())
         n_met = sum(p.numel() for p in self.meter.parameters())
+        self.delete_above = float(delete_above)
         self.info = {"system": "v2", "labeller": str(labeller_ckpt), "meter": str(meter_ckpt),
                      "params_M": round((n_lab + n_met) / 1e6, 1), "device": str(self.device),
                      "decode": self.decode_cfg.to_dict()}
@@ -576,8 +578,10 @@ class V2Pipeline(_FrontEnd):
         return items, frames
 
     def label(self, notes: np.ndarray, pedal: np.ndarray, grid: dict,
-              progress: Progress = _noop) -> tuple[list[str], dict]:
-        """Every note labelled in its window, all rendered in the grid's bars as one score."""
+              progress: Progress = _noop, delete_above: float | None = None) -> tuple[list[str], dict]:
+        """Every note labelled in its window, all rendered in the grid's bars as one score.
+        ``delete_above``: leave a note out only above this p(delete) (default: the pipeline's)."""
+        delete_above = self.delete_above if delete_above is None else float(delete_above)
         import sys
         from fractions import Fraction
         from .labeller import predict_placed
@@ -589,12 +593,13 @@ class V2Pipeline(_FrontEnd):
         progress("score", 0.0, f"labelling {len(windows)} windows")
         items, frames = self.items(windows, grid)
         coll = TruncatingCollate(self.cfg.max_notes, 10 ** 9)
-        placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False)
+        placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
+                                delete_above=delete_above)
         staves = piece_staves([p.staff for pl in placed for p in pl])
         folded = sum(p.staff >= staves for pl in placed for p in pl)
         if folded:  # a stray third / fourth staff: those notes on their likeliest of the staves kept
             placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
-                                    staves=staves)
+                                    staves=staves, delete_above=delete_above)
         notes_out = []
         for win, pl in zip(frames, placed):
             for p in pl:
@@ -618,11 +623,12 @@ class V2Pipeline(_FrontEnd):
         own = int(sum(int((it["roles"] == 0).sum()) for it in items))
         return tokens, {"windows": len(windows), "notes_kept": len(notes_out), "notes_deleted": own - len(notes_out),
                         "bar_ts": [ts for ts, _ in bars], "staves": max([2] + [p.staff + 1 for p in notes_out]),
-                        "staff_folded": int(folded), "graces_attached": graces, "follow": follow_map(grid, notes_out)}
+                        "staff_folded": int(folded), "graces_attached": graces, "delete_above": delete_above,
+                        "follow": follow_map(grid, notes_out)}
 
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, progress: Progress = _noop, beats: tuple | None = None,
-            beat_checkpoint: str = "final0", **_) -> Result:
+            beat_checkpoint: str = "final0", delete_above: float | None = None, **_) -> Result:
         """``beats``: (times, down) in the input's seconds, given instead of tracking them.
         ``beat_checkpoint``: the Beat This! model that tracks them (scripts/system_scores.py gives
         each ASAP test piece the cross-validation model that never heard it)."""
@@ -676,7 +682,7 @@ class V2Pipeline(_FrontEnd):
         grid = self.grid(notes, beats)
         timing["grid_s"] = round(time.perf_counter() - t, 1)
         t = time.perf_counter()
-        tokens, counts = self.label(notes, pedal, grid, progress)
+        tokens, counts = self.label(notes, pedal, grid, progress, delete_above=delete_above)
         timing["score_s"] = round(time.perf_counter() - t, 1)
         res.tokens = tokens
         (out / "tokens.txt").write_text(" ".join(tokens))

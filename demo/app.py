@@ -39,6 +39,9 @@ MAX_MB = 100
 STAGES = {"transcribe": (0.0, 0.45), "beats": (0.45, 0.5), "grid": (0.5, 0.55), "score": (0.55, 0.95),
           "engrave": (0.95, 1.0)}
 SYSTEMS = ("v2", "seq2seq")  # in order of preference for the default
+# v2: when to leave a performed note out as a transcription error (the labeller's p(delete) above it):
+# "sure" by default, since at the trained 0.5 a third of what it deletes on clean MIDI was a score note
+DELETE = {"off": 1.0, "sure": 0.8, "trained": 0.5}
 DOWNLOAD_NAMES = {"musicxml": "score.musicxml", "score_midi": "score.mid",
                   "transcription_midi": "transcription.mid", "tokens": "tokens.txt"}
 
@@ -70,7 +73,7 @@ def create_app(pipes: dict, out_root: Path, default: str | None = None) -> FastA
             try:
                 pipe = pipes[job["system"]]
                 if job["system"] == "v2":
-                    res = pipe.run(job["input"], job["dir"], progress=progress)
+                    res = pipe.run(job["input"], job["dir"], progress=progress, delete_above=DELETE[job["delete"]])
                 else:
                     res = pipe.run(job["input"], job["dir"], mode=job["mode"], progress=progress)
                 update(jid, status="done", progress=1.0, stage="done", message="done", stats=res.stats,
@@ -94,7 +97,8 @@ def create_app(pipes: dict, out_root: Path, default: str | None = None) -> FastA
                 "audio": sorted(AUDIO_EXT), "midi": sorted(MIDI_EXT), "max_mb": MAX_MB}
 
     @app.post("/api/jobs")
-    async def submit(file: UploadFile = File(...), mode: str = Form(MODES[0]), system: str = Form("")):
+    async def submit(file: UploadFile = File(...), mode: str = Form(MODES[0]), system: str = Form(""),
+                     delete: str = Form("sure")):
         ext = Path(file.filename or "").suffix.lower()
         system = system or default
         if ext not in AUDIO_EXT | MIDI_EXT:
@@ -103,6 +107,8 @@ def create_app(pipes: dict, out_root: Path, default: str | None = None) -> FastA
             raise HTTPException(400, f"system must be one of {', '.join(pipes)}")
         if mode not in MODES:
             raise HTTPException(400, f"mode must be one of {', '.join(MODES)}")
+        if delete not in DELETE:
+            raise HTTPException(400, f"delete must be one of {', '.join(DELETE)}")
         data = await file.read()
         if len(data) > MAX_MB * 2**20:
             raise HTTPException(413, f"file larger than {MAX_MB} MB")
@@ -114,6 +120,7 @@ def create_app(pipes: dict, out_root: Path, default: str | None = None) -> FastA
         with lock:
             jobs[jid] = {"id": jid, "status": "queued", "stage": "queued", "progress": 0.0,
                          "message": "waiting for the previous job", "name": file.filename, "mode": mode, "system": system,
+                         "delete": delete,
                          "input": str(src), "dir": str(d), "is_midi": ext in MIDI_EXT, "created": time.time()}
         todo.put(jid)
         return {"id": jid}

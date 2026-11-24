@@ -34,6 +34,9 @@ def main():
                          "as context, degenerate windows redone without it; chained: previous output as context, "
                          "unguarded; none: no context")
     ap.add_argument("--guard-margin", type=float, default=GUARD_MARGIN)
+    ap.add_argument("--delete-above", type=float, default=0.8,
+                    help="v2: leave a note out only when the labeller's p(delete) is above this (0.5: as "
+                         "evaluated, 1: keep every note; default 0.8, as the demo)")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
@@ -48,7 +51,7 @@ def main():
         print(f"  [{stage}] {msg}", end="\r" if stage == "score" else "\n", flush=True)
 
     if args.v2:
-        res = pipe.run(args.input, out, progress=progress)
+        res = pipe.run(args.input, out, progress=progress, delete_above=args.delete_above)
     else:
         res = pipe.run(args.input, out, mode=args.mode, progress=progress, guard_margin=args.guard_margin)
     print()

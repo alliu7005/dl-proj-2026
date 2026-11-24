@@ -41,7 +41,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.track_beats import checkpoint_for, load_folds  # noqa: E402
 from src.beats import beats_path, load_beats  # noqa: E402
-from src.pipeline import MODES, ScorePipeline, V2Pipeline  # noqa: E402
+from src.pipeline import DELETE_ABOVE, MODES, ScorePipeline, V2Pipeline  # noqa: E402
 
 
 def parse_v2(spec: str) -> tuple[str, str]:
@@ -51,11 +51,14 @@ def parse_v2(spec: str) -> tuple[str, str]:
     return lab, met
 
 
-def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, clean_beats: str = "synth") -> str:
-    """The folder (and table row) of a system under outputs/system_eval."""
+def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, clean_beats: str = "synth",
+                delete_above: float = DELETE_ABOVE) -> str:
+    """The folder (and table row) of a system under outputs/system_eval (v2 with another deletion
+    threshold: _d<percent>, _keepall for none)."""
     if v2:
         lab, met = parse_v2(v2)
-        return f"v2_{lab}_{met}" + ("_ab" if clean_beats == "audio" else "")
+        d = "" if delete_above == DELETE_ABOVE else "_keepall" if delete_above >= 1 else f"_d{round(delete_above * 100)}"
+        return f"v2_{lab}_{met}" + d + ("_ab" if clean_beats == "audio" else "")
     return f"{run}_{mode}" + ("_sb" if midi_beats == "synth" else "")
 
 
@@ -72,6 +75,9 @@ def main(argv=None):
     ap.add_argument("--clean-beats", default="synth", choices=["synth", "audio"],
                     help="v2 on clean MIDI: Beat This! on the MIDI rendered to audio, or on the performance's real "
                          "recording (only the performances that have one)")
+    ap.add_argument("--delete-above", type=float, default=DELETE_ABOVE,
+                    help="v2: leave a note out only above this p(delete) (1 = keep every note); "
+                         "a setting other than the default is its own system (_d<percent>, _keepall)")
     ap.add_argument("--manifest", default="outputs/system_eval/manifest.json")
     ap.add_argument("--conditions", default="clean,real")
     ap.add_argument("--out", default="outputs/system_eval")
@@ -89,7 +95,8 @@ def main(argv=None):
     runs = Path(args.runs_dir)
     if args.v2:
         lab, met = parse_v2(args.v2)
-        pipe = V2Pipeline(runs / lab / args.ckpt, runs / met / args.ckpt, vocab=args.vocab, device=args.device)
+        pipe = V2Pipeline(runs / lab / args.ckpt, runs / met / args.ckpt, vocab=args.vocab, device=args.device,
+                          delete_above=args.delete_above)
         wants_beats, midi_beats = True, "synth"
     else:
         pipe = ScorePipeline(runs / args.run / args.ckpt, vocab=args.vocab, device=args.device)
@@ -109,7 +116,9 @@ def main(argv=None):
         n = len(entries)
         entries = [e for e in entries if e["condition"] != "clean" or e["performance"] in tracked]
         print(f"--clean-beats audio: {len(entries)} of {n} inputs (clean ones need a recording)", flush=True)
-    system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats)
+    if not args.v2 and args.delete_above != DELETE_ABOVE:
+        ap.error("--delete-above is for v2 (--v2)")
+    system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above)
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before

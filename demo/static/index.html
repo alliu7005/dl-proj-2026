@@ -118,6 +118,14 @@
         <label id="sys-seq2seq" title="The Scoreformer writes the score window by window, token by token"><input type="radio" name="system" value="seq2seq"><span>Window by window (seq2seq)</span></label>
       </div>
     </div>
+    <div class="options" id="delopts">
+      <span>Leave out likely transcription errors</span>
+      <div class="seg">
+        <label title="Only notes the labeller is quite sure are transcription errors (p &gt; 0.8). At its trained setting, about a third of the notes it removes from clean MIDI were real score notes"><input type="radio" name="delete" value="sure" checked><span>Only when sure</span></label>
+        <label title="The labeller's own decision (p &gt; 0.5), as in the evaluation: removes more transcription errors, and more real notes"><input type="radio" name="delete" value="trained"><span>As trained</span></label>
+        <label title="Every transcribed note is written"><input type="radio" name="delete" value="off"><span>Keep every note</span></label>
+      </div>
+    </div>
     <div class="options" id="modeopts">
       <span>Context between windows</span>
       <div class="seg">
@@ -194,6 +202,7 @@ function pill() {
     ? `v2: meter model + note labeller · ${i.params_M}M params · ${i.device}`
     : `${i.arch} · ${i.params_M}M params${i.beats ? ' · beats' : ''} · ${i.device}`;
   $('#modeopts').classList.toggle('hidden', system() === 'v2');
+  $('#delopts').classList.toggle('hidden', system() !== 'v2');
 }
 fetch('/api/info').then(r => r.json()).then(i => {
   systems = i.systems || { seq2seq: i };
@@ -253,6 +262,7 @@ async function submit(file) {
   fd.append('file', file);
   fd.append('mode', document.querySelector('input[name=mode]:checked').value);
   fd.append('system', system());
+  fd.append('delete', document.querySelector('input[name=delete]:checked').value);
   let id;
   try {
     const r = await fetch('/api/jobs', { method: 'POST', body: fd });
@@ -310,7 +320,8 @@ function showResult(id, job) {
     }
     if (s.notes_deleted != null) {
       const n = s.notes_deleted;
-      items.push([n, `${word(n, 'note', 'notes')} left out as transcription errors`]);
+      const how = s.delete_above >= 1 ? ' (keeping every note)' : s.delete_above != null ? ` (p > ${s.delete_above})` : '';
+      items.push([n, `${word(n, 'note', 'notes')} left out as transcription errors${how}`]);
     }
   } else {
     items.push([fmtTime(s.score_s || 0), 'score model']);

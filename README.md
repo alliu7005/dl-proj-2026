@@ -1383,6 +1383,16 @@ Two systems, chosen per upload on the page (each is loaded when its checkpoints 
   28-100% of a piece, or one short passage). Below that the staff is a stray prediction, and its
   notes go on the likeliest of the staves kept: one note of 1,221 had given a demo piece two empty
   staves for all 73 bars.
+- **Leaving notes out.** The labeller's keep head marks notes as transcription errors, but its
+  "delete" label means the alignment paired no score note with the note. That also covers notes
+  really played: extra trill notes, and notes the alignment missed. On clean MIDI, where every
+  note was played, 12.7% of notes carry the label. At the head's own threshold (p(delete) > 0.5)
+  it leaves out 6.9% of the notes, and 34% of those had a score note; above 0.8 it leaves out
+  1.8%, and 16% of those had one. On whole real pieces, v2's missing notes were its deletions plus
+  the floor every system has. The page offers "only when sure" (> 0.8, the default), "as trained"
+  (> 0.5, as evaluated) and "keep every note" (`demo/app.py DELETE`, `audio_to_score.py
+  --delete-above`). Each setting can be scored on whole pieces (`system_scores.py --v2 ...
+  --delete-above 0.8`: system `..._d80`, `_keepall` for 1).
 - **seq2seq:** the Scoreformer writes the score window by window (`--ckpt`, default
   `sf_base_reg_cab`). It runs in meter mode by default, the best in its evaluation: guarded
   decoding (each window's context is the model's own previous output, and degenerate windows are

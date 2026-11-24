@@ -411,7 +411,8 @@ def test_v2_pipeline():
 
 def test_demo_serves_both():
     """demo/app.py with a v2 and a seq2seq pipeline: /api/info lists both and the default, a job
-    runs on the system it names (v2 without the seq2seq context mode), an unknown system is refused."""
+    runs on the system it names (v2 without the seq2seq context mode, with the page's deletion
+    setting: only when sure by default), an unknown system or setting is refused."""
     try:
         from fastapi.testclient import TestClient
     except Exception:  # noqa: BLE001 (needs httpx)
@@ -434,15 +435,34 @@ def test_demo_serves_both():
         c = TestClient(app)
         info = c.get("/api/info").json()
         assert set(info["systems"]) == {"v2", "seq2seq"} and info["default"] == "v2"
-        for system in ("v2", "seq2seq"):
-            jid = c.post("/api/jobs", files={"file": ("x.mid", b"MThd")}, data={"system": system, "mode": "guarded"}).json()["id"]
+        for data in ({"system": "v2", "mode": "guarded"}, {"system": "seq2seq", "mode": "guarded"},
+                     {"system": "v2", "delete": "off"}, {"system": "v2", "delete": "trained"}):
+            jid = c.post("/api/jobs", files={"file": ("x.mid", b"MThd")}, data=data).json()["id"]
             for _ in range(100):
                 if c.get(f"/api/jobs/{jid}").json()["status"] in ("done", "error"):
                     break
                 import time
                 time.sleep(0.05)
-        assert calls == [("v2", {}), ("seq2seq", {"mode": "guarded"})], calls
+        assert calls == [("v2", {"delete_above": 0.8}), ("seq2seq", {"mode": "guarded"}), ("v2", {"delete_above": 1.0}),
+                         ("v2", {"delete_above": 0.5})], calls
         assert c.post("/api/jobs", files={"file": ("x.mid", b"MThd")}, data={"system": "v9"}).status_code == 400
+        assert c.post("/api/jobs", files={"file": ("x.mid", b"MThd")}, data={"delete": "all"}).status_code == 400
+
+
+def test_delete_threshold():
+    """A note is left out only above the deletion threshold: the head's own decision at 0.5, fewer
+    above, none at 1; another threshold is its own system in the whole-piece comparison."""
+    from scripts.system_scores import system_name
+    from src.labeller import keep_mask
+    from src.pipeline import DELETE_ABOVE
+    logits = torch.tensor([-3.0, -1.0, 0.5, 2.0])            # p(delete) 0.95, 0.73, 0.38, 0.12
+    assert keep_mask(logits).tolist() == (logits > 0).tolist() == [False, False, True, True]
+    assert keep_mask(logits, 0.8).tolist() == [False, True, True, True]
+    assert keep_mask(logits, 0.96).tolist() == [True] * 4 and keep_mask(logits, 1.0).tolist() == [True] * 4
+    assert DELETE_ABOVE == 0.5
+    assert system_name(None, "meter", "none", "nl+m") == "v2_nl_m"
+    assert system_name(None, "meter", "none", "nl+m", delete_above=0.8) == "v2_nl_m_d80"
+    assert system_name(None, "meter", "none", "nl+m", "audio", delete_above=1.0) == "v2_nl_m_keepall_ab"
 
 
 def _stub_bin(tmp: Path, sbatch: bool = True):
