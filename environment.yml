@@ -43,6 +43,14 @@ dependencies:
       - datasets
       - huggingface_hub
       - symusic
+      # Beat This! beat tracker (scripts/track_beats.py, and the demo for models trained with --beats)
+      - beat-this==1.1.0
+      - rotary-embedding-torch
+      - einops
+      # web demo (demo/app.py)
+      - fastapi
+      - uvicorn
+      - python-multipart
       # dev
       - ipykernel
       - pytest

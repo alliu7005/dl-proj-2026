@@ -36,7 +36,7 @@ def main():
     names = [s for s in ("train", "val", "test", "train_transcribed", "val_transcribed", "test_transcribed",
                           "train_transcribed_kong", "val_transcribed_kong", "test_transcribed_kong",
                           "test_periscope")
-             if (D / s).exists()]
+             if (D / s / "index.npy").exists()]  # built splits (a folder can hold only beats_*.npz)
     st = {s: SegmentStore(D / s) for s in names}
 
     print("leakage")
@@ -64,11 +64,14 @@ def main():
     held = {r["maestro_midi_performance"].replace("{maestro}/", "")
             for r in csv.DictReader(open(ASAP / "metadata.csv"))
             if splits.get(r["folder"]) in ("val", "test") and r["maestro_midi_performance"]}
-    fit_rows = [r for r in csv.DictReader(open("data/transcribed_transkun/pairs.csv"))
-                if r["maestro_split"] in ("test", "validation")]
+    pairs = Path("data/transcribed_transkun/pairs.csv")
     diag = json.load(open("configs/noise_stats.diagnostics.json"))
-    n_clean = sum(not any(r["gt"].endswith(h) for h in held) for r in fit_rows)
-    check(True, f"noise fit pool: {n_clean} eligible recordings (val/test audio excluded by fit_noise.py)")
+    if pairs.exists():
+        fit_rows = [r for r in csv.DictReader(open(pairs)) if r["maestro_split"] in ("test", "validation")]
+        n_clean = sum(not any(r["gt"].endswith(h) for h in held) for r in fit_rows)
+        check(True, f"noise fit pool: {n_clean} eligible recordings (val/test audio excluded by fit_noise.py)")
+    else:  # builds without local Transkun transcriptions (e.g. on PACE) use the committed noise model
+        print(f"  skip  noise fit pool: {pairs} not here (only needed to refit configs/noise_stats.json)")
     check(diag["n_gt"] > 0, f"noise diagnostics present ({diag['n_gt']} notes fitted)")
 
     print("real-transcription splits")
@@ -92,6 +95,9 @@ def main():
     for s in names:
         x = st[s]
         idx = x.index
+        if len(idx) == 0:  # e.g. test_periscope in an ASAP-only build
+            print(f"  skip  {s}: empty")
+            continue
         ok = (np.all(idx[:, 1] >= idx[:, 0]) and idx[-1, 1] == len(x.notes) and idx[-1, 3] == len(x.pedal)
               and idx[-1, 5] == len(x.tokens) and np.all(idx[1:, 0] == idx[:-1, 1])
               and np.all(idx[1:, 4] == idx[:-1, 5]) and len(x.meta) == len(idx)
@@ -130,9 +136,14 @@ def main():
     from src.preprocessing.noise import NoiseModel
     nm = NoiseModel.from_json("configs/noise_stats.json")
     check(nm.empirical, "configs/noise_stats.json loads in empirical mode")
-    loaders = {"mixed train": MixedTrainDataset(str(D / "train"), str(D / "train_transcribed"),
-                                                str(D / "vocab.json"), noise=nm, augment=AugmentConfig())}
-    loaders.update({s: ScoreSegmentDataset(str(D / s), str(D / "vocab.json")) for s in names if s != "train"})
+    if (D / "train_transcribed" / "index.npy").exists():
+        loaders = {"mixed train": MixedTrainDataset(str(D / "train"), str(D / "train_transcribed"),
+                                                    str(D / "vocab.json"), noise=nm, augment=AugmentConfig())}
+    else:  # no real-transcription splits (e.g. a PACE build): noisy clean windows only
+        loaders = {"mixed train": ScoreSegmentDataset(str(D / "train"), str(D / "vocab.json"), noise=nm,
+                                                      augment=AugmentConfig())}
+    loaders.update({s: ScoreSegmentDataset(str(D / s), str(D / "vocab.json")) for s in names
+                    if s != "train" and len(st[s])})
     for name, ds in loaders.items():
         sampler = ds.sampler() if hasattr(ds, "sampler") and name == "mixed train" else None
         dl = DataLoader(ds, batch_size=64, sampler=sampler, collate_fn=collate, shuffle=sampler is None)

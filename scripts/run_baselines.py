@@ -56,7 +56,6 @@ class Timings:
 def conditions(nm: NoiseModel):
     """Yield (condition name, store, notes-getter)."""
     test = SegmentStore(D / "test")
-    rng = np.random.default_rng(12345)
 
     def clean(i):
         return test.get(i)[:2]
@@ -64,9 +63,9 @@ def conditions(nm: NoiseModel):
     noisy_cache = {}
 
     def synthetic(i):
-        if i not in noisy_cache:
+        if i not in noisy_cache:  # the draw the models are scored on: src/dataset.py's (seed 12345, epoch 0, i)
             n, p, _ = test.get(i)
-            noisy_cache[i] = nm(n, p, rng)
+            noisy_cache[i] = nm(n, p, np.random.default_rng((12345, 0, i)))
         return noisy_cache[i]
 
     yield "clean", test, clean

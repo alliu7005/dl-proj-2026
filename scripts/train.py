@@ -63,7 +63,10 @@ class TruncatingCollate:
     def __call__(self, batch):
         for b in batch:
             if len(b["notes"]) > self.max_notes:
-                b["notes"] = b["notes"][:self.max_notes]
+                for key in ("notes", "roles", "downbeat", "phase", "labels", "flags", "bar_est", "pos_est"):
+                    # per-note arrays stay aligned
+                    if key in b:
+                        b[key] = b[key][:self.max_notes]
             if len(b["target"]) > self.max_tokens:
                 b["target"] = b["target"][:self.max_tokens]
         return collate(batch)
@@ -76,17 +79,24 @@ class TokenBudgetBatches(torch.utils.data.Sampler):
     sorts the pool by length, and cuts it into batches whose padded size stays within budget:
     batch_size * longest target <= ``max_tokens`` and batch_size * longest input <= ``max_notes``.
     Batches are then shuffled. Similar lengths per batch -> little padding -> more real tokens
-    per GPU step."""
+    per GPU step.
+
+    An epoch's batches depend only on (seed, epoch): the base sampler gets its own generator per
+    epoch (not the global torch RNG, which a resumed run has re-seeded), and ``skip`` batches are
+    passed over without loading them, so a run resumed mid-epoch goes on with the batches it had
+    not trained on yet."""
 
     def __init__(self, base, tok_len, note_len, max_tokens: int, max_notes: int, pool_batches: int = 50,
                  max_batch: int = 256, seed: int = 0):
         self.base, self.tok, self.notes = base, np.asarray(tok_len), np.asarray(note_len)
         self.max_tokens, self.max_notes, self.max_batch = max_tokens, max_notes, max_batch
         self.pool = pool_batches * max(1, max_tokens // max(int(np.median(self.tok)), 1))
-        self.seed, self.epoch = seed, 0
-        # estimated number of batches per pass (used for schedules / progress)
+        self.seed, self.epoch, self.skip = seed, 0, 0
+        # estimated number of batches per pass (used for schedules / progress): whichever budget
+        # binds (context notes make the note budget the tighter one)
         mean_tok = float(np.mean(np.minimum(self.tok, max_tokens)))
-        self._len = max(1, int(len(base) * mean_tok * 1.08 / max_tokens))
+        mean_notes = float(np.mean(np.minimum(self.notes, max_notes)))
+        self._len = max(1, int(len(base) * max(mean_tok / max_tokens, mean_notes / max_notes) * 1.08))
 
     def set_epoch(self, epoch: int):
         self.epoch = epoch
@@ -96,6 +106,9 @@ class TokenBudgetBatches(torch.utils.data.Sampler):
 
     def __iter__(self):
         rng = np.random.default_rng((self.seed, self.epoch))
+        if hasattr(self.base, "generator"):  # e.g. WeightedRandomSampler: its draws from (seed, epoch) only
+            self.base.generator = torch.Generator().manual_seed(int(self.seed) * 1_000_003 + int(self.epoch))
+        skip, self.skip = self.skip, 0
         it = iter(self.base)
         while True:
             pool = [i for _, i in zip(range(self.pool), it)]
@@ -114,6 +127,9 @@ class TokenBudgetBatches(torch.utils.data.Sampler):
             if cur:
                 batches.append(cur)
             for k in rng.permutation(len(batches)):
+                if skip:
+                    skip -= 1
+                    continue
                 yield batches[k]
 
 
@@ -308,11 +324,14 @@ def main():
 
     weights = torch.tensor(vocab.loss_weights(args.ornament_weight), device=device)
     step, epoch, best = 0, 0, float("inf")
+    in_epoch = 0
     if args.resume and (run / "last.pt").exists():
         ck = torch.load(run / "last.pt", map_location=device, weights_only=False)
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
         step, epoch, best = ck["step"], ck["epoch"], ck.get("best", best)
+        in_epoch = ck.get("batch_in_epoch", 0)  # batches of this epoch trained on already
+        batches.skip = in_epoch
         print(f"resumed {run} at step {step} (epoch {epoch})", flush=True)
     elif (run / "last.pt").exists():
         raise SystemExit(f"{run} already has a checkpoint: use --resume, or a different --name")
@@ -326,6 +345,7 @@ def main():
 
     def save(path):
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": epoch,
+                    "batch_in_epoch": in_epoch,
                     "best": best, "config": cfg.to_dict()}, path)
 
     log_path = run / "log.csv"
@@ -340,6 +360,7 @@ def main():
             batches.set_epoch(epoch)
             t_wait = time.time()
             for b in dl:
+                in_epoch += 1
                 wait_int += time.time() - t_wait
                 if step >= total_steps:
                     break
@@ -382,6 +403,7 @@ def main():
                 t_wait = time.time()
             else:
                 epoch += 1
+                in_epoch = 0
                 continue
             break
     except KeyboardInterrupt:

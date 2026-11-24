@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Piano to Score</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f5f2; --surface: #ffffff; --surface-2: #f1efea; --border: #e3e0d8;
+    --text: #1d1c1a; --muted: #6d6a63; --accent: #2f5bd3; --accent-soft: #e7edfc;
+    --ok: #1f8a4c; --err: #c23b32; --err-soft: #fbeceb; --paper: #ffffff;
+    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141413; --surface: #1d1d1b; --surface-2: #262624; --border: #33322f;
+      --text: #ecebe7; --muted: #9c9a93; --accent: #7a9bff; --accent-soft: #24304f;
+      --ok: #4cc283; --err: #ff7b72; --err-soft: #3a2220; --paper: #fbfaf7;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141413; --surface: #1d1d1b; --surface-2: #262624; --border: #33322f;
+    --text: #ecebe7; --muted: #9c9a93; --accent: #7a9bff; --accent-soft: #24304f;
+    --ok: #4cc283; --err: #ff7b72; --err-soft: #3a2220; --paper: #fbfaf7;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 Inter, system-ui, sans-serif; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 32px 16px 64px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+  h1 { font-size: 22px; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .pill { font-size: 12.5px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); padding: 4px 10px; border-radius: 999px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); padding: 20px; margin-bottom: 16px; }
+  .hidden { display: none !important; }
+  .muted { color: var(--muted); }
+
+  /* upload */
+  .drop { border: 1.5px dashed var(--border); border-radius: 12px; padding: 44px 16px; text-align: center; cursor: pointer; transition: .15s; background: var(--surface-2); }
+  .drop:hover, .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  .drop svg { width: 36px; height: 36px; color: var(--accent); }
+  .drop .big { font-size: 17px; font-weight: 600; margin: 10px 0 4px; }
+  .options { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-top: 14px; font-size: 13.5px; color: var(--muted); }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg label { padding: 5px 12px; cursor: pointer; color: var(--muted); }
+  .seg input { display: none; }
+  .seg input:checked + span { color: var(--text); font-weight: 600; }
+  .seg label:has(input:checked) { background: var(--surface-2); }
+
+  /* progress */
+  .file { font-weight: 600; word-break: break-all; }
+  .steps { display: flex; gap: 8px; margin: 16px 0 12px; }
+  .step { flex: 1; display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--muted); min-width: 0; }
+  .dot { width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid var(--border); flex: none; display: grid; place-items: center; font-size: 12px; }
+  .step.active { color: var(--text); font-weight: 600; }
+  .step.active .dot { border-color: var(--accent); border-top-color: transparent; animation: spin .9s linear infinite; }
+  .step.done .dot { background: var(--ok); border-color: var(--ok); color: #fff; }
+  .step.skip { opacity: .5; text-decoration: line-through; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .bar { height: 6px; background: var(--surface-2); border-radius: 99px; overflow: hidden; }
+  .bar div { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+  .bar.busy div { width: 30% !important; animation: slide 1.4s ease-in-out infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+  .status-line { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-top: 8px; gap: 12px; }
+  .error { background: var(--err-soft); color: var(--err); border-radius: 10px; padding: 12px 14px; margin-top: 12px; font-size: 14px; word-break: break-word; }
+
+  /* results */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .stat { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 18px; font-weight: 700; }
+  .stat span { font-size: 12.5px; color: var(--muted); }
+  .players { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 16px; }
+  .player h3 { font-size: 13px; font-weight: 600; margin: 0 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  audio, midi-player { width: 100%; display: block; }
+  midi-player::part(control-panel) { background: var(--surface-2); color: var(--text); border-radius: 10px; }
+  midi-player::part(play-button) { color: var(--text); border-color: var(--border); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn { appearance: none; border: 1px solid var(--border); background: var(--surface); color: var(--text); padding: 7px 13px; border-radius: 8px; font: 500 13.5px Inter, system-ui, sans-serif; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  h2 { font-size: 16px; margin: 0; }
+  .paper { background: var(--paper); border-radius: 10px; margin-top: 14px; padding: 8px; min-height: 120px; overflow-x: auto; color: #000; }
+  .paper .placeholder { color: #777; padding: 40px; text-align: center; }
+  #osmd { position: relative; }  /* OSMD's cursor coordinates start at this box's corner */
+  .playhead { position: absolute; left: 0; top: 0; width: 3px; margin-left: -1px; border-radius: 2px; pointer-events: none;
+              background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+              opacity: 0; transition: opacity .2s; will-change: transform; z-index: 2; }
+  .playhead.on { opacity: .85; }
+  .follow { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .warn { font-size: 13px; color: var(--muted); margin-top: 10px; }
+  footer { font-size: 12.5px; color: var(--muted); text-align: center; margin-top: 28px; }
+  @media (max-width: 560px) { .steps { flex-direction: column; } .wrap { padding-top: 20px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Piano to Score <span>· audio in, sheet music out</span></h1>
+    <div class="pill" id="model">loading model info…</div>
+  </header>
+
+  <!-- 1. upload -->
+  <section class="card" id="upload">
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Choose a recording">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+      <div class="big">Drop a piano recording here</div>
+      <div class="muted">or click to choose · WAV, MP3, FLAC, M4A, OGG · or a MIDI file to skip transcription</div>
+      <input type="file" id="file" class="hidden" accept="audio/*,.mid,.midi,.flac,.m4a,.opus">
+    </div>
+    <div class="options" id="sysopts">
+      <span>System</span>
+      <div class="seg" id="systems">
+        <label id="sys-v2" title="The bars of the whole piece first (a meter model over Beat This!'s beats), then every note placed in them by the note labeller"><input type="radio" name="system" value="v2"><span>Grid + note labeller (v2)</span></label>
+        <label id="sys-seq2seq" title="The Scoreformer writes the score window by window, token by token"><input type="radio" name="system" value="seq2seq"><span>Window by window (seq2seq)</span></label>
+      </div>
+    </div>
+    <div class="options" id="delopts">
+      <span>Leave out likely transcription errors</span>
+      <div class="seg">
+        <label title="Only notes the labeller is very sure are transcription errors (p &gt; 0.95): about as many as Transkun adds (0.2% of notes). At its trained setting it removes 20 times more, a third of them real score notes on clean MIDI"><input type="radio" name="delete" value="sure" checked><span>Only when sure</span></label>
+        <label title="The labeller's own decision (p &gt; 0.5), as in the evaluation: removes more transcription errors, and more real notes"><input type="radio" name="delete" value="trained"><span>As trained</span></label>
+        <label title="Every transcribed note is written"><input type="radio" name="delete" value="off"><span>Keep every note</span></label>
+      </div>
+    </div>
+    <div class="options" id="modeopts">
+      <span>Context between windows</span>
+      <div class="seg">
+        <label title="Guarded, and time signatures kept consistent along the piece: a window whose meter disagrees with its neighbours is redone with theirs (the best mode in the evaluation)"><input type="radio" name="mode" value="meter" checked><span>Guarded + meter</span></label>
+        <label title="Guarded + meter, with one time signature for the whole piece unless a different one holds for a long stretch"><input type="radio" name="mode" value="piece"><span>One meter per piece</span></label>
+        <label title="The whole piece written under its 3 likeliest time signatures, keeping the one the model finds most probable (3 times slower)"><input type="radio" name="mode" value="tsearch"><span>Meter search</span></label>
+        <label title="Meter search, keeping the time signature whose beats agree best with the beats tracked in the audio (as Meter search for MIDI input)"><input type="radio" name="mode" value="tsearch_beat"><span>Meter search by beats</span></label>
+        <label title="The model's own previous output, but a window that clearly disagrees with its notes is redone without context, so one bad window cannot derail the rest"><input type="radio" name="mode" value="guarded"><span>Guarded</span></label>
+        <label title="The model's own previous output, unguarded"><input type="radio" name="mode" value="chained"><span>Previous output</span></label>
+        <label title="Every window is decoded on its own"><input type="radio" name="mode" value="none"><span>None</span></label>
+      </div>
+      <span>Short clips (30–90 s) are best on a CPU.</span>
+    </div>
+  </section>
+
+  <!-- 2. progress -->
+  <section class="card hidden" id="progress">
+    <div class="row"><div class="file" id="pname"></div><div class="muted" id="ptime">0 s</div></div>
+    <div class="steps">
+      <div class="step" data-s="transcribe"><div class="dot"></div><span>Transcribe audio</span></div>
+      <div class="step" data-s="beats"><div class="dot"></div><span>Track beats</span></div>
+      <div class="step" data-s="grid"><div class="dot"></div><span>Find the bars</span></div>
+      <div class="step" data-s="score"><div class="dot"></div><span>Write the score</span></div>
+      <div class="step" data-s="engrave"><div class="dot"></div><span>Engrave</span></div>
+    </div>
+    <div class="bar"><div id="pbar"></div></div>
+    <div class="status-line"><span id="pmsg">uploading…</span><span id="ppct"></span></div>
+    <div class="error hidden" id="perr"></div>
+    <div class="btns hidden" id="perrbtn" style="margin-top:12px"><button class="btn" onclick="reset()">Try another file</button></div>
+  </section>
+
+  <!-- 3. result -->
+  <section class="hidden" id="result">
+    <div class="card">
+      <div class="row" style="margin-bottom:14px">
+        <h2 id="rname"></h2>
+        <button class="btn primary" onclick="reset()">Transcribe another</button>
+      </div>
+      <div class="stats" id="stats"></div>
+      <div class="players">
+        <div class="player" id="pl-audio"><h3>Your recording</h3><audio controls id="audio"></audio></div>
+        <div class="player" id="pl-trans"><h3>What the transcriber heard</h3><midi-player id="mtrans" sound-font></midi-player></div>
+        <div class="player" id="pl-score"><h3>The score, played back</h3><midi-player id="mscore" sound-font></midi-player></div>
+      </div>
+      <div class="error hidden" id="rerr"></div>
+    </div>
+    <div class="card">
+      <div class="row">
+        <h2>Score</h2>
+        <div class="btns" id="downloads"></div>
+      </div>
+      <div class="follow hidden" id="follow"></div>
+      <div class="paper"><div id="osmd"><div class="placeholder">rendering…</div></div></div>
+      <div class="warn">Rendered with OpenSheetMusicDisplay. Open the MusicXML in MuseScore for editing and cleaner engraving.</div>
+    </div>
+  </section>
+
+  <footer>Transkun V2 → performance MIDI → (v2) Beat This! beats → meter model: the bars of the piece → note labeller: every note in them · (seq2seq) Scoreformer, window by window → MusicXML. Everything runs on the machine serving this page.</footer>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/opensheetmusicdisplay@1.9.0/build/opensheetmusicdisplay.min.js"></script>
+<script src="https://cdn.jsdelivr.net/combine/npm/tone@14.7.58,npm/@magenta/music@1.23.1/es6/core.js,npm/focus-visible@5,npm/html-midi-player@1.5.0"></script>
+<script>
+const $ = s => document.querySelector(s);
+const AUDIO = ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.opus', '.aiff', '.aif'];
+const MIDI = ['.mid', '.midi'];
+const LABELS = { musicxml: 'MusicXML', score_midi: 'Score MIDI', transcription_midi: 'Transcription MIDI', tokens: 'Tokens' };
+let poll = null, clock = null, osmd = null, systems = {}, follow = null;
+
+function system() { const c = document.querySelector('input[name=system]:checked'); return c ? c.value : 'seq2seq'; }
+function pill() {
+  const i = systems[system()] || {};
+  $('#model').textContent = system() === 'v2'
+    ? `v2: meter model + note labeller · ${i.params_M}M params · ${i.device}`
+    : `${i.arch} · ${i.params_M}M params${i.beats ? ' · beats' : ''} · ${i.device}`;
+  $('#modeopts').classList.toggle('hidden', system() === 'v2');
+  $('#delopts').classList.toggle('hidden', system() !== 'v2');
+}
+fetch('/api/info').then(r => r.json()).then(i => {
+  systems = i.systems || { seq2seq: i };
+  ['v2', 'seq2seq'].forEach(k => $(`#sys-${k}`).classList.toggle('hidden', !systems[k]));
+  $('#sysopts').classList.toggle('hidden', Object.keys(systems).length < 2);
+  const d = document.querySelector(`input[name=system][value="${i.default || 'seq2seq'}"]`);
+  if (d) d.checked = true;
+  document.querySelectorAll('input[name=system]').forEach(r => r.onchange = pill);
+  pill();
+}).catch(() => $('#model').textContent = 'server not reachable');
+
+const drop = $('#drop'), input = $('#file');
+drop.onclick = () => input.click();
+drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
+input.onchange = () => input.files[0] && submit(input.files[0]);
+['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => e.dataTransfer.files[0] && submit(e.dataTransfer.files[0]));
+
+function ext(name) { const i = name.lastIndexOf('.'); return i < 0 ? '' : name.slice(i).toLowerCase(); }
+function show(id) { ['#upload', '#progress', '#result'].forEach(s => $(s).classList.toggle('hidden', s !== id)); }
+function fmtTime(s) { s = Math.round(s); return s < 60 ? `${s} s` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
+
+function reset() {
+  clearInterval(poll); clearInterval(clock);
+  input.value = ''; $('#perr').classList.add('hidden'); $('#perrbtn').classList.add('hidden');
+  document.querySelectorAll('midi-player').forEach(p => { try { p.stop(); } catch (e) {} });
+  $('#audio').pause();
+  if (follow) follow.stop();
+  show('#upload');
+}
+
+function fail(msg) {
+  clearInterval(poll); clearInterval(clock);
+  $('#pbar').parentElement.classList.remove('busy');
+  $('#perr').textContent = msg; $('#perr').classList.remove('hidden'); $('#perrbtn').classList.remove('hidden');
+  document.querySelectorAll('.step.active').forEach(s => s.classList.remove('active'));
+}
+
+async function submit(file) {
+  const e = ext(file.name);
+  if (!AUDIO.includes(e) && !MIDI.includes(e)) { alert(`Unsupported file type "${e || file.name}". Use an audio file or a .mid file.`); return; }
+  show('#progress');
+  $('#pname').textContent = file.name;
+  $('#pbar').style.width = '0'; $('#pbar').parentElement.classList.add('busy');
+  $('#pmsg').textContent = 'uploading…'; $('#ppct').textContent = '';
+  document.querySelectorAll('.step').forEach(s => s.className = 'step');
+  const isMidi = MIDI.includes(e), v2 = system() === 'v2';
+  const beatModel = v2 || !!(systems[system()] || {}).beats;  // audio is beat-tracked before scoring
+  if (isMidi) document.querySelector('.step[data-s="transcribe"]').classList.add('skip');
+  if ((isMidi && !v2) || !beatModel) document.querySelector('.step[data-s="beats"]').classList.add('skip');
+  if (!v2) document.querySelector('.step[data-s="grid"]').classList.add('skip');
+  const t0 = Date.now();
+  clock = setInterval(() => $('#ptime').textContent = fmtTime((Date.now() - t0) / 1000), 500);
+
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('mode', document.querySelector('input[name=mode]:checked').value);
+  fd.append('system', system());
+  fd.append('delete', document.querySelector('input[name=delete]:checked').value);
+  let id;
+  try {
+    const r = await fetch('/api/jobs', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) return fail(j.detail || `upload failed (${r.status})`);
+    id = j.id;
+  } catch (err) { return fail('Could not reach the server. Is demo/app.py still running?'); }
+
+  poll = setInterval(async () => {
+    let job;
+    try { job = await (await fetch(`/api/jobs/${id}`)).json(); } catch (err) { return; }
+    const order = ['transcribe', 'beats', 'grid', 'score', 'engrave'];
+    const cur = order.indexOf(job.stage);
+    document.querySelectorAll('.step').forEach(s => {
+      if (s.classList.contains('skip')) return;
+      const k = order.indexOf(s.dataset.s);
+      s.classList.toggle('done', job.status === 'done' || (cur >= 0 && k < cur));
+      s.classList.toggle('active', job.status === 'running' && k === cur);
+    });
+    // Transkun reports no progress of its own: animate the bar instead of sitting at 0%
+    const busy = job.status === 'queued' || (job.status === 'running' && (job.stage === 'transcribe' || job.stage === 'beats'));
+    $('#pbar').parentElement.classList.toggle('busy', busy);
+    $('#pbar').style.width = `${Math.round(job.progress * 100)}%`;
+    $('#ppct').textContent = job.status === 'running' && !busy ? `${Math.round(job.progress * 100)}%` : '';
+    $('#pmsg').textContent = job.status !== 'queued' ? job.message
+      : job.queue_ahead ? `waiting in queue (${job.queue_ahead} ahead of you)` : 'waiting for the current job to finish';
+    if (job.status === 'error') fail(job.message);
+    if (job.status === 'done') { clearInterval(poll); clearInterval(clock); showResult(id, job); }
+  }, 700);
+}
+
+function showResult(id, job) {
+  const s = job.stats || {};
+  $('#rname').textContent = job.name;
+  const items = [
+    [fmtTime(s.duration_s || 0), 'length'],
+    [s.notes, 'notes heard'],
+    [s.bars, 'bars written'],
+    [s.windows, `windows of ~128 notes`],
+    [fmtTime(job.elapsed || 0), 'processing time'],
+  ];
+  if (s.transcribe_s != null) items.push([fmtTime(s.transcribe_s), 'transcription']);
+  if (s.beats_s != null) items.push([fmtTime(s.beats_s), 'beat tracking']);
+  const word = (n, one, many) => (n === 1 ? one : many);
+  if (s.system === 'v2') {
+    if (s.grid_s != null) items.push([fmtTime(s.grid_s), 'meter model']);
+    if (s.score_s != null) items.push([fmtTime(s.score_s), 'note labeller']);
+    if (s.time_signature) {
+      const other = Object.keys(s.time_signatures || {}).length - 1;
+      items.push([s.time_signature, other > 0 ? `main time signature (+${other} other)` : 'time signature']);
+    }
+    if (s.key_signature != null) {
+      const k = s.key_signature;
+      items.push([k === 0 ? '♮' : `${Math.abs(k)}${k > 0 ? '♯' : '♭'}`, 'key signature']);
+    }
+    if (s.notes_deleted != null) {
+      const n = s.notes_deleted;
+      const how = s.delete_above >= 1 ? ' (keeping every note)' : s.delete_above != null ? ` (p > ${s.delete_above})` : '';
+      items.push([n, `${word(n, 'note', 'notes')} left out as transcription errors${how}`]);
+    }
+  } else {
+    items.push([fmtTime(s.score_s || 0), 'score model']);
+  }
+  if (['guarded', 'meter', 'piece', 'tsearch', 'tsearch_beat'].includes(s.mode)) {
+    const n = s.guard_fallbacks ?? 0;
+    items.push([n, `${word(n, 'window', 'windows')} redone without context`]);
+  }
+  if (s.mode === 'meter' || s.mode === 'piece') {
+    const n = s.meter_fixes ?? 0;
+    items.push([n, `${word(n, 'time signature', 'time signatures')} made consistent`]);
+  }
+  if (s.time_signature && s.system !== 'v2') {
+    items.push([s.time_signature, `time signature kept (tried ${(s.ts_candidates || []).join(', ')})`]);
+  }
+  $('#stats').innerHTML = (s.beats && s.beats !== 'not used by this model'
+    ? `<div class="muted" style="grid-column: 1 / -1">Beats: ${s.beats}</div>` : '')
+    + items.filter(([v]) => v != null).map(([v, l]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
+
+  const base = `/api/jobs/${id}/files/`;
+  const has = k => job.downloads.includes(k);
+  $('#downloads').innerHTML = ['musicxml', 'score_midi', 'transcription_midi', 'tokens'].filter(has)
+    .map(k => `<a class="btn" href="${base}${k}" download>↓ ${LABELS[k]}</a>`).join('');
+
+  $('#pl-audio').classList.toggle('hidden', !!job.is_midi);
+  if (!job.is_midi) $('#audio').src = `/api/jobs/${id}/input`;
+  $('#pl-trans h3').textContent = job.is_midi ? 'Your MIDI' : 'What the transcriber heard';
+  $('#pl-trans').classList.toggle('hidden', !has('transcription_midi'));
+  $('#pl-score').classList.toggle('hidden', !has('score_midi'));
+  if (window.customElements && customElements.get('midi-player')) {
+    if (has('transcription_midi')) $('#mtrans').src = base + 'transcription_midi';
+    if (has('score_midi')) $('#mscore').src = base + 'score_midi';
+  } else {
+    $('#pl-trans').classList.add('hidden'); $('#pl-score').classList.add('hidden');
+  }
+
+  const errs = job.errors || [];
+  $('#rerr').classList.toggle('hidden', !errs.length);
+  $('#rerr').textContent = errs.length ? 'Some outputs could not be written: ' + errs.join('; ') : '';
+  show('#result');
+  renderScore(base + 'musicxml', has('musicxml'), s);
+}
+
+async function renderScore(url, ok, stats) {
+  const box = $('#osmd');
+  if (follow) follow.stop();
+  follow = null;
+  $('#follow').classList.add('hidden');
+  if (!ok) { box.innerHTML = '<div class="placeholder">No MusicXML was produced for this file.</div>'; return; }
+  if (!window.opensheetmusicdisplay) { box.innerHTML = '<div class="placeholder">The score viewer could not load (offline?). Download the MusicXML instead.</div>'; return; }
+  box.innerHTML = '';
+  try {
+    const xml = await (await fetch(url)).text();
+    osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, {
+      autoResize: false, backend: 'svg', drawTitle: false, drawPartNames: false,
+      drawingParameters: 'compacttight',
+    });
+    await osmd.load(xml);
+    osmd.render();
+  } catch (err) {
+    box.innerHTML = `<div class="placeholder">The viewer could not draw this score (${err.message || err}). The MusicXML download still works.</div>`;
+    return;
+  }
+  try { follow = new Follow(osmd, box, stats || {}); } catch (err) { console.warn('playback bar unavailable', err); }
+}
+
+// ---- the playback bar: a line over the score at the moment being played -------------------------
+// The score MIDI plays the written score at one tempo (stats.playback_qpm), so its clock maps to the
+// score directly. The recording and the transcription run on the performance's clock: v2 maps it to
+// the score through the beats of its grid (stats.follow: beat times -> quarters from the first
+// written note); seq2seq has no such map, so there only the score MIDI moves the bar.
+function interp(x, xs, ys) {
+  const n = xs.length;
+  if (n < 2) return null;
+  if (x <= xs[0]) return ys[0] + (x - xs[0]) * (ys[1] - ys[0]) / ((xs[1] - xs[0]) || 1);
+  if (x >= xs[n - 1]) return ys[n - 1] + (x - xs[n - 1]) * (ys[n - 1] - ys[n - 2]) / ((xs[n - 1] - xs[n - 2]) || 1);
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (xs[m] <= x) lo = m; else hi = m; }
+  return ys[lo] + (x - xs[lo]) * (ys[hi] - ys[lo]) / ((xs[hi] - xs[lo]) || 1);
+}
+
+class Follow {
+  constructor(osmd, box, stats) {
+    this.osmd = osmd; this.box = box; this.stats = stats; this.map = stats.follow || null;
+    this.source = null; this.frame = null; this.line = -1; this.handlers = [];
+    this.bar = document.createElement('div');
+    this.bar.className = 'playhead';
+    this.steps = this.layout();
+    if (this.steps.length < 2) throw new Error('no cursor positions');
+    this.listen();
+    let t = null;
+    this.onResize = () => {
+      clearTimeout(t);
+      t = setTimeout(() => { this.osmd.render(); this.steps = this.layout(); this.line = -1; this.draw(this.last); }, 250);
+    };
+    window.addEventListener('resize', this.onResize);
+    $('#follow').textContent = this.map
+      ? 'Press play on the recording, the transcription or the score: the bar follows the music.'
+      : 'Press play on the score: the bar follows it.';
+    $('#follow').classList.remove('hidden');
+  }
+
+  // Every cursor step of the score: its time in quarters and where the cursor stands (x, top, height:
+  // the whole system). The cursor is only walked to read its positions; the bar is drawn by us.
+  layout() {
+    const c = this.osmd.cursor, steps = [];
+    // each step's time from its bar's start, the bars laid end to end at their time signatures'
+    // lengths (a first bar shorter than its signature is a pickup): a bar the viewer reads longer
+    // than its signature (a grace note it counted as a note) then shifts only itself, not the rest
+    const ms = this.osmd.Sheet.SourceMeasures, start = [0];
+    ms.forEach((m, i) => {
+      const ts = m.ActiveTimeSignature, own = m.Duration.RealValue * 4;
+      const nominal = ts ? ts.Numerator * 4 / ts.Denominator : own;
+      start.push(start[i] + (i === 0 ? Math.min(own, nominal) : nominal));
+    });
+    const timeOf = () => {
+      const i = c.iterator.CurrentMeasureIndex, m = ms[i];
+      const local = c.iterator.currentTimeStamp.RealValue * 4 - m.AbsoluteTimestamp.RealValue * 4;
+      return start[i] + Math.min(Math.max(local, 0), start[i + 1] - start[i]);
+    };
+    c.show(); c.reset();
+    let first = null, guard = 0;
+    while (!c.iterator.EndReached && guard++ < 200000) {
+      const el = c.cursorElement, q = timeOf();
+      const x = parseFloat(el.style.left) + el.offsetWidth / 2, y = parseFloat(el.style.top), h = el.height || el.offsetHeight;
+      if (first === null) {
+        let notes = [];
+        try { notes = c.NotesUnderCursor(); } catch (e) {}
+        if (notes.some(n => !(n.isRest && n.isRest()))) first = q;
+      }
+      if (isFinite(x) && isFinite(y) && (!steps.length || q > steps[steps.length - 1].q)) steps.push({ q, x, y, h });
+      c.next();
+    }
+    c.hide();
+    this.first = first === null ? (steps.length ? steps[0].q : 0) : first;
+    // the lines of the score; a line's last step slides on by its last gap (within the box)
+    let line = 0;
+    steps.forEach((s, i) => { if (i && Math.abs(s.y - steps[i - 1].y) > 2) line++; s.line = line; });
+    const width = (c.cursorElement.parentElement || this.box).scrollWidth;
+    steps.forEach((s, i) => {
+      const next = steps[i + 1];
+      if (!next || next.line !== s.line) {
+        const prev = steps[i - 1], gap = prev && prev.line === s.line ? s.x - prev.x : 24;
+        s.end = Math.min(width - 4, s.x + Math.max(12, gap));
+      }
+    });
+    (c.cursorElement.parentElement || this.box).appendChild(this.bar);  // OSMD's coordinates are its page's
+    return steps;
+  }
+
+  listen() {
+    const audio = $('#audio'), trans = $('#mtrans'), score = $('#mscore');
+    const start = src => () => { this.source = src; this.last = src; this.run(); };
+    const end = src => () => { if (this.source === src) { this.draw(src); this.source = null; } };
+    if (this.map) {
+      this.on(audio, 'play', start('audio')); this.on(audio, 'pause', end('audio')); this.on(audio, 'ended', end('audio'));
+      this.on(audio, 'seeked', () => { this.last = 'audio'; this.draw('audio'); });
+      this.on(trans, 'start', start('trans')); this.on(trans, 'stop', end('trans'));
+    }
+    this.on(score, 'start', start('score')); this.on(score, 'stop', end('score'));
+  }
+  on(el, ev, fn) { this.handlers.push([el, ev, fn]); el.addEventListener(ev, fn); }
+
+  stop() {
+    cancelAnimationFrame(this.frame);
+    this.handlers.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));
+    this.handlers = [];
+    window.removeEventListener('resize', this.onResize);
+    this.bar.remove();
+    this.source = null;
+  }
+
+  run() {
+    cancelAnimationFrame(this.frame);
+    const tick = () => { if (!this.source) return; this.draw(); this.frame = requestAnimationFrame(tick); };
+    tick();
+  }
+
+  // the score position (quarters, the viewer's clock) a source is at, or null
+  position(src) {
+    if (src === 'score') {
+      const p = $('#mscore'), ns = p.noteSequence;
+      if (!ns || !ns.notes || !ns.notes.length) return null;
+      if (this.t0 === undefined || this.ns !== ns) {
+        this.ns = ns;
+        this.t0 = ns.notes.reduce((m, n) => Math.min(m, n.startTime || 0), Infinity);
+        this.qpm = (ns.tempos && ns.tempos.length && ns.tempos[0].qpm) || this.stats.playback_qpm || 120;
+      }
+      return this.first + (p.currentTime - this.t0) * this.qpm / 60;
+    }
+    if (!this.map) return null;
+    const t = src === 'audio' ? $('#audio').currentTime : $('#mtrans').currentTime;
+    const r = interp(t, this.map.t, this.map.q);
+    return r === null ? null : this.first + r;
+  }
+
+  draw(src) {
+    src = src || this.source;
+    const q = src ? this.position(src) : null;
+    if (q === null || !isFinite(q) || !this.steps.length) return;
+    const st = this.steps;
+    let lo = 0, hi = st.length - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (st[m].q <= q) lo = m; else hi = m; }
+    if (q >= st[hi].q) lo = hi;
+    const a = st[lo], b = st[Math.min(lo + 1, st.length - 1)];
+    let x = a.x;
+    if (b !== a && q > a.q) {
+      const f = Math.min(1, (q - a.q) / (b.q - a.q));
+      x = b.line === a.line ? a.x + f * (b.x - a.x) : a.x + f * ((a.end ?? a.x) - a.x);
+    } else if (b === a && q > a.q && a.end !== undefined) {
+      x = Math.min(a.end, a.x + (q - a.q) * 8);
+    }
+    this.bar.style.transform = `translate(${x}px, ${a.y}px)`;
+    this.bar.style.height = `${a.h}px`;
+    this.bar.classList.add('on');
+    if (a.line !== this.line) {  // a new line: keep it in view (only when it is not)
+      this.line = a.line;
+      const r = this.bar.getBoundingClientRect();
+      if (r.top < 60 || r.bottom > window.innerHeight - 20) this.bar.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
+}
+</script>
+</body>
+</html>

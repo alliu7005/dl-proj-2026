@@ -219,7 +219,25 @@ def prompt_from_output(history: list[str]) -> list[str]:
     ts = next((t for t in reversed(history) if t.startswith("ts_")), None)
     key = next((t for t in reversed(history) if t.startswith("key_")), None)
     tail = [t for t in history[k + 1:] if not t.startswith(("ped_", "ts_", "key_"))]
-    return ["bar"] + [t for t in (ts, key) if t] + tail
+    return ["bar"] + [t for t in (ts, key) if t] + _drop_empty_positions(tail)
+
+
+def _drop_empty_positions(tokens: list[str]) -> list[str]:
+    """Remove ``pos_k [sub_x]`` groups left with nothing after them once pedal tokens are removed
+    (a position that only held ``ped_on``/``ped_off``). Stored training prompts are tokenized
+    without pedal, so they never contain such groups; keeping them would give the model prompts at
+    inference that it never saw in training."""
+    out, pending = [], []
+    for t in tokens:
+        if t.startswith("pos_"):
+            pending = [t]
+        elif t.startswith("sub_") and pending:
+            pending.append(t)
+        else:
+            out += pending
+            pending = []
+            out.append(t)
+    return out
 
 def cut_windows(onsets: np.ndarray, size_fn, overlap: float, search: float) -> list[tuple[int, int]]:
     """Split notes (sorted by onset) into windows [a, b) of about ``size_fn()`` notes each.
