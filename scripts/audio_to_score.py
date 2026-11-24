@@ -34,9 +34,9 @@ def main():
                          "as context, degenerate windows redone without it; chained: previous output as context, "
                          "unguarded; none: no context")
     ap.add_argument("--guard-margin", type=float, default=GUARD_MARGIN)
-    ap.add_argument("--delete-above", type=float, default=0.8,
+    ap.add_argument("--delete-above", type=float, default=0.95,
                     help="v2: leave a note out only when the labeller's p(delete) is above this (0.5: as "
-                         "evaluated, 1: keep every note; default 0.8, as the demo)")
+                         "evaluated, 1: keep every note; default 0.95, as the demo)")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 

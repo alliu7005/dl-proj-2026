@@ -1387,12 +1387,15 @@ Two systems, chosen per upload on the page (each is loaded when its checkpoints 
   "delete" label means the alignment paired no score note with the note. That also covers notes
   really played: extra trill notes, and notes the alignment missed. On clean MIDI, where every
   note was played, 12.7% of notes carry the label. At the head's own threshold (p(delete) > 0.5)
-  it leaves out 6.9% of the notes, and 34% of those had a score note; above 0.8 it leaves out
-  1.8%, and 16% of those had one. On whole real pieces, v2's missing notes were its deletions plus
-  the floor every system has. The page offers "only when sure" (> 0.8, the default), "as trained"
-  (> 0.5, as evaluated) and "keep every note" (`demo/app.py DELETE`, `audio_to_score.py
-  --delete-above`). Each setting can be scored on whole pieces (`system_scores.py --v2 ...
-  --delete-above 0.8`: system `..._d80`, `_keepall` for 1).
+  it leaves out 6.9% of the notes, and 34% of those had a score note. Above 0.8 it leaves out
+  1.8% (16% of them score notes), and above 0.95 it leaves out 0.22% (4%). Transkun adds a note
+  that was not played for only 0.19% of notes (`configs/noise_stats.json` `halluc_rate`; its main
+  error is missing notes, which deletion cannot fix), yet at 0.5 v2 left out 4.6% of the real
+  recordings' notes. On whole real pieces, v2's missing notes were its deletions plus the floor
+  every system has. The page offers "only when sure" (> 0.95, the default: about as many as
+  Transkun adds), "as trained" (> 0.5, as evaluated) and "keep every note" (`demo/app.py DELETE`,
+  `audio_to_score.py --delete-above`). Each setting can be scored on whole pieces (`system_scores.py --v2 ...
+  --delete-above 0.95`: system `..._d95`, `_keepall` for 1).
 - **seq2seq:** the Scoreformer writes the score window by window (`--ckpt`, default
   `sf_base_reg_cab`). It runs in meter mode by default, the best in its evaluation: guarded
   decoding (each window's context is the model's own previous output, and degenerate windows are

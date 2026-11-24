@@ -39,9 +39,12 @@ MAX_MB = 100
 STAGES = {"transcribe": (0.0, 0.45), "beats": (0.45, 0.5), "grid": (0.5, 0.55), "score": (0.55, 0.95),
           "engrave": (0.95, 1.0)}
 SYSTEMS = ("v2", "seq2seq")  # in order of preference for the default
-# v2: when to leave a performed note out as a transcription error (the labeller's p(delete) above it):
-# "sure" by default, since at the trained 0.5 a third of what it deletes on clean MIDI was a score note
-DELETE = {"off": 1.0, "sure": 0.8, "trained": 0.5}
+# v2: when to leave a performed note out as a transcription error (the labeller's p(delete) above it).
+# Transkun adds a note that was not played for 0.19% of notes (configs/noise_stats.json halluc_rate);
+# at the trained 0.5 the labeller leaves out 4.6% of a real recording's notes, a third of them score
+# notes on clean MIDI. Above 0.95 it leaves out about as many as Transkun adds (0.2% on clean MIDI,
+# 4% of them score notes), the default.
+DELETE = {"off": 1.0, "sure": 0.95, "trained": 0.5}
 DOWNLOAD_NAMES = {"musicxml": "score.musicxml", "score_midi": "score.mid",
                   "transcription_midi": "transcription.mid", "tokens": "tokens.txt"}
 

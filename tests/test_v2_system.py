@@ -443,7 +443,7 @@ def test_demo_serves_both():
                     break
                 import time
                 time.sleep(0.05)
-        assert calls == [("v2", {"delete_above": 0.8}), ("seq2seq", {"mode": "guarded"}), ("v2", {"delete_above": 1.0}),
+        assert calls == [("v2", {"delete_above": 0.95}), ("seq2seq", {"mode": "guarded"}), ("v2", {"delete_above": 1.0}),
                          ("v2", {"delete_above": 0.5})], calls
         assert c.post("/api/jobs", files={"file": ("x.mid", b"MThd")}, data={"system": "v9"}).status_code == 400
         assert c.post("/api/jobs", files={"file": ("x.mid", b"MThd")}, data={"delete": "all"}).status_code == 400

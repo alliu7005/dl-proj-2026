@@ -146,7 +146,7 @@ def keep_mask(keep_logits: torch.Tensor, delete_above: float = 0.5) -> torch.Ten
     ``delete_above`` (0.5: the head's own decision, as trained and evaluated; 1 or more: none).
     ``delete_above`` trades notes wrongly left out against transcription errors kept: the "delete"
     label is "the alignment paired no score note with it", which also covers notes really played
-    (on clean MIDI, 34% of what the head deletes at 0.5 had a score note; at 0.8, 16%)."""
+    (on clean MIDI, 34% of what the head deletes at 0.5 had a score note; at 0.8, 16%; at 0.95, 4%)."""
     if delete_above >= 1.0:
         return torch.ones_like(keep_logits, dtype=torch.bool)
     t = float(np.log(delete_above / (1.0 - delete_above)))  # p(delete) > d  <=>  logit(keep) < -logit(d)
