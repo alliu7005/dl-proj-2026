@@ -14,7 +14,8 @@ Both are compared with Beyer & Dai's system (ISMIR 2024), on their test set and 
 metrics, on clean MIDI and on real recordings.
 
 **Status (2026-11-24, after round 4):** the full system runs end to end in a web demo, and both
-systems' models are packaged for release ([model card](docs/model_card.md)). On the headline metric the seq2seq system is still ahead of v2, and
+systems' models are on Hugging Face as [dat-dev/scoreformer](https://huggingface.co/dat-dev/scoreformer)
+([model card](docs/model_card.md)). On the headline metric the seq2seq system is still ahead of v2, and
 v2's remaining gap is its rhythm. [docs/handoff.md](docs/handoff.md) covers what works, what
 doesn't, and the options for what to do next.
 
@@ -32,20 +33,22 @@ Whole pieces, Beyer & Dai's metrics: error rates in %, lower is better.
 |---|---|---|---|---|---|---|---|
 | Beyer & Dai (their checkpoint) | 11.14 / **11.05** | 13.60 | **7.10** | **7.75** | 2.38 | **2.41** | **8.62** |
 | seq2seq `sf_base_reg_cab_c128` | **10.65** / 11.74 | **9.90** | 7.57 | 13.48 | 3.06 | 10.92 | 15.08 |
-| v2 `nl_base_gn` + `meter_v3` (tempo-prior decoder) | 12.62 / 14.60 | 13.45 | 11.89 | 10.66 | **2.22** | 6.37 | 10.42 |
-| v2 `nl_base_gn` + `meter_v3` (round-3 decoder), notes kept unless p(delete) > 0.95 | 12.63 / 15.11 | 14.20 | 9.00 | 11.98 | 2.38 | 6.53 | 12.30 |
+| **v2, the release** (`nl_base_gn` + `meter_v3`, tempo-prior decoder, notes kept unless p(delete) > 0.95, lengths tidied) | 12.31 / 14.53 | 13.82 | 8.90 | 11.80 | **2.26** | 6.58 | 11.98 |
+| v2 round 3 (`nl_base_gn` + `meter_v3`) | 12.83 / 15.07 | 13.81 | 11.96 | 10.73 | 2.34 | 6.30 | 10.62 |
 
 Onset through insertion are on real audio.
 
 - **On real audio**, seq2seq leads on onsets and offsets. v2 leads on pitch, extra notes,
   insertion and spelling.
-- **v2's gap to seq2seq is outside chance:** 1.97 points on real audio and 2.85 on clean. That
+- **v2's gap to seq2seq is outside chance:** 1.66 points on real audio and 2.79 on clean. That
   is on classical piano (ASAP). Outside it, v2 holds up better. On an anime piano arrangement in
   4/4 throughout, seq2seq switched time signature 6 times and wrote 37 extra bars, while v2 kept
   4/4 ([handoff](docs/handoff.md)).
 - **Most of v2's loss is the meter model:** half and double note values, like 3/8 written for 3/4.
   The labeller's onset F1 on PERiScoPe windows is 0.857 with the true grid, 0.697 with an oracle
-  grid on the tracked beats, and 0.488 with the meter model's grid.
+  grid on the tracked beats, and 0.488 with the meter model's grid. Choosing the level per piece
+  afterwards was tried in round 5 (priors, the labeller's confidence, a learned written-tempo
+  head): none beats the decoder.
 - **On clean MIDI, v2 also loses to its beats.** They come from the MIDI rendered to audio. Using
   the real recordings' beats instead lowers its error by 2.8 points (24 performances).
 - **The round-by-round story is in [docs/experiments.md](docs/experiments.md)**, including what
@@ -55,7 +58,7 @@ Onset through insertion are on real audio.
 
 ```bash
 conda env create -f environment.yml && conda activate dl-proj
-python scripts/download_models.py          # the released models -> models/ (about 300 MB)
+python scripts/download_models.py          # the released models (dat-dev/scoreformer) -> models/, 300 MB
 python demo/app.py                         # then open http://127.0.0.1:7860 and drop in a recording
 ```
 

@@ -20,7 +20,7 @@ the project's code. The repo has a web demo (`demo/app.py`) and a command-line t
 ```bash
 git clone <the project's repo> && cd dl-proj-2026
 conda env create -f environment.yml && conda activate dl-proj
-python scripts/download_models.py                  # this repo -> models/, checked against manifest.json
+python scripts/download_models.py                  # dat-dev/scoreformer -> models/, checked against manifest.json
 python demo/app.py                                 # http://127.0.0.1:7860: a recording in, a score out
 python scripts/audio_to_score.py recording.wav --v2
 ```
@@ -62,21 +62,24 @@ lower is better. MUSTER mean on real audio (24 performances, transcribed by Tran
 |---|---|
 | Beyer & Dai (ISMIR 2024, their checkpoint) | 11.14 / 11.05 |
 | seq2seq (`seq2seq/`, meter decoding) | 10.65 / 11.74 |
-| v2 (`v2_meter` with its tempo-prior decoder + `v2_labeller`) | 12.62 / 14.60 |
+| v2 (`v2_meter` + `v2_labeller`, at these settings) | 12.31 / 14.53 |
 
 - **Comparing the two systems on real audio:**
-  - v2 is better on pitch (2.22 vs 3.06), extra notes (10.66 vs 13.48) and spelling (6.37 vs
+  - v2 is better on pitch (2.26 vs 3.06), extra notes (11.80 vs 13.48) and spelling (6.58 vs
     10.92).
-  - The seq2seq model is better on onsets (9.90 vs 13.45) and offsets.
+  - The seq2seq model is better on onsets (9.90 vs 13.82), offsets and missing notes.
+- **Outside classical piano:** on an anime piano arrangement in 4/4 throughout, seq2seq switched
+  time signature 6 times and wrote 37 extra bars, while v2 kept 4/4. One piece, judged by ear.
 - **Window level (PERiScoPe), v2:** onset F1 0.488. With the true metrical grid it would be
   0.857, so most of v2's error is the meter model's grid.
 - The project's `docs/experiments.md` has every round.
 
 ## Limitations
 
-- **Note values at the wrong metrical level.** The meter model often writes half or double
-  values: 3/8 for 3/4, 2/4 for 2/2. Time signature accuracy per bar is 0.44 on real recordings
-  and 0.64 on PERiScoPe.
+- **Note values at the wrong metrical level.** The meter model often writes a whole piece at half
+  or double values: 3/8 for 3/4, 2/4 for 2/2. It gets the level right for 64% of test
+  performances, and time signature accuracy per bar is 0.44 on real recordings and 0.64 on
+  PERiScoPe. Choosing the level afterwards did not help (round 5).
 - **MIDI input is tracked through a rendering.** The beats then come from the MIDI rendered to
   audio, which tracks worse than a recording: v2's error on clean MIDI is 2.8 points higher than
   with the recording's beats.

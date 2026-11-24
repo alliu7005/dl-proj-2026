@@ -973,8 +973,24 @@ interval excludes 0:
 
 **The release.** `nl_base_gn` + `meter_v3` with `meter_v3_tp`'s decoder, at 0.95, tidied
 (`src/release.py`), and `sf_base_reg_cab_c128` for seq2seq. The changes were measured one at a
-time; `pace/v2_release.sh` scores the combination, the same at 0.8, and with the labeller's
-second seed, then builds `models/` (`scripts/export_models.py`).
+time; `pace/v2_release.sh` scored the combination, the same at 0.8, and with the labeller's
+second seed, then built `models/` (`scripts/export_models.py`), uploaded as
+[dat-dev/scoreformer](https://huggingface.co/dat-dev/scoreformer), tag `v2-round4`. MUSTER mean
+(real / clean) and the paired difference against the round-3 system:
+
+| system | real | clean | vs round 3, real | vs round 3, clean |
+|---|---|---|---|---|
+| round 3 (`nl_base_gn` + `meter_v3`) | 12.83 | 15.07 | - | - |
+| **the release** (tempo prior, 0.95, tidied) | **12.31** | **14.53** | -0.52 [-0.98, +0.06], 16/24 | **-0.54** [-1.01, -0.21], 43/59 |
+| the same at 0.8 | 12.30 | 14.41 | (vs the release) -0.01 | (vs the release) **-0.12**, 46/59 |
+| the same, the labeller's second seed | 12.13 | 14.38 | (vs the release) -0.18, chance | (vs the release) -0.15, chance |
+| seq2seq `sf_base_reg_cab_c128` | 10.65 | 11.74 | (vs the release) **-1.66** [-2.79, -0.12] | **-2.79** [-4.40, -0.79] |
+| Beyer & Dai | 11.14 | 11.05 | (vs the release) -1.17 [-3.15, +1.48] | **-3.48** [-5.37, -1.07] |
+
+- **The changes add up.** Each was within about 0.2 on real audio on its own; together they gain
+  0.52.
+- **0.8 and 0.95 are the same on real audio.** On clean MIDI, 0.8 is 0.12 better. The release
+  and the demo keep 0.95: by ear, leaving real notes out was the problem.
 
 ### Fifth round: the note-value level of a whole piece
 
@@ -1037,6 +1053,57 @@ overnight:
 The expectation is modest. The decoder already adds up the step head's evidence over the whole
 piece, so a piece-level head may add little. It is, however, the one remaining signal that sees
 this piece's music, and the frozen version cannot change anything but the level.
+
+### Fifth round: results
+
+All 4 jobs finished (`pace/v2_level.sh`).
+
+**The priors and the labeller, on every validation and test set** (`scripts/level_experiments.py`
+-> `outputs/level_experiments/meter_v3_tp.md`; validation: ASAP 104, real 22, PERiScoPe 150; test:
+clean 59, real 24, PERiScoPe 150):
+
+| signal | validation | test |
+|---|---|---|
+| the decoded level | 0.837 | 0.644 |
+| the best of the three levels (a perfect choice) | 0.938 | 0.897 |
+| a prior on the written tempo | 0.721 | 0.601 |
+| a prior on note density | 0.775 | 0.532 |
+| both | 0.717 | 0.571 |
+| the labeller's confidence (any head) | 0.837 | 0.644 |
+
+The labeller's best setting on validation is the largest bonus for the decoded level, i.e. never
+switching. Per set, the decoded level is right for ASAP val 0.885, real val 0.773, PERiScoPe val
+0.813, clean test 0.508, real test 0.708, PERiScoPe test 0.687.
+
+**The tempo head:**
+- **`meter_v3_th`** (frozen trunk, 6,000 steps, best at 4,000):
+  - in training's validation, the head alone picks the right level for 0.868 of performances
+    (mean over the three sources), against 0.859 as decoded;
+  - its log written-tempo error is 0.13 on ASAP, 0.29 on real and 0.17 on PERiScoPe;
+  - tuned on the full validation sets together with `meter_v3_tp`'s decoder (`eval_meter.py
+    --level`), the level weights all came out 0. Its grids are `meter_v3_tp`'s exactly, and so
+    are its whole pieces (+0.00 on every performance).
+- **`meter_v3_ft`** (`meter_v3` fine-tuned with the head, 16,000 steps): its tuned decoder
+  dropped the tempo prior (weight 0) and the level choice (weights 0).
+
+  | | `meter_v3_tp` | `meter_v3_ft` |
+  |---|---|---|
+  | clean: downbeat F / time signature / right level | 0.786 / 0.552 / 0.508 | 0.786 / 0.582 / 0.610 |
+  | real | 0.650 / 0.440 / 0.708 | 0.666 / 0.470 / 0.667 |
+  | PERiScoPe | 0.757 / 0.645 / 0.727 | 0.770 / 0.631 / 0.740 |
+  | the labeller's onset F1 on its grid (clean / real / PERiScoPe) | 0.402 / 0.377 / 0.481 | 0.416 / 0.383 / 0.480 |
+  | whole pieces in the release's configuration, MUSTER mean real / clean | 12.31 / 14.53 | 12.74 / 15.28 |
+
+  Its windows are a little better, but its whole pieces are worse: +0.43 on real (chance) and
+  **+0.75** on clean ([+0.22, +1.13], 13 of 59 better). Its PERiScoPe grids write 2/2 as 2/4 on
+  5,780 bars, against 3,329.
+
+**Conclusion.** Neither what is typical (the priors), nor what the labeller finds likely, nor a
+piece-level readout of the meter model picks the note-value level better than the decoder does.
+The right level depends on the piece's own music, which the model has not learned from 1,100
+works. The release keeps `meter_v3` with the tempo-prior decoder, without the level choice.
+`choose_level`, the tempo head and `--level` stay in the code (off by default) for a meter model
+trained on more, and more varied, data (docs/handoff.md, options 8 and 9).
 
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
