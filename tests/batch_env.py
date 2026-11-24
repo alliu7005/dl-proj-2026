@@ -17,6 +17,9 @@ BATCH_VARS = (
     "LABELLERS", "LARGE_ON", "SKIP_PREP", "OLD",
     # pace/reevaluate.sh, pace/beats.sh, pace/tsearch.sh, pace/system_eval.sh, pace/train*.sbatch
     "RUNS", "ONLY", "ARGS", "FORCE", "PER_CONDITION", "TIME", "STAGE", "NAME", "GPUS",
+    # pace/v2_round4.sh, pace/v2_release.sh, pace/v2_level.sh
+    "NEW_LABS", "TEMPO_FROM", "TEMPO_RUN", "SYS_A", "SYS_B", "SYS_C", "ABLATION", "SYS", "EXPORT", "LABELLER",
+    "LEVELEXP",
     # the tests' own stand-ins
     "SUBMITS", "CALLS", "DONE",
 )

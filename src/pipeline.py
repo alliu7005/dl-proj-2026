@@ -749,6 +749,7 @@ class V2Pipeline(_FrontEnd):
         res.stats = {**self.info, "duration_s": round(dur, 1), "notes": int(len(notes)),
                      "pedal_presses": int(len(pedal)), "beats": beat_info, "bars": len(written),
                      "grid_bars": len(grid["bars"]),
+                     "level": float(grid.get("level", 1.0)),   # the note-value level choose_level picked
                      "time_signature": ts.most_common(1)[0][0] if ts else None,
                      "time_signatures": dict(ts.most_common()), "key_signature": int(grid.get("key", 0)),
                      **counts, "tokens": len(tokens), "export": export,

@@ -4,7 +4,8 @@
 #
 #   meters <run>...        train these meter models side by side (each its own log), up to
 #                          --max-hours, resuming from last.pt; then tune + evaluate every finished
-#                          one not evaluated yet. Fails unless all are trained and evaluated.
+#                          one not evaluated yet (meter_eval_flags: --tune, or the run's own).
+#                          Fails unless all are trained and evaluated.
 #   labellers <run>...     train these labellers side by side (resuming), then evaluate each on
 #                          the true grid. Fails unless all are trained.
 #   grids                  the earlier meter models' grids decoded again (GRIDS_REEVAL: the decoder
@@ -27,6 +28,9 @@
 #   seq2seq <run> <args>   train a seq2seq model (scripts/train_model.py <args>, resuming from
 #                          last.pt), then evaluate it (SEQ_MODES on SEQ_CONDITIONS, only what it
 #                          lacks). Fails unless trained and evaluated: the next job goes on.
+#   levelexp <meter>       which evidence outside the decoder picks a piece's note-value level
+#                          (scripts/level_experiments.py: the written-tempo / density priors, the
+#                          labeller's confidence), on validation and test -> outputs/level_experiments
 #   ablation <spec>        v2 <labeller>+<meter> on clean MIDI with the beats Beat This! tracked in the
 #                          performances' real recordings, next to the same system's rendered-MIDI
 #                          beats, in outputs/system_eval_ablation (scored on the shared pieces)
@@ -48,7 +52,19 @@ meter_flags() {
     meter_v3_s1) echo "--steps 60000 --patience 8 --seed 1" ;;
     meter_v3_s2) echo "--steps 60000 --patience 8 --seed 2" ;;
     meter_v3_large) echo "--steps 60000 --patience 8 --d-model 384 --layers 8" ;;
+    # the piece's written tempo, for its note-value level (src/meter.py choose_level): a head on
+    # meter_v3's frozen trunk, and meter_v3 fine-tuned with it
+    meter_v3_th) echo "--init outputs/runs/meter_v3/best.pt --tempo-head --freeze-trunk --select tempo --steps 6000 --lr 1e-3 --warmup 200 --eval-every 1000 --patience 3" ;;
+    meter_v3_ft) echo "--init outputs/runs/meter_v3/best.pt --tempo-head --select both --steps 16000 --lr 1e-4 --warmup 500 --eval-every 2000 --patience 4" ;;
     *) echo "unknown meter run $1 (add it to meter_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
+  esac
+}
+meter_eval_flags() {  # how a finished meter run is tuned before its evaluation
+  case "$1" in
+    # its bar / step / time-signature heads are meter_v3's: meter_v3_tp's decoder, the level tuned on top
+    meter_v3_th) echo "--level --decode-from outputs/runs/meter_v3_tp/decode.json" ;;
+    meter_v3_ft) echo "--tune --tempo-prior --level" ;;
+    *) echo "--tune" ;;
   esac
 }
 nl_flags() {
@@ -93,7 +109,7 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
   echo "$out"
 }
 
-task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo}
+task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo, levelexp}
 shift
 case "$task" in
   meters)
@@ -112,7 +128,8 @@ case "$task" in
     for m in "$@"; do
       if ! done_run "$m"; then echo "$m: not done yet (the next job resumes it)"; ok=1; continue; fi
       if [ ! "outputs/runs/$m/eval_meter.json" -nt "outputs/runs/$m/best.pt" ]; then
-        python scripts/eval_meter.py --run "$m" --tune || ok=1
+        # shellcheck disable=SC2046
+        python scripts/eval_meter.py --run "$m" $(meter_eval_flags "$m") || ok=1
       fi
       [ -f "outputs/runs/$m/eval_meter.json" ] || ok=1
     done
@@ -214,5 +231,12 @@ case "$task" in
     done
     python scripts/eval_meter.py --run "$dst" --tune --tempo-prior --device cpu
     exit $? ;;
-  *) echo "unknown task $task (meters, labellers, grids, evals, systems, seq2seq, ablation, tempo)"; exit 2 ;;
+  levelexp)
+    m=${1:?levelexp <meter run>}
+    if [ ! -f "outputs/runs/$m/best.pt" ] || [ ! -f "outputs/runs/$m/decode.json" ]; then
+      echo "$m: no best.pt / decode.json"; exit 1
+    fi
+    python scripts/level_experiments.py --meter "$m"
+    exit $? ;;
+  *) echo "unknown task $task (meters, labellers, grids, evals, systems, seq2seq, ablation, tempo, levelexp)"; exit 2 ;;
 esac

@@ -346,7 +346,7 @@ def test_long_steps_and_pickup_bars():
         g = grid_from_logp(t, oracle_logp(t, gt))
         assert np.allclose(g["q"], q_beats), (ts, g["q"])
         assert np.allclose(g["bar_q"], np.arange(0, 13, L)) and g["bars"] == [ts] * len(g["bar_q"]), (ts, g["bar_q"])
-        assert grid_scores(g, gt) == {"beat_f": 1.0, "downbeat_f": 1.0, "ts_acc": 1.0}
+        assert grid_scores(g, gt) == {"beat_f": 1.0, "downbeat_f": 1.0, "ts_acc": 1.0, "level_ok": 1.0}
     g = grid_from_states(np.array([1.5, 2.0, 2.5, 3.0, 3.5]), [(0, 0), (0, 12), (0, 24), (0, 36), (0, 0)])  # 4/4 from 1.5 s
     assert cover_notes(g, 1.5) is g and cover_notes(g, 1.49) is g      # within 1/24 quarter: no bar added
     c = cover_notes(g, 1.0)                                             # one quarter (0.5 s) early: a pickup
@@ -380,6 +380,74 @@ def test_tempo_prior():
     near_120 = grid_from_logp(t, lp, DecodeConfig(tempo_weight=2.0))
     near_60 = grid_from_logp(t, lp, DecodeConfig(tempo_weight=2.0, tempo_mu=math.log(60.0)))
     assert np.allclose(np.diff(near_120["q"]), 1.0) and np.allclose(np.diff(near_60["q"]), 0.5)
+
+
+def test_level_choice():
+    """The note-value level of a piece: time signatures at halved / doubled values (only ones the
+    classes have), the grid scaled with its bar lines kept, the written tempo, the right-level
+    score; choose_level off by default, the prior moving a halved grid back to its level, the stay
+    bonus and a tie keeping it; the tempo head's estimate choosing alone."""
+    from src.meter import LEVELS, choose_level, level_ratio, level_scores, piece_qpm, scale_grid, scaled_ts
+    assert LEVELS[0] == 1
+    assert scaled_ts("3/8", 2) == "3/4" and scaled_ts("2/4", 2) == "2/2" and scaled_ts("6/4", Fraction(1, 2)) == "6/8"
+    assert scaled_ts("2/2", 2) is None and scaled_ts("9/8", 2) is None and scaled_ts("4/4", 1) == "4/4"
+    # a 3/4 piece at 120 quarters per minute (a quarter every 0.5 s), decoded at halved note values (3/8)
+    t = 0.5 * np.arange(25)
+    true = {"t": t, "q": np.arange(25.0), "down": np.arange(25) % 3 == 0, "ts": np.full(25, TS_CLASSES.index("3/4")),
+            "ts_names": ["3/4"] * 25, "key": np.zeros(25)}
+    half = grid_from_states(t, [(TS_CLASSES.index("3/8"), (6 * k) % 18) for k in range(25)])
+    assert half["bars"][0] == "3/8" and np.allclose(np.diff(half["q"]), 0.5)
+    assert abs(piece_qpm(half) - 60.0) < 1e-9 and abs(level_ratio(half, true) - 0.5) < 1e-9
+    assert grid_scores(half, true)["level_ok"] == 0.0 and grid_scores(half, true)["ts_acc"] == 0.0
+    up = scale_grid(half, 2)
+    assert up["bars"] == ["3/4"] * len(half["bars"]) and np.allclose(up["bar_t"], half["bar_t"]) and up["level"] == 2.0
+    assert grid_scores(up, true) == {"beat_f": 1.0, "downbeat_f": 1.0, "ts_acc": 1.0, "level_ok": 1.0}
+    assert scale_grid(half, 1) is half and scale_grid(dict(half, bars=["9/8"]), 2) is None
+    assert choose_level(half, DecodeConfig())["level"] == 1.0                      # off by default
+    prior = DecodeConfig(level_weight=1.0)                                          # 60 qpm is far from 116, 120 is near
+    assert set(level_scores(half, prior)) == {Fraction(1), Fraction(2)}            # 3/16 is no class
+    assert choose_level(half, prior)["bars"][0] == "3/4"
+    assert choose_level(half, DecodeConfig(level_weight=1.0, level_stay=10.0))["bars"][0] == "3/8"   # the bonus wins
+    tie = DecodeConfig(level_weight=1.0, level_mu=math.log(60.0 * math.sqrt(2)))   # exactly between 60 and 120
+    assert choose_level(half, tie)["level"] == 1.0                                  # a tie keeps the decoded level
+    head = DecodeConfig(level_model_weight=1.0)
+    assert choose_level(half, head)["level"] == 1.0                                 # no estimate: nothing to choose by
+    assert choose_level(half, head, np.array([math.log(30.0), 0.2]))["level"] == 1.0   # no 3/16: the nearest there is
+    down = choose_level(up, head, np.array([math.log(61.0), 0.2]))                     # 3/4 at 120 qpm, estimate 61
+    assert down["level"] == 0.5 and down["bars"][0] == "3/8" and np.allclose(down["q"], half["q"])
+    assert choose_level(half, head, np.array([math.log(118.0), 0.2]))["bars"][0] == "3/4"
+
+
+def test_tempo_head():
+    """The piece-level written-tempo head: off by default (old checkpoints load as before); on, an
+    estimate per piece (mean near the training centre at first, a positive std), its target from
+    the annotations over the sample's beats, its loss counted, predict_logp handing it to the
+    decoder; a sample without a target adds no loss."""
+    import torch
+    from src.meter import TEMPO_CENTRE, MeterConfig, meter_loss, written_tempo
+    a = annotation_grid(ann(bars=8))
+    assert abs(written_tempo(a) - math.log(120.0)) < 1e-9 and math.isnan(written_tempo(a, 100.0, 101.0))
+    tg = targets(a["t"][2:10], a)
+    assert abs(float(tg["tempo"][0]) - math.log(120.0)) < 1e-6
+    off = build_meter_model(MeterConfig(d_model=32, layers=1, n_heads=4, ff=64).to_dict())
+    assert not hasattr(off, "tempo") and "tempo" not in off(torch.zeros(1, 5, N_BEAT_FEATURES), torch.ones(1, 5, dtype=torch.bool))
+    torch.manual_seed(0)
+    m = build_meter_model(MeterConfig(d_model=32, layers=1, n_heads=4, ff=64, tempo_head=True).to_dict())
+    assert {k for k in m.state_dict() if k.startswith("tempo.")} and set(off.state_dict()) < set(m.state_dict())
+    notes = np.array([[60, 0.1 * k, 0.1 * k + 0.2, 70] for k in range(40)], np.float32)
+    s1 = sample({"notes": notes, "gt": a}, np.random.default_rng(0))
+    s2 = sample({"notes": notes, "gt": dict(a, t=a["t"] + 100.0)}, np.random.default_rng(0))   # no annotations under it
+    x, mask, nin, tgs = collate([s1, (s2[0], {**s2[1], "tempo": np.array([np.nan], np.float32)}, s2[2], s2[3])])
+    assert torch.isfinite(tgs["tempo"][0]) and torch.isnan(tgs["tempo"][1])
+    out = m(x, mask, nin)
+    assert out["tempo"].shape == (2, 2) and abs(float(out["tempo"][0, 0].detach()) - TEMPO_CENTRE) < 1.0
+    loss, parts = meter_loss(out, tgs)
+    assert "tempo" in parts and math.isfinite(parts["tempo"]) and abs(float(loss) - sum(parts.values())) < 1e-4
+    _, no_tempo = meter_loss(out, {k: v for k, v in tgs.items() if k != "tempo"})
+    assert "tempo" not in no_tempo
+    lp = predict_logp(m, notes, a["t"], a["down"])
+    assert lp["tempo"].shape == (2,) and lp["tempo"][1] > 0 and lp["bar"].shape == (len(a["t"]), 2)
+    assert "tempo" not in predict_logp(off, notes, a["t"], a["down"])
 
 
 def test_window_frame():
@@ -470,6 +538,49 @@ def test_scripts_end_to_end():
         tdec = json.loads((tmp / "mtp" / "decode.json").read_text())
         assert {"tempo_weight", "tempo_mu", "tempo_sigma"} <= set(tdec["decode"])
         assert tdec["configs_tried"] > dec["configs_tried"] and tdec["select_tuned"] >= dec["select_tuned"] - 1e-12
+        assert "grid_level_ok" in json.loads((tmp / "mtp" / "eval_meter.json").read_text())["clean"]
+        # the tempo head: trained alone on m0's frozen trunk (only its weights move), then with the trunk
+        import torch
+        base = torch.load(tmp / "m0" / "best.pt", weights_only=False)["model"]
+        train_meter(["--name", "th", "--init", str(tmp / "m0" / "best.pt"), "--tempo-head", "--freeze-trunk",
+                     "--select", "tempo"] + tiny)
+        th = torch.load(tmp / "th" / "best.pt", weights_only=False)
+        assert th["config"]["tempo_head"] and th["config"]["d_model"] == 64
+        assert all(torch.equal(base[k], th["model"][k]) for k in base), "a frozen weight moved"
+        log = (tmp / "th" / "log.csv").read_text().splitlines()
+        assert "asap_head_level_ok" in log[0] and "asap_tempo_mae" in log[0], log[0]
+        train_meter(["--name", "ft", "--init", str(tmp / "m0" / "best.pt"), "--tempo-head", "--select", "both"] + tiny)
+        ft = torch.load(tmp / "ft" / "best.pt", weights_only=False)["model"]
+        assert any(not torch.equal(base[k], ft[k]) for k in base)                     # the trunk trained too
+        for bad in (["--name", "x1", "--freeze-trunk", "--tempo-head"], ["--name", "x2", "--select", "tempo"],
+                    ["--name", "x3", "--init", str(tmp / "m" / "best.pt"), "--tempo-head", "--no-note-encoder"]):
+            try:
+                train_meter(bad + tiny)
+            except SystemExit as e:
+                assert e.code != 0
+            else:
+                if bad[1] != "x3":
+                    raise AssertionError(f"{bad}: not refused")
+        assert json.loads((tmp / "x3" / "config.json").read_text())["model"]["n_note_features"] == N_NOTE_FEATURES
+        # the level tuned on its own, from another run's decoder (the head's estimate searched too)
+        eval_meter(["--run", "th", "--conditions", "clean", "--device", "cpu", "--runs-dir", str(tmp), "--level",
+                    "--decode-from", str(tmp / "mtp" / "decode.json"), "--tune-max", "2"])
+        ldec = json.loads((tmp / "th" / "decode.json").read_text())
+        assert {k: ldec["decode"][k] for k in ("tempo_weight", "bar_weight")} == \
+            {k: tdec["decode"][k] for k in ("tempo_weight", "bar_weight")}          # the rest kept
+        assert ldec["level_select_tuned"] >= ldec["level_select_decoded"] - 1e-12 and ldec["decode_from"]
+        assert ldec["level_configs_tried"] > 1 and "level_ok_tuned" in ldec
+        lres = json.loads((tmp / "th" / "eval_meter.json").read_text())["clean"]
+        assert 0 <= lres["grid_level_ok"] <= 1 and lres["level_changed"] >= 0
+        eval_meter(["--run", "m0", "--conditions", "clean", "--device", "cpu", "--runs-dir", str(tmp), "--tune",
+                    "--tune-max", "2", "--level"])                                     # no head: the prior and the bonus
+        assert {"level_weight", "level_stay"} <= set(json.loads((tmp / "m0" / "decode.json").read_text())["decode"])
+        try:
+            eval_meter(["--run", "ft", "--conditions", "clean", "--device", "cpu", "--runs-dir", str(tmp), "--level"])
+        except SystemExit as e:
+            assert "decode-from" in str(e)
+        else:
+            raise AssertionError("--level without a tuned decoder: refused")
         eval_meter(["--run", "oracle", "--oracle", "--conditions", "clean", "--device", "cpu", "--runs-dir", str(tmp)])
         orc = json.loads((tmp / "oracle" / "eval_meter.json").read_text())["clean"]
         assert json.loads((tmp / "oracle" / "config.json").read_text())["arch"] == "meter_oracle"

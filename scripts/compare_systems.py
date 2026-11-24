@@ -35,6 +35,8 @@ PAIRS = [  # (A, B, what A changes)
     (RELEASE, BASE, "the release: tempo prior + d95 + tidy"),
     (TP + "_d80_tidy", RELEASE, "the release at d80"),
     ("v2_nl_base_gn_s1_meter_v3_tp_d95_tidy", RELEASE, "the release, labeller's second seed (chance)"),
+    ("v2_nl_base_gn_meter_v3_th_d95_tidy", RELEASE, "the release with the tempo head choosing the level (frozen trunk)"),
+    ("v2_nl_base_gn_meter_v3_ft_d95_tidy", RELEASE, "the release with meter_v3 fine-tuned with the tempo head"),
     (SEQ, RELEASE, "seq2seq (best) against the release"),
     ("beyer_dai", RELEASE, "Beyer & Dai against the release"),
 ]

@@ -464,6 +464,41 @@ scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_release.tgz .
 tar xzf v2_release.tgz
 ```
 
+## 4n. v2, fifth round: the note-value level (overnight)
+
+After 4l (docs/experiments.md, "Fifth round"). With 4m: run the release first, then this with its
+last job id, so the final scoring comes after both (3 + 4 = 7 jobs):
+
+```bash
+bash pace/v2_release.sh                       # prints 3 job ids; the last is relfinal
+```
+
+```bash
+AFTER=<relfinal's job id> bash pace/v2_level.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `lvtests` | the test suites (CPU) | - |
+| `lvtrain` | `meter_v3_th` (a written-tempo head on `meter_v3`'s frozen trunk) and `meter_v3_ft` (`meter_v3` fine-tuned with it) side by side, then each tuned with the level choice and evaluated | `lvtests` (cancelled if they fail) |
+| `lvsys` | `scripts/level_experiments.py` on `meter_v3_tp` (the priors and the labeller, every validation and test set), `nl_base_gn` on both new grids, v2 on whole pieces with each (`:tidy,d95`) | `lvtrain` (finished or not) |
+| `lvfinal` | `outputs/compare`, every system rated with Beyer & Dai's metrics, `outputs/system_eval/paired.md` | `lvsys` and `AFTER` (finished or not) |
+
+The training takes about 3 hours, the evaluations and systems about 2, the scoring about 1. To
+bring it back (PACE, then Windows):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_level.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/level_experiments outputs/runs/meter_v3_th/*.json outputs/runs/meter_v3_th/log.csv outputs/runs/meter_v3_ft/*.json outputs/runs/meter_v3_ft/log.csv outputs/runs/nl_base_gn/eval_pieces_best.json slurm-lv*.out slurm-met_meter_v3_*.log 2>/dev/null; ls -la v2_level.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_level.tgz .
+```
+
+```powershell
+tar xzf v2_level.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

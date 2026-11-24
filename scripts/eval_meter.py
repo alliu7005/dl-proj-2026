@@ -22,6 +22,14 @@ training script's selection score (mean of downbeat F and time-signature accurac
 outputs/runs/<run>/decode.json and used from then on. Every condition is also scored with the
 default decoder (``default`` in the results), so the tuning's effect is on record.
 
+--level: the piece's note-value level after decoding (src/meter.py choose_level: the grid, or the
+same bar lines at halved / doubled note values, whichever its written tempo fits best), its weights
+(a log-normal prior on the written tempo, the model's own estimate with a tempo head, a bonus for
+the decoded level) tuned on validation after the decoder's other settings: on their own with
+--decode-from <decode.json> (the other settings taken from there, e.g. a run sharing the
+checkpoint), else after --tune's. Every condition reports level_ok: the share of performances at
+the right level (decoded quarters / true quarters within LEVEL_TOL of 1 in log2).
+
 --oracle: no model; each head certain of its training target on the same tracked beats (src/meter.py
 oracle_logp), decoded alike: the best grid these beats allow (``python scripts/eval_meter.py --run
 meter_oracle --oracle``). The labeller on it (scripts/eval_labeller.py --grid meter:meter_oracle)
@@ -49,8 +57,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import pick_device  # noqa: E402
 from scripts.train_meter import load  # noqa: E402
 from src.beats import MATCH_TOL, BeatNoise, f_measure  # noqa: E402
-from src.meter import (DecodeConfig, build_meter_model, cover_notes, grid_from_logp, grid_scores,  # noqa: E402
-                       oracle_logp, predict_logp)
+from src.meter import (DecodeConfig, build_meter_model, choose_level, cover_notes, grid_from_logp,  # noqa: E402
+                       grid_scores, oracle_logp, predict_logp)
 from src.notelabels import estimate_key  # noqa: E402
 
 CONDITIONS = {"clean": "test", "real": "test_transcribed", "periscope": "test_periscope"}
@@ -66,6 +74,11 @@ SEARCH = {  # coordinate search over the decoder's settings (each list holds the
 TEMPO_SEARCH = {  # with --tempo-prior: the prior on the written tempo (src/meter.py tempo_logprior)
     "tempo_weight": [0.0, 0.25, 0.5, 1.0, 2.0, 4.0],
     "tempo_mu": [math.log(x) for x in (80.0, 100.0, 116.0, 140.0)],
+}
+LEVEL_SEARCH = {  # with --level: the piece's note-value level (src/meter.py choose_level)
+    "level_weight": [0.0, 0.25, 0.5, 1.0, 2.0],
+    "level_model_weight": [0.0, 0.25, 0.5, 1.0, 2.0, 4.0],   # only with a tempo head
+    "level_stay": [0.0, 0.25, 0.5, 1.0, 2.0, 4.0],
 }
 
 
@@ -87,16 +100,55 @@ def score(perfs, lps, beats, cfg: DecodeConfig) -> list:
     return [grid_scores(grid_from_logp(bt, lp, cfg), p["gt"]) for p, lp, (bt, _) in zip(perfs, lps, beats)]
 
 
+def nanmean(xs) -> float:
+    xs = [x for x in xs if x == x]
+    return float(np.mean(xs)) if xs else float("nan")
+
+
+def tune_level(groups: list, cfg: DecodeConfig, has_head: bool, rounds: int = 2) -> tuple[DecodeConfig, dict]:
+    """Coordinate search of the level settings on the validation performances: each one decoded
+    once with ``cfg`` (its level weights off), then each candidate setting choosing the level of
+    those grids (cheap: no decoding). Scored by the selection score (the level moves the time
+    signatures), ties to the decoded level; level_ok on record."""
+    base = DecodeConfig(**{**cfg.to_dict(), "level_weight": 0.0, "level_model_weight": 0.0, "level_stay": 0.0})
+    decoded = [[(grid_from_logp(bt, lp, base), lp, p["gt"]) for p, lp, (bt, _) in zip(perfs, lps, beats)]
+               for _, perfs, lps, beats in groups]
+    cache = {}
+
+    def scores(c: DecodeConfig):
+        key = tuple(sorted(c.to_dict().items()))
+        if key not in cache:
+            cache[key] = [[grid_scores(choose_level(g, c, lp.get("tempo") if lp else None), gt) for g, lp, gt in grp]
+                          for grp in decoded]
+        return cache[key]
+
+    def value(c):
+        return select(scores(c))
+    search = {k: v for k, v in LEVEL_SEARCH.items() if has_head or k != "level_model_weight"}
+    cur = base
+    start = value(cur)
+    for _ in range(rounds):
+        for name, options in search.items():
+            best = max(options, key=lambda v: (value(DecodeConfig(**{**cur.to_dict(), name: v})),
+                                               -abs(v - getattr(DecodeConfig(), name))))
+            cur = DecodeConfig(**{**cur.to_dict(), name: best})
+
+    def level_ok(c):
+        return nanmean([s["level_ok"] for grp in scores(c) for s in grp])
+    info = {"level_select_decoded": start, "level_select_tuned": value(cur), "level_ok_decoded": level_ok(base),
+            "level_ok_tuned": level_ok(cur), "level_configs_tried": len(cache)}
+    return cur, info
+
+
 def select(groups_scores: list) -> float:
     """The training script's selection score: mean over the sources of (downbeat F + ts acc) / 2."""
     vals = [(np.mean([s["downbeat_f"] for s in g]) + np.mean([s["ts_acc"] for s in g])) / 2 for g in groups_scores if g]
     return float(np.mean(vals)) if vals else 0.0
 
 
-def tune(model, data: Path, noise, device, n_periscope: int, rounds: int = 2,
-         max_perfs: int = 0, tempo: bool = False) -> tuple[DecodeConfig, dict]:
-    """Coordinate search of DecodeConfig on the validation performances (their log-probabilities
-    computed once; the tracker drawn with another seed than the test draw)."""
+def val_groups(model, data: Path, noise, device, n_periscope: int, max_perfs: int = 0) -> list:
+    """The validation performances per source with their tracked beats and the model's
+    log-probabilities (computed once; the tracker drawn with another seed than the test draw)."""
     groups = []
     for name, split in VAL.items():
         perfs = load(data, split)
@@ -108,6 +160,11 @@ def tune(model, data: Path, noise, device, n_periscope: int, rounds: int = 2,
         beats = [tracked(p, k, noise, seed=SEED + 1) for k, p in enumerate(perfs)]
         lps = [predict_logp(model, p["notes"], bt, bd, device) for p, (bt, bd) in zip(perfs, beats)]
         groups.append((name, perfs, lps, beats))
+    return groups
+
+
+def tune(groups: list, rounds: int = 2, tempo: bool = False) -> tuple[DecodeConfig, dict]:
+    """Coordinate search of DecodeConfig on the validation performances (``val_groups``)."""
     cfg, cache = DecodeConfig(), {}
 
     def value(c: DecodeConfig) -> float:
@@ -135,6 +192,10 @@ def main(argv=None):
     ap.add_argument("--tune", action="store_true", help="tune the decoder on the validation performances first")
     ap.add_argument("--tempo-prior", action="store_true",
                     help="--tune also searches the written-tempo prior (src/meter.py tempo_logprior)")
+    ap.add_argument("--level", action="store_true",
+                    help="also tune the note-value level choice (src/meter.py choose_level) on validation")
+    ap.add_argument("--decode-from", default=None,
+                    help="start from this decode.json's settings (with --level and no --tune: only the level is tuned)")
     ap.add_argument("--tune-periscope", type=int, default=150, help="PERiScoPe val performances used by --tune")
     ap.add_argument("--tune-max", type=int, default=0, help="at most this many per validation source (0 = all)")
     ap.add_argument("--beat-noise", default="configs/beat_noise.json")
@@ -160,12 +221,33 @@ def main(argv=None):
         model = build_meter_model(ck["config"]).to(device)
         model.load_state_dict(ck["model"])
     dfile = run / "decode.json"
-    if args.tune:
-        cfg, info = tune(model, data, noise, device, args.tune_periscope, max_perfs=args.tune_max,
-                         tempo=args.tempo_prior)
+    if args.level and model is None:
+        raise SystemExit("--level needs a model (the oracle's grids are at the right level already)")
+    if args.tune or args.level:
+        groups = val_groups(model, data, noise, device, args.tune_periscope, max_perfs=args.tune_max)
+        if args.tune:
+            cfg, info = tune(groups, tempo=args.tempo_prior)
+            print(f"decoder tuned on validation ({info['validation']}): selection score {info['select_default']:.3f} "
+                  f"-> {info['select_tuned']:.3f} with {cfg.to_dict()}", flush=True)
+        else:
+            src = Path(args.decode_from) if args.decode_from else dfile
+            if not src.exists():
+                raise SystemExit(f"--level without --tune starts from a tuned decoder: {src} not found (--decode-from)")
+            prev = json.loads(src.read_text())
+            cfg, info = DecodeConfig.from_dict(prev["decode"]), {k: v for k, v in prev.items() if k != "decode"}
+            info["decode_from"] = str(src)
+        if args.level:
+            has_head = any(lp is not None and "tempo" in lp for _, _, lps, _ in groups for lp in lps)
+            cfg, linfo = tune_level(groups, cfg, has_head)
+            info.update(linfo)
+            print(f"level tuned on validation: selection score {linfo['level_select_decoded']:.3f} -> "
+                  f"{linfo['level_select_tuned']:.3f}, right level {linfo['level_ok_decoded']:.3f} -> "
+                  f"{linfo['level_ok_tuned']:.3f} (level_weight {cfg.level_weight}, level_model_weight "
+                  f"{cfg.level_model_weight}, level_stay {cfg.level_stay}{'' if has_head else '; no tempo head'})",
+                  flush=True)
         dfile.write_text(json.dumps({"decode": cfg.to_dict(), **info}, indent=1))
-        print(f"decoder tuned on validation ({info['validation']}): selection score {info['select_default']:.3f} "
-              f"-> {info['select_tuned']:.3f} with {cfg.to_dict()}", flush=True)
+    elif args.decode_from:
+        dfile.write_text(Path(args.decode_from).read_text())
     cfg = DecodeConfig.from_dict(json.loads(dfile.read_text())["decode"]) if dfile.exists() else DecodeConfig()
     out_file = run / "eval_meter.json"
     results = json.loads(out_file.read_text()) if out_file.exists() else {}
@@ -200,14 +282,15 @@ def main(argv=None):
                         "true_ts": Counter(gt["ts_names"]).most_common(1)[0][0],
                         "decoded_ts": Counter(grid["bars"]).most_common(1)[0][0] if grid["bars"] else "-",
                         **{f"grid_{a}": v for a, v in s.items()}, **{f"tracker_{a}": v for a, v in raw[-1].items()}})
-        res = {f"grid_{key}": float(np.mean([s[key] for s in scores])) for key in scores[0]}
+        res = {f"grid_{key}": nanmean([s[key] for s in scores]) for key in scores[0]}
         res.update({f"tracker_{key}": float(np.mean([s[key] for s in raw])) for key in raw[0]})
-        res["default"] = {f"grid_{key}": float(np.mean([s[key] for s in default])) for key in default[0]}
+        res["default"] = {f"grid_{key}": nanmean([s[key] for s in default]) for key in default[0]}
         by_piece = {}
         for r in per:
             by_piece.setdefault(r["piece"], []).append(r)
-        res["piece_mean"] = {f"grid_{key}": float(np.mean([np.mean([r[f'grid_{key}'] for r in v])
-                                                          for v in by_piece.values()])) for key in scores[0]}
+        res["piece_mean"] = {f"grid_{key}": nanmean([nanmean([r[f'grid_{key}'] for r in v])
+                                                     for v in by_piece.values()]) for key in scores[0]}
+        res["level_changed"] = int(sum(g.get("level", 1.0) != 1.0 for g in grids.values()))
         res["performances"], res["pieces"] = len(perfs), len(by_piece)
         res["decode"] = cfg.to_dict()
         res["decoder_version"] = DECODER_VERSION
@@ -221,6 +304,7 @@ def main(argv=None):
               f"(tracker {res['tracker_beat_f']:.3f}), downbeat F {res['grid_downbeat_f']:.3f} (tracker "
               f"{res['tracker_downbeat_f']:.3f}), time signature {res['grid_ts_acc']:.3f} | default decoder: "
               f"downbeat F {res['default']['grid_downbeat_f']:.3f}, time signature {res['default']['grid_ts_acc']:.3f}"
+              f" | right level {res['grid_level_ok']:.3f} ({res['level_changed']} grids moved)"
               " | most bars wrong: " + ", ".join(f"{a}->{b} {n}" for a, b, n in wrong), flush=True)
     out_file.write_text(json.dumps(results, indent=1))
     print(f"wrote {out_file}")

@@ -976,6 +976,68 @@ interval excludes 0:
 time; `pace/v2_release.sh` scores the combination, the same at 0.8, and with the labeller's
 second seed, then builds `models/` (`scripts/export_models.py`).
 
+### Fifth round: the note-value level of a whole piece
+
+The meter model's largest error is writing a whole piece at the other metrical level: the same bar
+lines, every note value halved or doubled (3/4 as 3/8, 6/4 as 6/8, 2/2 as 2/4). Measured directly
+(`src/meter.py level_ratio`: decoded quarters per true quarter over each performance; `level_ok`
+in every meter evaluation since), `meter_v3` with the tempo-prior decoder:
+
+| | ASAP validation (102) | ASAP test (59 performances, 14 pieces) |
+|---|---|---|
+| at the right level | 0.873 | 0.508 |
+| the best of the three levels (a perfect choice) | 0.961 | 0.831 |
+
+The test errors are whole pieces, and every decoder (default, tuned, tempo prior) makes the same
+ones:
+- **at double values:** Bach's fugue BWV 846, Debussy's Reflets dans l'eau and Haydn's sonata 31;
+- **at half values:** Chopin's first Ballade (6/4 written 6/8);
+- **in between:** Ravel's Ondine (1.4-1.5 times the true quarters).
+
+The Ballade alone is many of the 59 performances.
+
+**The decoder cannot make this choice with its own heads.** The grid it returns is already the
+most probable under them, the grid at the other level included. So the choice needs outside
+evidence (`src/meter.py choose_level`: the decoded grid or the same bar lines at halved / doubled
+values, `scale_grid`). Two kinds were tried first, on ASAP (`scripts/level_experiments.py`). For
+each, the bonus for the decoded level was chosen on validation:
+
+| signal | validation | test |
+|---|---|---|
+| the decoded level | 0.873 | 0.508 |
+| a prior on the written tempo (log-normal, training scores: 116 qpm, log-std 0.51) | 0.804 | 0.441 |
+| a prior on note density (chords per quarter: 3.5, log-std 0.39) | 0.853 | 0.475 |
+| both | 0.814 | 0.441 |
+| the labeller's confidence on each grid (any head, any bonus) | at most 0.88 | at most 0.51 |
+
+- **Neither beats the decoder.** A prior pulls every piece towards the typical tempo, and the
+  pieces it gets wrong are exactly the atypical ones: the Ballade is written at about 210 quarters
+  per minute, and decoded at 120.
+- **The labeller is no more confident on the right level.** The best it does on validation equals
+  the decoded level. One test setting looks better (0.56), but it is worse on validation, so it is
+  chance.
+
+The right level depends on the piece's own music, not on what is typical. What is left is a
+learned estimate of this piece's written tempo. `pace/v2_level.sh` (pace/README.md, 4n) trains it
+overnight:
+- **The tempo head** (`MeterConfig.tempo_head`, `train_meter.py --tempo-head`). It reads the mean
+  of the meter model's beat states and gives a Gaussian over the piece's log written tempo,
+  trained on the annotated grids (`written_tempo`). The decoder then picks the level whose tempo
+  it finds likeliest (`DecodeConfig.level_model_weight`; `eval_meter.py --level` tunes it with
+  the prior's weight and the stay bonus on validation).
+- **`meter_v3_th`:** the head alone, on `meter_v3`'s frozen trunk (`--init --freeze-trunk`, best
+  checkpoint on validation right-level share, `--select tempo`). Every other weight is exactly
+  `meter_v3`'s, so on the windows it can only change the level.
+- **`meter_v3_ft`:** `meter_v3` fine-tuned with the head (`--select both`: the grid score and the
+  right-level share).
+- **Evaluation:** both are scored like every meter model (windows, the labeller on their grids,
+  and whole pieces in the release's configuration), and `scripts/level_experiments.py` repeats the
+  priors and the labeller on every validation and test set.
+
+The expectation is modest. The decoder already adds up the step head's evidence over the whole
+piece, so a piece-level head may add little. It is, however, the one remaining signal that sees
+this piece's music, and the frozen version cannot change anything but the level.
+
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
 The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced

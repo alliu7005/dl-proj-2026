@@ -39,7 +39,10 @@ Onset through insertion are on real audio.
 
 - **On real audio**, seq2seq leads on onsets and offsets. v2 leads on pitch, extra notes,
   insertion and spelling.
-- **v2's gap to seq2seq is outside chance:** 1.97 points on real audio and 2.85 on clean.
+- **v2's gap to seq2seq is outside chance:** 1.97 points on real audio and 2.85 on clean. That
+  is on classical piano (ASAP). Outside it, v2 holds up better. On an anime piano arrangement in
+  4/4 throughout, seq2seq switched time signature 6 times and wrote 37 extra bars, while v2 kept
+  4/4 ([handoff](docs/handoff.md)).
 - **Most of v2's loss is the meter model:** half and double note values, like 3/8 written for 3/4.
   The labeller's onset F1 on PERiScoPe windows is 0.857 with the true grid, 0.697 with an oracle
   grid on the tracked beats, and 0.488 with the meter model's grid.

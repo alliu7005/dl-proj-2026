@@ -634,6 +634,57 @@ def test_rebuild_batch():
         assert "--dependency=afterok:555" in tests[3] and "--kill-on-invalid-dep=yes" in tests[3], tests[3]
 
 
+def test_level_batch():
+    """pace/v2_level.sh: the tests first; the two tempo-head runs after them (cancelled if they
+    fail) on one GPU job; the level experiments, the labeller on their grids and the whole-piece
+    systems after the training (finished or not); the scoring after those and after AFTER; 4 jobs;
+    refused without meter_v3 and its tempo-prior decoder, or without the system comparison."""
+    if shutil.which("bash") is None:
+        print("  (skipped: no bash)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        (tmp / "pace").mkdir()
+        shutil.copy(ROOT / "pace" / "v2_level.sh", tmp / "pace")
+        _stub_bin(tmp)
+        bd = tmp / "bd"
+        bd.mkdir()
+
+        def run(after=""):
+            if (tmp / "jobs.txt").exists():
+                (tmp / "jobs.txt").unlink()
+            r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/v2_level.sh'], cwd=tmp,
+                               env=batch_env(SUBMITS=str(tmp / "jobs.txt"), BD=str(bd), AFTER=after),
+                               capture_output=True, text=True)
+            rows = [ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()] if (tmp / "jobs.txt").exists() else []
+            return r, rows
+        r, rows = run()
+        assert r.returncode == 1 and not rows and "v2_round4.sh" in r.stdout
+        for f in ("meter_v3/best.pt", "meter_v3_tp/decode.json"):
+            (tmp / "outputs" / "runs" / f).parent.mkdir(parents=True, exist_ok=True)
+            (tmp / "outputs" / "runs" / f).write_text("x")
+        r, rows = run()
+        assert r.returncode == 1 and not rows and "bd_setup.sh" in r.stdout
+        (tmp / "outputs" / "system_eval").mkdir(parents=True)
+        (tmp / "outputs" / "system_eval" / "manifest.json").write_text("[]")
+        (bd / "MIDI2ScoreTF.ckpt").write_text("x")
+        r, rows = run(after="999")
+        assert r.returncode == 0 and len(rows) == 4, (r.stdout + r.stderr, rows)
+        by = {row[3].split("-J ")[1].split()[0]: row for row in rows}
+        tests, train, sys_, fin = by["lvtests"], by["lvtrain"], by["lvsys"], by["lvfinal"]
+        assert "--dependency" not in tests[3] and "tests.test_meter" in tests[3]
+        assert f"--dependency=afterok:{tests[0]}" in train[3] and "--kill-on-invalid-dep=yes" in train[3]
+        assert "v2_jobs.sh meters meter_v3_th meter_v3_ft" in train[3] and "--constraint=cuda13" in train[3]
+        assert f"--dependency=afterany:{train[0]}" in sys_[3]
+        assert sys_[3].index("levelexp meter_v3_tp") < sys_[3].index("evals nl_base_gn") < sys_[3].index(
+            "systems nl_base_gn+meter_v3_th:tidy,d95 nl_base_gn+meter_v3_ft:tidy,d95")
+        assert f"--dependency=afterany:{sys_[0]}:999" in fin[3] and "--gres" not in fin[3]
+        assert fin[3].index("compare_runs.py") < fin[3].index("beyer_dai.py score") < fin[3].index("compare_systems.py")
+        r, rows = run()
+        fin = next(row for row in rows if "-J lvfinal" in row[3])
+        assert f"--dependency=afterany:{rows[2][0]} " in fin[3] + " ", fin[3]     # no AFTER: the systems only
+
+
 def test_round4_batch():
     """pace/v2_round4.sh: the tests first; the new labellers and the tempo-prior decoder after them
     (cancelled if they fail); the evaluations and the whole-piece systems with the new models after
@@ -794,6 +845,21 @@ exit 0
         assert calls == ["scripts/system_scores.py --v2 nl_base_gn+meter_v3_tp"] and code == 0, (calls, out)
         code, calls, out = run("tempo meter_v9 meter_v9_tp")      # nothing to tune
         assert calls == [] and code == 1 and "not finished" in out
+        # the tempo head: started from meter_v3, trained side by side, each tuned its own way
+        code, calls, out = run("meters meter_v3_th meter_v3_ft", done="meter_v3_th meter_v3_ft")
+        assert code == 0, out
+        th = next(c for c in calls if "--name meter_v3_th" in c)
+        ft = next(c for c in calls if "--name meter_v3_ft" in c)
+        assert "--init outputs/runs/meter_v3/best.pt --tempo-head --freeze-trunk --select tempo" in th, th
+        assert "--tempo-head --select both" in ft and "--freeze-trunk" not in ft, ft
+        assert set(c for c in calls if c.startswith("scripts/eval_meter.py")) == {
+            "scripts/eval_meter.py --run meter_v3_th --level --decode-from outputs/runs/meter_v3_tp/decode.json",
+            "scripts/eval_meter.py --run meter_v3_ft --tune --tempo-prior --level"}, calls
+        code, calls, out = run("levelexp meter_v3_tp")              # decode.json: not in the stand-in run yet
+        assert code == 1 and calls == [] and "decode.json" in out
+        (tp / "decode.json").write_text("{}")
+        code, calls, out = run("levelexp meter_v3_tp")
+        assert code == 0 and calls == ["scripts/level_experiments.py --meter meter_v3_tp"], calls
         (tmp / "outputs" / "runs" / "meter_v2_nonote").mkdir(parents=True)
         (tmp / "outputs" / "runs" / "meter_v2_nonote" / "best.pt").write_text("x")
         code, calls, out = run("grids")

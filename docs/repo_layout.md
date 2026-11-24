@@ -39,6 +39,7 @@ scripts/track_beats.py           Beat This! on the MAESTRO audio (held-out folds
 scripts/fit_beat_noise.py        tracker vs ground truth -> configs/beat_noise.json
 scripts/compare_runs.py          tables of every evaluated run -> outputs/compare/{summary,margins}.md, results.csv
 scripts/compare_systems.py       whole-piece systems paired by performance, bootstrap over pieces -> outputs/system_eval/paired.md
+scripts/level_experiments.py     which evidence outside the decoder picks a piece's note-value level (priors, labeller confidence)
 scripts/system_inputs.py         whole-piece test inputs (clean MIDI, cut Transkun transcriptions) + references
 scripts/system_scores.py         our pipelines on them (seq2seq or v2) -> one MusicXML per performance
 scripts/synth_beats.py           Beat This! on the clean test MIDI rendered to audio (held-out folds) -> beats_synth.npz
@@ -68,6 +69,7 @@ pace/v2_jobs.sh                  the work of pace/v2.sh's jobs (several models p
 pace/v2_round4.sh                v2 fourth round: tempo prior in the meter decoder, labellers kept on onset F1, length tidying, deletion settings, beat ablation
 pace/rebuild.sh                  data/processed rebuilt with the 2026-11-22 data fixes (old data kept, same vocabulary)
 pace/v2_release.sh               the release: its configuration scored on whole pieces, models/ built, paired comparisons
+pace/v2_level.sh                 v2 fifth round: the written-tempo head for the note-value level, trained, tuned, scored
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model
 tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens

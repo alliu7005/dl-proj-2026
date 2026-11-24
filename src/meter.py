@@ -90,10 +90,20 @@ def quarters_at(t: np.ndarray, gt: dict) -> np.ndarray:
     return np.where(t > bt[-1], bq[-1] + (t - bt[-1]) * s1, out)
 
 
+def written_tempo(gt: dict, t0: float = -np.inf, t1: float = np.inf) -> float:
+    """log quarters per minute of the annotated grid between t0 and t1: the median over its beats
+    (nan with fewer than 2)."""
+    t, q = np.asarray(gt["t"], np.float64), np.asarray(gt["q"], np.float64)
+    keep = (t >= t0 - MATCH_TOL) & (t <= t1 + MATCH_TOL)
+    qpm = piece_qpm({"t": t[keep], "q": q[keep]}) if keep.sum() >= 2 else None
+    return math.log(qpm) if qpm else float("nan")
+
+
 def targets(beat_t: np.ndarray, gt: dict) -> dict:
     """Per tracked beat: bar (1 / 0; -1 outside the annotated span), step (Q_STEPS index; -1 when
     the true length is no Q_STEPS value within STEP_TOL), ts (TS_CLASSES index of the nearest
-    annotated beat's bar; -1 outside)."""
+    annotated beat's bar; -1 outside); for the piece, tempo: its written tempo over these beats
+    (``written_tempo``, [1], nan when unknown)."""
     k = len(beat_t)
     inside = (beat_t >= gt["t"][0] - MATCH_TOL) & (beat_t <= gt["t"][-1] + MATCH_TOL)
     bar = np.where(inside, 0, IGNORE)
@@ -112,7 +122,9 @@ def targets(beat_t: np.ndarray, gt: dict) -> dict:
     prev = np.clip(near - 1, 0, len(gt["t"]) - 1)
     near = np.where(np.abs(gt["t"][prev] - beat_t) < np.abs(gt["t"][near] - beat_t), prev, near)
     ts = np.where(inside, gt["ts"][near], IGNORE)
-    return {"bar": bar.astype(np.int64), "step": step.astype(np.int64), "ts": ts.astype(np.int64)}
+    tempo = written_tempo(gt, float(beat_t[0]), float(beat_t[-1])) if k else float("nan")
+    return {"bar": bar.astype(np.int64), "step": step.astype(np.int64), "ts": ts.astype(np.int64),
+            "tempo": np.array([tempo], np.float32)}
 
 
 def aligned_grids(times, bars, beats, ts_names, min_beats: int = 16) -> list[dict]:
@@ -319,6 +331,17 @@ class DecodeConfig:
     tempo_weight: float = 0.0
     tempo_mu: float = math.log(116.0)
     tempo_sigma: float = 0.5
+    # the note-value level of the whole piece (choose_level), after decoding: the grid as decoded,
+    # or the same bar lines at halved / doubled note values (3/8 <-> 3/4, 2/4 <-> 2/2), whichever
+    # scores best on the piece's written tempo: level_weight x a log-normal prior (level_mu /
+    # level_sigma: the training scores'), level_model_weight x the meter model's own estimate of
+    # this piece's written tempo (MeterConfig.tempo_head), plus level_stay for keeping the decoded
+    # one. All 0 (the default): the grid as decoded. --tune --level sets them on validation.
+    level_weight: float = 0.0
+    level_mu: float = math.log(116.0)
+    level_sigma: float = 0.51
+    level_model_weight: float = 0.0
+    level_stay: float = 0.0
 
     def to_dict(self):
         return asdict(self)
@@ -555,7 +578,7 @@ def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, not
 def collate(samples: list, device="cpu"):
     """[(features [K, F], targets or None, beat times, note inputs)] -> (x [B, K, F], mask [B, K],
     notes (features [B, M, NF], pitch [B, M], beat [B, M]; beat -1 = padding), targets {head:
-    [B, K]}, -1 where there is none)."""
+    [B, K]}, -1 where there is none; tempo: [B], nan where there is none)."""
     import torch
     b = len(samples)
     k = max(len(s[0]) for s in samples)
@@ -566,6 +589,7 @@ def collate(samples: list, device="cpu"):
     npitch = torch.zeros(b, m, dtype=torch.long)
     nbeat = torch.full((b, m), -1, dtype=torch.long)
     tg = {h: torch.full((b, k), IGNORE, dtype=torch.long) for h in ("bar", "step", "ts")}
+    tg["tempo"] = torch.full((b,), float("nan"))
     for i, (f, t, _, (a, p, j)) in enumerate(samples):
         x[i, :len(f)] = torch.from_numpy(f)
         mask[i, :len(f)] = True
@@ -573,8 +597,10 @@ def collate(samples: list, device="cpu"):
         npitch[i, :len(p)] = torch.from_numpy(p)
         nbeat[i, :len(j)] = torch.from_numpy(j)
         if t is not None:
-            for h in tg:
+            for h in ("bar", "step", "ts"):
                 tg[h][i, :len(f)] = torch.from_numpy(t[h])
+            if "tempo" in t:
+                tg["tempo"][i] = float(t["tempo"][0])
     notes = (nf.to(device), npitch.to(device), nbeat.to(device))
     return x.to(device), mask.to(device), notes, {h: v.to(device) for h, v in tg.items()}
 
@@ -591,16 +617,22 @@ class MeterConfig:
     n_ts: int = len(TS_CLASSES)
     n_note_features: int = 0     # > 0: the note encoder over note_inputs (N_NOTE_FEATURES); 0 = none
     d_note: int = 64
+    tempo_head: bool = False     # a piece-level head: this piece's written tempo (log quarters per minute)
 
     def to_dict(self):
         return asdict(self)
+
+
+TEMPO_CENTRE = math.log(116.0)   # the tempo head's estimates start at the training scores' log-mean
 
 
 def build_meter_model(cfg: dict):
     """The beat-sequence transformer (Scoreformer encoder layers, rotary positions over the beat
     index) with the bar / step / ts heads. With ``n_note_features``, a note encoder (a per-note
     MLP over ``note_inputs`` + a pitch embedding) pooled per beat (mean and max) joins each beat's
-    features. Beat features beyond ``n_features`` are ignored (the first meter model had 27)."""
+    features. Beat features beyond ``n_features`` are ignored (the first meter model had 27).
+    With ``tempo_head``, ``"tempo"`` [B, 2]: the piece's written tempo as a log-normal (mean and
+    log std of log quarters per minute) from the mean of its beats' states (choose_level)."""
     import torch
     import torch.nn as nn
 
@@ -627,6 +659,8 @@ def build_meter_model(cfg: dict):
             self.layers = nn.ModuleList(EncoderLayer(enc) for _ in range(c.layers))
             self.norm = nn.LayerNorm(c.d_model)
             self.head = nn.Linear(c.d_model, 2 + c.n_steps + c.n_ts)
+            if c.tempo_head:  # mean of the beats' states -> (log-qpm offset from the prior's centre, log std)
+                self.tempo = nn.Sequential(nn.Linear(c.d_model, c.d_model), nn.GELU(), nn.Linear(c.d_model, 2))
             dh = c.d_model // c.n_heads
             self.register_buffer("freq", 1.0 / (10000 ** (torch.arange(0, dh, 2).float() / dh)), persistent=False)
 
@@ -657,14 +691,23 @@ def build_meter_model(cfg: dict):
             m = mask[:, None, None, :]
             for layer in self.layers:
                 h = layer(h, cos, sin, m)
-            o = self.head(self.norm(h))
-            return {"bar": o[..., :2], "step": o[..., 2:2 + c.n_steps], "ts": o[..., 2 + c.n_steps:]}
+            h = self.norm(h)
+            o = self.head(h)
+            out = {"bar": o[..., :2], "step": o[..., 2:2 + c.n_steps], "ts": o[..., 2 + c.n_steps:]}
+            if c.tempo_head:
+                w = mask[..., None].to(h.dtype)
+                r = self.tempo((h * w).sum(1) / w.sum(1).clamp(min=1.0))
+                out["tempo"] = torch.stack([TEMPO_CENTRE + r[:, 0], r[:, 1].clamp(-4.0, 1.0) - 0.7], -1)
+            return out
 
     return MeterModel()
 
 
-def meter_loss(out: dict, tg: dict):
-    """Cross-entropy of the three heads over the beats each has a target for."""
+def meter_loss(out: dict, tg: dict, tempo_weight: float = 1.0):
+    """Cross-entropy of the three heads over the beats each has a target for; with a tempo head,
+    plus ``tempo_weight`` x its Gaussian negative log-likelihood of the piece's written tempo (log
+    quarters per minute) over the samples that have one."""
+    import torch
     import torch.nn.functional as F
     total, parts = 0.0, {}
     for k in ("bar", "step", "ts"):
@@ -673,6 +716,13 @@ def meter_loss(out: dict, tg: dict):
         loss = F.cross_entropy(out[k][m].float(), y[m]) if m.any() else out[k].sum() * 0.0
         parts[k] = float(loss.detach())
         total = total + loss
+    if "tempo" in out and "tempo" in tg:
+        y = tg["tempo"].float()
+        m = torch.isfinite(y)
+        mu, logsd = out["tempo"][:, 0].float(), out["tempo"][:, 1].float()
+        nll = (0.5 * ((y - mu) / logsd.exp()) ** 2 + logsd)[m].mean() if m.any() else mu.sum() * 0.0
+        parts["tempo"] = float(nll.detach())
+        total = total + tempo_weight * nll
     return total, parts
 
 
@@ -688,7 +738,18 @@ def predict_logp(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarra
     with torch.no_grad():
         x, mask, nin, _ = collate([(feats, None, beat_t, note_inputs(notes, beat_t))], device)
         out = model(x, mask, nin)
-        return {k: torch.log_softmax(v[0].float(), -1).cpu().numpy() for k, v in out.items()}
+        return logp_of(out)
+
+
+def logp_of(out: dict, b: int = 0) -> dict:
+    """Item ``b`` of the model's output: each head's log-probabilities per beat, and with a tempo
+    head ``"tempo"`` = (mean, std) of the piece's log written tempo."""
+    import torch
+    lp = {k: torch.log_softmax(v[b].float(), -1).cpu().numpy() for k, v in out.items() if k != "tempo"}
+    if "tempo" in out:
+        mu, logsd = out["tempo"][b].float().cpu().numpy()
+        lp["tempo"] = np.array([mu, np.exp(logsd)])
+    return lp
 
 
 def oracle_logp(beat_t: np.ndarray, gt: dict, eps: float = 1e-4) -> dict | None:
@@ -727,12 +788,111 @@ def tempo_logprior(beat_t: np.ndarray, cfg: DecodeConfig) -> np.ndarray:
 
 def grid_from_logp(beat_t: np.ndarray, lp: dict | None, cfg: DecodeConfig = DecodeConfig()) -> dict:
     """``predict_logp``'s output decoded into a grid (a single bar without it), with cfg's tempo
-    prior added to the step head's log-probabilities when its weight is above 0."""
+    prior added to the step head's log-probabilities when its weight is above 0, then the piece's
+    note-value level chosen (``choose_level``; with cfg's level weights at 0, the grid as decoded)."""
     if lp is None:
         return grid_from_states(beat_t, [(0, 0)] * len(beat_t))
     step = lp["step"] + tempo_logprior(beat_t, cfg) if cfg.tempo_weight > 0 else lp["step"]
     states, steps = decode(lp["bar"], step, lp["ts"], cfg, return_steps=True)
-    return grid_from_states(beat_t, states, steps)
+    return choose_level(grid_from_states(beat_t, states, steps), cfg, lp.get("tempo"))
+
+
+# ---------------------------------------------------------------------------------------------
+# the note-value level of a whole piece
+# ---------------------------------------------------------------------------------------------
+# The same music can be written at two metrical levels: 3/4 or 3/8, 2/2 or 2/4, 6/4 or 6/8, the
+# bar lines in the same places and every note value halved. Scores of one piece write one of them,
+# and the decoder gets it wrong for whole pieces (ASAP test: 5 of 14 pieces, among them Chopin's
+# first Ballade, 6/4 written 6/8): beat and downbeat F cannot see it, the time signature and every
+# onset and length in quarters can. The decoder cannot weigh it with its own heads (the grid it
+# returns is the best under them, the other level included), so the choice needs other evidence:
+# a piece-level estimate of the written tempo.
+
+LEVELS = (Fraction(1), Fraction(1, 2), Fraction(2))   # as decoded first: ties keep it
+LEVEL_TOL = 0.4                                       # |log2(decoded / true quarters)| this close = the right level
+
+
+def scaled_ts(ts: str, f) -> str | None:
+    """The time signature of a bar with every note value multiplied by ``f`` (2: 3/8 -> 3/4; 1/2:
+    3/4 -> 3/8), None when that is not one of TS_CLASSES (the labeller and the export know those)."""
+    n, d = ts.split("/")
+    d2 = Fraction(int(d)) / Fraction(f)
+    if d2.denominator != 1 or d2 < 1:
+        return None
+    s = f"{n}/{int(d2)}"
+    return s if s in TS_CLASSES else None
+
+
+def scale_grid(grid: dict, f) -> dict | None:
+    """The grid with the same bar lines and beat times and every note value multiplied by ``f``
+    (its quarters, bar positions and time signatures), None when a bar's time signature has no
+    counterpart (``scaled_ts``). ``level`` records the factor against the decoded grid."""
+    f = Fraction(f)
+    if f == 1:
+        return grid
+    bars = [scaled_ts(b, f) for b in grid["bars"]]
+    if not bars or any(b is None for b in bars):
+        return None
+    return dict(grid, q=np.asarray(grid["q"], np.float64) * float(f),
+                bar_q=np.asarray(grid["bar_q"], np.float64) * float(f), bars=bars,
+                level=float(Fraction(grid.get("level", 1.0)).limit_denominator(8) * f))
+
+
+def piece_qpm(grid: dict) -> float | None:
+    """The grid's written tempo: the median over its beats of quarters per minute (beats at least
+    50 ms apart; None with fewer than 2)."""
+    t, q = np.asarray(grid["t"], np.float64), np.asarray(grid["q"], np.float64)
+    if len(t) < 2:
+        return None
+    dt, dq = np.diff(t), np.diff(q)
+    ok = (dt > 0.05) & (dq > 0)
+    return float(np.median(60.0 * dq[ok] / dt[ok])) if ok.any() else None
+
+
+def level_ratio(grid: dict, gt: dict) -> float | None:
+    """Decoded quarters per true quarter over the span both cover (about 1: the right level; 1/2:
+    every note value halved; None when fewer than 4 decoded beats fall inside the annotations)."""
+    t = np.asarray(grid["t"], np.float64)
+    inside = (t >= gt["t"][0] - MATCH_TOL) & (t <= gt["t"][-1] + MATCH_TOL)
+    if inside.sum() < 4:
+        return None
+    tq = quarters_at(t[inside], gt)
+    dq = np.asarray(grid["q"], np.float64)[inside]
+    true_span = tq[-1] - tq[0]
+    return float((dq[-1] - dq[0]) / true_span) if true_span > 1e-6 else None
+
+
+def level_scores(grid: dict, cfg: DecodeConfig, tempo=None) -> dict:
+    """{factor: score} of every level the grid can take (``LEVELS``, ``scale_grid``): the written
+    tempo it implies (``piece_qpm`` x factor) under the log-normal prior (cfg.level_weight) and under
+    the model's estimate for this piece (``tempo`` = (log-qpm mean, std) from the tempo head;
+    cfg.level_model_weight), plus cfg.level_stay for the decoded one."""
+    qpm = piece_qpm(grid)
+    out = {}
+    if qpm is None:
+        return {Fraction(1): 0.0}
+    for f in LEVELS:
+        if scale_grid(grid, f) is None:
+            continue
+        x = math.log(qpm * float(f))
+        s = -0.5 * cfg.level_weight * ((x - cfg.level_mu) / cfg.level_sigma) ** 2
+        if tempo is not None and cfg.level_model_weight > 0:
+            mu, sd = float(tempo[0]), max(float(tempo[1]), 1e-3)
+            s += cfg.level_model_weight * (-0.5 * ((x - mu) / sd) ** 2)
+        if f == 1:
+            s += cfg.level_stay
+        out[f] = s
+    return out
+
+
+def choose_level(grid: dict, cfg: DecodeConfig, tempo=None) -> dict:
+    """The grid at the level ``level_scores`` puts first (the decoded one on a tie, and always with
+    cfg's level weights at 0); ``level`` records the factor (1.0: as decoded)."""
+    if cfg.level_weight <= 0 and (cfg.level_model_weight <= 0 or tempo is None):
+        return dict(grid, level=1.0)
+    scores = level_scores(grid, cfg, tempo)
+    best = max(scores, key=lambda f: (scores[f], f == 1))
+    return dict(scale_grid(grid, best), level=float(best)) if best != 1 else dict(grid, level=1.0)
 
 
 def predict_grid(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, device="cpu",
@@ -777,5 +937,8 @@ def grid_scores(grid: dict, gt: dict) -> dict:
         if 0 <= j < len(grid["bars"]):
             ts_ok += grid["bars"][j] == gt["ts_names"][k]
         n += 1
+    r = level_ratio(grid, gt)
     return {"beat_f": f_measure(gt["t"], bt), "downbeat_f": f_measure(downs, bt[bd]),
-            "ts_acc": ts_ok / max(n, 1)}
+            "ts_acc": ts_ok / max(n, 1),
+            # the note-value level (level_ratio): 1 right, 0 halved or doubled, nan when it cannot be told
+            "level_ok": float(abs(math.log2(r)) <= LEVEL_TOL) if r and r > 0 else float("nan")}
