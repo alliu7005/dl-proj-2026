@@ -6,7 +6,7 @@
 # a finished run only evaluates (scripts/eval_labeller.py writes every test set it can).
 #SBATCH -J labeller
 #SBATCH --gres=gpu:1
-#SBATCH --constraint=gpu-h100|gpu-h200|gpu-rtxpro-blackwell
+#SBATCH --constraint=HX00
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 8:00:00

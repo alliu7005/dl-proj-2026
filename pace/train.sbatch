@@ -11,9 +11,9 @@
 # GPU: any of H100 / H200 / RTX Pro Blackwell, whichever frees up first (node features; see
 # `sinfo -h -o "%G | %f" | sort -u`). Not V100 / RTX 6000 (no bf16), not MI210 / R9700 (AMD:
 # the CUDA build of torch can't use them); A100 / L40S work but at about half the speed. Override:
-#   sbatch --constraint=gpu-a100 ...   (one type)   or   --constraint="gpu-h100|gpu-a100" ...
+#   sbatch --constraint=gpu-a100 ...   (one node feature: PACE adds &cuda13, and Slurm rejects an OR list with it)
 #SBATCH --gres=gpu:1
-#SBATCH --constraint=gpu-h100|gpu-h200|gpu-rtxpro-blackwell
+#SBATCH --constraint=HX00
 #SBATCH -c 8
 #SBATCH --mem=48G
 #SBATCH -t 8:00:00

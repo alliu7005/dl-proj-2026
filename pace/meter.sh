@@ -31,7 +31,7 @@
 #                       synthetic, real, periscope): LABELLERS on every meter        labeller jobs still
 #                       model, nl_large also on LARGE_ON                             queued or running
 set -euo pipefail
-GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}
+GPUS=${GPUS:-HX00}
 G=(--gres=gpu:1 "--constraint=$GPUS")
 METERS=${METERS:-"meter_v2 meter_v2_s1 meter_v2_nonote meter_v2_asap"}
 LABELLERS=${LABELLERS:-"nl_base"}

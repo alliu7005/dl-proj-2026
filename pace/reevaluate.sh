@@ -29,7 +29,7 @@
 # what was listed and merge it into the run's results (after each condition, under a lock, so
 # several jobs of one run can add theirs).
 set -euo pipefail
-GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}  # node features: whichever of these GPUs frees up first
+GPUS=${GPUS:-HX00}  # node feature: an H100 or an H200 (one feature: see pace/README.md, "Which GPU")
 G=(--gres=gpu:1 "--constraint=$GPUS")
 ARGS=${ARGS:-}
 TIME=${TIME:-}

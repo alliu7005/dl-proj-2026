@@ -13,7 +13,7 @@
 # $TORCH_HOME on scratch) and the MAESTRO audio pace/real_asap.sbatch downloaded.
 #SBATCH -J beattrack
 #SBATCH --gres=gpu:1
-#SBATCH --constraint=gpu-h100|gpu-h200|gpu-rtxpro-blackwell
+#SBATCH --constraint=HX00
 #SBATCH -c 8
 #SBATCH --mem=32G
 #SBATCH -t 2:00:00

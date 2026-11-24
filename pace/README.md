@@ -66,15 +66,27 @@ NAME=s2s ARGS="--arch score2seq" sbatch --export=ALL pace/train.sbatch   # Micha
 MusicXML for 5 pieces). A run that hits the 8 h limit is resumed by submitting the same command
 again (it picks up `outputs/runs/<NAME>/last.pt`).
 
-**Which GPU.** Every GPU job (the `.sbatch` files and the submit scripts) asks for one GPU of any
-of these types, whichever frees up first: `--constraint="gpu-h100|gpu-h200|gpu-rtxpro-blackwell"`
-(node features; `sinfo -h -o "%G | %f" | sort -u` lists them, and `sinfo -h -o "%G %t %D" | grep -i gpu`
-shows how many nodes of each are idle / mixed / allocated). Asking for one exact type left jobs
-waiting for Blackwell cards while H100 / H200 nodes had free GPUs. Left out on purpose: `gpu-v100`
-and `gpu-rtx6000` (no bf16: slower fp32), `gpu-mi210` / `gpu-r9700` (AMD: the CUDA build of torch
-can't use them); `gpu-a100` / `gpu-l40s` / `gpu-a40` work at about half the speed, which can push a
-45M training plus its evaluation past the 8 h limit. To choose: `GPUS=gpu-h100 bash pace/...sh`, or
-`sbatch --constraint=gpu-a100 ...` (several: `"gpu-h100|gpu-a100"`).
+**Which GPU.** Every GPU job (the `.sbatch` files and the submit scripts) asks for one H100 or
+H200, whichever frees up first: `--constraint=HX00`, a node feature both carry (`sinfo -h -o "%G | %f"
+| sort -u` lists the features, and `sinfo -h -o "%G %t %D" | grep -i gpu` shows how many nodes of
+each are idle / mixed / allocated). It has to be one feature: since November 2026 PACE adds
+`&cuda13` to every GPU job's constraint, and Slurm leaves a job whose constraint mixes an OR list
+with it (`gpu-h100|gpu-h200&cuda13`) pending forever as `BadConstraints` (`scontrol show job <id> |
+grep Features` shows what the job ended up with). Asking for one exact GPU type left jobs waiting
+while other fast nodes had free GPUs. Left out on purpose: `gpu-v100` and `gpu-rtx6000` (no bf16:
+slower fp32; also only `cuda12`), `gpu-mi210` / `gpu-r9700` (AMD: the CUDA build of torch can't use
+them); `gpu-a100` / `gpu-l40s` / `gpu-a40` work at about half the speed, which can push a 45M
+training plus its evaluation past the 8 h limit. To choose another (one feature): `GPUS=gpu-a100
+bash pace/...sh`, or `sbatch --constraint=gpu-a100 ...`. A job already pending with a constraint
+that cannot be met takes a new one in place, keeping its dependencies: `scontrol update
+JobId=<id> Features=HX00`.
+
+Short GPU jobs (`pace/v2_round4.sh`: the labellers, about an hour each on an H100, the evaluations and
+whole-piece systems) ask for `cuda13` instead, a feature every NVIDIA GPU with bf16 carries (A100,
+A40, L40S, H100, H200; not V100 / RTX 6000, not the AMD cards). On 2026-11-23 the H100 / H200
+queue was two days deep (`sbatch --test-only ...` gave a start on Nov 26), `cuda13` started the
+next morning on an A100. To compare before submitting (nothing is submitted):
+`for c in HX00 cuda13; do sbatch --test-only --gres=gpu:1 --constraint=$c -c 8 --mem=48G -t 4:00:00 --wrap=hostname; done`.
 
 ## 4b. Post-milestone experiments
 

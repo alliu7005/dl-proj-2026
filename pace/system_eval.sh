@@ -18,7 +18,7 @@
 #   sysscore     both rated with their metrics -> outputs/system_eval/results.md    all of the above
 #                (CPU, bd311; their paper's row printed next to the clean results)
 set -euo pipefail
-GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}
+GPUS=${GPUS:-HX00}
 G=(--gres=gpu:1 "--constraint=$GPUS")
 BD=${BD:-$HOME/scratch/beyer_dai}
 RUNS=${RUNS:-"sf_base_reg_cab:meter sf_base_reg_cab:tsearch_beat s2s_m_cab:meter"}

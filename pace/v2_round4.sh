@@ -30,7 +30,8 @@
 #   r4final      outputs/compare; every system rated with Beyer & Dai's metrics,     all of the above (any)
 #                and the ablation on its shared pieces
 set -euo pipefail
-GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}
+GPUS=${GPUS:-cuda13}  # any NVIDIA GPU with bf16 (A100, A40, L40S, H100, H200): these jobs are short
+                      # (pace/README.md, "Which GPU"); H100 / H200 only: GPUS=HX00
 G=(--gres=gpu:1 "--constraint=$GPUS")
 NEW_LABS=${NEW_LABS-"nl_base_gn_f1 nl_base_gn1_f1"}
 TEMPO_FROM=${TEMPO_FROM-"meter_v3"}

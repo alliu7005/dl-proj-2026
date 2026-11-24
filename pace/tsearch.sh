@@ -31,7 +31,7 @@
 # their 8 h does not reach: PER_CONDITION=1 bash pace/reevaluate.sh <run>). A run that stops at the
 # time limit resumes when it is submitted again with the same NAME / ARGS (pace/train.sbatch).
 set -euo pipefail
-GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}  # node features: whichever of these GPUs frees up first
+GPUS=${GPUS:-HX00}  # node feature: an H100 or an H200 (one feature: see pace/README.md, "Which GPU")
 G=(--gres=gpu:1 "--constraint=$GPUS")
 export GPUS
 TS_MODES="--modes ts_true,tsearch,tsearch_beat"

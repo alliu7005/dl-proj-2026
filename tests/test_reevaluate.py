@@ -98,7 +98,7 @@ def test_reevaluate():
         assert set(sub) == {"no_real", "big_no_real"}, out
         assert sub["no_real"][1] == "--conditions real --only-missing", sub
         assert "-t 2:30:00" in sub["no_real"][2] and "-t 4:00:00" in sub["big_no_real"][2], sub
-        assert "-J eval_no_real" in sub["no_real"][2] and "--constraint=gpu-h100|gpu-h200|gpu-rtxpro-blackwell" \
+        assert "-J eval_no_real" in sub["no_real"][2] and "--constraint=HX00" \
             in sub["no_real"][2], sub
         assert "real: " + ",".join(NAMES) in out, out                 # what each job will compute
         assert "skip done_all: nothing missing" in out and "skip finished: nothing missing" in out, out

@@ -17,7 +17,7 @@
 #                set (pace/train_labeller.sbatch)
 #   nl_large     12-layer, d_model 768 (~85M): does capacity help a labeller       labelprep
 set -euo pipefail
-GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}
+GPUS=${GPUS:-HX00}
 G=(--gres=gpu:1 "--constraint=$GPUS")
 prep=$(sbatch --parsable -J labelprep -c 8 --mem=48G -t 2:00:00 -o slurm-labelprep-%j.out --wrap="source pace/common.sh; \
 python scripts/build_notelabels.py --workers 8 && python -m tests.test_notelabels")

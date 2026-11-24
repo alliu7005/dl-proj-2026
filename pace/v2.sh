@@ -41,7 +41,7 @@
 #                     rated with Beyer & Dai's metrics -> outputs/system_eval/results.md
 set -euo pipefail
 WAVE=${1:-wave1}
-GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}
+GPUS=${GPUS:-HX00}
 G=(--gres=gpu:1 "--constraint=$GPUS")
 export METERS=${METERS-"meter_v3 meter_v3_s1 meter_v3_s2 meter_v3_large"}
 export NEW_NLS=${NEW_NLS-"nl_base_gn nl_base_gn_s1"}
