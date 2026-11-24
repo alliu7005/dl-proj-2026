@@ -426,6 +426,67 @@ def piece_staves(staffs: list[int]) -> int:
     return max([2] + [s + 1 for s in kept])
 
 
+GRACE_REACH = 1        # quarters: a grace note joins a main note of its staff at most this far after it
+GRACE_AS_NOTE = 0.25   # quarters: the longest written length of a "grace" note with no main note to join
+
+
+def attach_graces(placed: list, bar_ts: list[str]) -> int:
+    """The labeller writes a grace note where it was played: just before its main note (1/8 quarter
+    before it in a demo piece, 6 of its 7 grace notes), sometimes across the bar line. A score
+    writes it at its main note's position, in its voice; elsewhere it has no main note and viewers
+    misread the bar. Each grace note joins the first main note of its staff starting at or after it
+    within GRACE_REACH quarters (that note's bar and position). One with no such note was a short
+    note the labeller called a grace note: it is written as a note, lasting until the next note of
+    its staff (at most GRACE_AS_NOTE). Changes ``placed`` in place; returns how many moved or became
+    notes."""
+    from fractions import Fraction
+    from .meter import bar_quarters
+    if not any(p.grace for p in placed):
+        return 0
+    lens = [Fraction(bar_quarters(ts)) for ts in bar_ts] or [Fraction(4)]
+    top = max(p.bar for p in placed) + 2
+    lens += [lens[-1]] * max(0, top - len(lens))
+    starts = [Fraction(0)]
+    for L in lens:
+        starts.append(starts[-1] + L)
+    at = lambda p: starts[p.bar] + Fraction(p.pos)  # noqa: E731
+    mains = {}
+    for p in placed:
+        if not p.grace:
+            mains.setdefault(p.staff, []).append(p)
+    for v in mains.values():
+        v.sort(key=at)
+    reach, short, changed = Fraction(GRACE_REACH), Fraction(GRACE_AS_NOTE), 0
+    for p in placed:
+        if not p.grace:
+            continue
+        q = at(p)
+        nxt = next((m for m in mains.get(p.staff, []) if at(m) >= q), None)
+        if nxt is not None and at(nxt) == q:
+            continue
+        if nxt is not None and at(nxt) - q <= reach:
+            p.bar, p.pos = nxt.bar, nxt.pos
+        else:
+            gap = at(nxt) - q if nxt is not None else short
+            p.grace, p.total = False, min(gap, short)
+        changed += 1
+    return changed
+
+
+def follow_map(grid: dict, placed: list) -> dict | None:
+    """Where the music is in the score at each moment of the performance, for the demo's playback
+    bar: {"t": the grid's beat times (s, the recording's / transcription's clock), "q": the score
+    position there, in quarters from the first written note}. The first note anchors it because a
+    viewer counts its time from the score's first written beat (a pickup bar starts there), not from
+    the grid's first bar line. None without a grid or notes."""
+    t, q, bar_q = (np.asarray(grid.get(k, []), np.float64) for k in ("t", "q", "bar_q"))
+    if len(t) < 2 or not len(placed) or not len(bar_q):
+        return None
+    first = min(float(bar_q[min(p.bar, len(bar_q) - 1)]) + float(p.pos) for p in placed)
+    order = np.argsort(t, kind="stable")
+    return {"t": [round(float(x), 3) for x in t[order]], "q": [round(float(x) - first, 4) for x in q[order]]}
+
+
 class V2Pipeline(_FrontEnd):
     """v2 (README "v2: grid first, then label every note"): the piece's beats (Beat This! on the
     audio; a MIDI input rendered to audio first, src/synth.py), the meter model's grid of the whole
@@ -539,6 +600,7 @@ class V2Pipeline(_FrontEnd):
             for p in pl:
                 p.bar += win.first_bar
                 notes_out.append(p)
+        graces = attach_graces(notes_out, list(grid["bars"]))
         key = int(grid.get("key", 0))
         bars = [(ts, key) for ts in grid["bars"]] or [("4/4", key)]
         opens = True
@@ -556,7 +618,7 @@ class V2Pipeline(_FrontEnd):
         own = int(sum(int((it["roles"] == 0).sum()) for it in items))
         return tokens, {"windows": len(windows), "notes_kept": len(notes_out), "notes_deleted": own - len(notes_out),
                         "bar_ts": [ts for ts, _ in bars], "staves": max([2] + [p.staff + 1 for p in notes_out]),
-                        "staff_folded": int(folded)}
+                        "staff_folded": int(folded), "graces_attached": graces, "follow": follow_map(grid, notes_out)}
 
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, progress: Progress = _noop, beats: tuple | None = None,

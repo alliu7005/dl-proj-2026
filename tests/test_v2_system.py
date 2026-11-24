@@ -137,6 +137,64 @@ def test_rescore():
         assert "onset_scaled_f1" not in out["d"] and out["d"]["bar_f1"] == stored["d"]["bar_f1"]
 
 
+def test_export_graces_and_rests():
+    """The export writes a grace note in its main note's voice: one written just before its note
+    (where it was played) joins the main note of its staff up to 1/2 quarter later; an after-grace
+    (no later note in its bar) stays. Rests music21 would write with two or more dots are split into
+    standard rests. Every voice of every measure adds up to its bar."""
+    import music21 as m21
+    from src.preprocessing.detokenize import _split_rest, tokens_to_score
+    F = Fraction
+    assert _split_rest(F(1, 8), F(31, 8)) == [(F(1, 8), F(1, 8)), (F(1, 4), F(1, 4)), (F(1, 2), F(1, 2)),
+                                                 (F(1), F(1)), (F(2), F(2))]
+    assert _split_rest(F(0), F(31, 8))[0] == (F(0), F(2))
+    toks = ("bar ts_4/4 key_0 pos_0 staff_0 p_60 d_1 pos_1 sub_7/8 p_62 grace pos_2 p_64 d_2 "
+            "staff_1 pos_0 p_48 d_1/8 "
+            "bar pos_0 staff_0 p_65 d_3 pos_3 sub_7/8 p_67 grace staff_1 pos_0 p_41 d_4").split()
+    score = tokens_to_score(toks)
+    up, low = score.parts[0], score.parts[1]
+    m1 = up.getElementsByClass("Measure")[0]
+    grace = next(n for n in m1.recurse().notes if n.duration.isGrace)
+    main = next(n for n in m1.recurse().notes if not n.duration.isGrace and n.pitch.midi == 64)
+    assert grace.pitch.midi == 62 and grace.activeSite is main.activeSite and grace.offset == main.offset == 2.0
+    m2 = up.getElementsByClass("Measure")[1]
+    after = next(n for n in m2.recurse().notes if n.duration.isGrace)
+    assert after.pitch.midi == 67 and after.offset == 3.875              # an after-grace stays
+    for part in (up, low):
+        for meas in part.getElementsByClass("Measure"):
+            for v in (meas.voices or [meas]):
+                els = list(v.notesAndRests)
+                assert all(r.duration.dots < 2 for r in els if r.isRest), [(r.offset, r.duration.dots) for r in els]
+                assert abs(sum(e.quarterLength for e in els if not e.duration.isGrace) - 4.0) < 1e-9
+    rests = [r for r in low.getElementsByClass("Measure")[0].notesAndRests if r.isRest]
+    assert [r.quarterLength for r in rests] == [0.125, 0.25, 0.5, 1.0, 2.0], [r.quarterLength for r in rests]
+    with tempfile.TemporaryDirectory() as t:   # and the file says the same
+        from src.preprocessing.detokenize import tokens_to_musicxml
+        path = Path(t) / "g.musicxml"
+        tokens_to_musicxml(toks, str(path))
+        back = m21.converter.parse(str(path))
+        for meas in back.parts[0].getElementsByClass("Measure"):
+            assert meas.duration.quarterLength == 4.0
+
+
+def test_attach_graces():
+    """v2 writes a grace note where it was played; it joins the main note of its staff starting up to
+    a quarter after it, across a bar line too, and one with none becomes a short note."""
+    from src.pipeline import GRACE_AS_NOTE, attach_graces
+    F = Fraction
+    notes = [Placed(0, F(7, 4), 62, F(0), 0, grace=True), Placed(0, F(15, 8), 64, F(1), 0),   # 1/8 before
+             Placed(0, F(31, 8), 66, F(0), 0, grace=True), Placed(1, F(0), 67, F(2), 0),        # across the bar
+             Placed(1, F(0), 50, F(0), 1, grace=True), Placed(1, F(3), 48, F(1), 1),            # 3 quarters: a note
+             Placed(1, F(2), 69, F(0), 0, grace=True), Placed(1, F(2), 70, F(1), 0)]            # in place already
+    assert attach_graces(notes, ["4/4", "4/4"]) == 3
+    g = [(n.bar, n.pos, n.grace, n.total) for n in notes if n.pitch in (62, 66, 50, 69)]
+    assert g == [(0, F(15, 8), True, F(0)), (1, F(0), True, F(0)), (1, F(0), False, F(GRACE_AS_NOTE)),
+                 (1, F(2), True, F(0))], g
+    lone = [Placed(0, F(3), 72, F(0), 0, grace=True)]   # nothing after it on its staff: a 16th
+    assert attach_graces(lone, ["3/4"]) == 1 and not lone[0].grace and lone[0].total == F(1, 4)
+    assert attach_graces([Placed(0, F(0), 60, F(1), 0)], ["4/4"]) == 0
+
+
 def test_export_last_resort():
     """A score some bars of which cannot be exported at all: those bars are emptied, the rest is
     written, and the report says which; a score that exports needs none of it."""
@@ -326,7 +384,9 @@ def test_v2_pipeline():
         assert sum(st["time_signatures"].values()) == st["bars"] and st["time_signature"] in st["time_signatures"]
         if "score_midi" in res.files:  # played back as long as the performance
             import pretty_midi
-            length = pretty_midi.PrettyMIDI(str(res.files["score_midi"])).get_end_time()
+            pm = pretty_midi.PrettyMIDI(str(res.files["score_midi"]))   # first note to last, as playback_qpm
+            heard_notes = [n for i in pm.instruments for n in i.notes]
+            length = max(n.end for n in heard_notes) - min(n.start for n in heard_notes)
             perf = float(notes[:, 2].max() - notes[:, 1].min())
             # (these untrained models write far too many quarters: the tempo then stops at its 300 cap)
             ok = 0.98 * perf < length < 1.02 * perf if st["playback_qpm"] < 300 else length > perf

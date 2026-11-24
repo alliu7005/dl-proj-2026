@@ -1400,7 +1400,11 @@ python demo/app.py --labeller outputs/runs/nl_base/best.pt --meter outputs/runs/
 Everything runs in that Python process, on the GPU if there is one, otherwise the CPU (a
 30-second clip: about 10 s of Transkun on a laptop CPU, plus a few seconds per 128-note window for
 the score model). The page only uploads and displays: the score is drawn with OpenSheetMusicDisplay
-and the MIDI players use html-midi-player, both loaded from a CDN. Each job's files go to
+and the MIDI players use html-midi-player, both loaded from a CDN. A bar moves over the score where the
+music is playing. With the score MIDI it follows the score directly, since that plays at one
+tempo. With the recording or the transcription (v2), it follows the performer's tempo through the
+beats of the grid: `result.json` `follow` maps the performance's seconds to quarters from the first
+written note. Each job's files go to
 `outputs/demo/<job id>/`: `transcription.mid`, `tokens.txt`, `score.musicxml`, `score.mid`,
 `result.json`. The same pipeline from the command line:
 

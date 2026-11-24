@@ -229,6 +229,63 @@ def _carry_overflow(bars: list[_Bar]) -> list[_Bar]:
     return out
 
 
+GRACE_REACH = Fraction(1, 2)  # an orphan grace note joins a main note of its staff this close after it
+
+
+def _attach_orphan_graces(bar: _Bar):
+    """A grace note is written in the voice of the main note it ornaments, which starts where it
+    does. One with no main note of its staff there (a system writing it where it was played, just
+    before its note) joins the first main note of its staff starting at most GRACE_REACH after it in
+    the bar. Left alone, it is followed by a filler rest in its own voice, and viewers count it as a
+    note of its written value (OpenSheetMusicDisplay made such a bar an eighth too long, shifting
+    every later bar). Grace notes after the last note of a bar (after-graces, as in the scores) have
+    no later note and stay."""
+    for n in bar.notes:
+        if not n.grace:
+            continue
+        mains = sorted({m.pos for m in bar.notes if not m.grace and m.staff == n.staff})
+        if n.pos in mains:
+            continue
+        later = [p for p in mains if p > n.pos]
+        if later and later[0] - n.pos <= GRACE_REACH:
+            n.pos = later[0]
+
+
+def _split_rest(pos: Fraction, length: Fraction) -> list[tuple[Fraction, Fraction]]:
+    """A rest of ``length`` quarters at ``pos`` as standard rests: each the longest power-of-two
+    value that fits and starts on a multiple of itself (half rests on half-bar beats, quarters on
+    beats, ...). For rests with two or more dots, which printed music does not use."""
+    out, end = [], pos + length
+    while pos < end:
+        d = Fraction(4)
+        while d > Fraction(1, 64) and (d > end - pos or (pos / d).denominator != 1):
+            d /= 2
+        if d <= Fraction(1, 64) and d > end - pos:
+            d = end - pos
+        out.append((pos, d))
+        pos += d
+    return out
+
+
+def _standard_rests(v):
+    """Rests music21 wrote with two or more dots (a 3.875-quarter rest as a quadruple-dotted half)
+    split into standard rests; others (single-dotted, tuplet) stay."""
+    for r in [e for e in v.notesAndRests if isinstance(e, m21.note.Rest)]:
+        if r.duration.dots < 2 or r.duration.tuplets:
+            continue
+        off, ql = Fraction(r.offset).limit_denominator(10 ** 6), Fraction(r.quarterLength).limit_denominator(10 ** 6)
+        if any(x.denominator & (x.denominator - 1) for x in (off, ql)):  # off the binary grid (after a tuplet)
+            continue
+        parts = _split_rest(off, ql)
+        if len(parts) < 2:
+            continue
+        v.remove(r)
+        for p, d in parts:
+            nr = m21.note.Rest()
+            nr.duration = m21.duration.Duration(d)
+            v.insert(float(p), nr)
+
+
 def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None,
                   clip: bool = False) -> m21.stream.Score:
     """``tokens_to_score`` from parsed bars (changed in place by ``grid`` / ``clip``). Notes past
@@ -243,6 +300,7 @@ def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None
     last_el = defaultdict(dict)  # (staff) -> pitch -> last element, to attach tie starts
     prev_ts = prev_key = None
     for bi, bar in enumerate(bars):
+        _attach_orphan_graces(bar)
         ts = m21.meter.TimeSignature(bar.ts)
         bar_len = Fraction(ts.barDuration.quarterLength)
         content_end = max([n.pos + n.dur for n in bar.notes] + [bar_len])
@@ -310,6 +368,7 @@ def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None
                         if prev is not None:
                             prev.quarterLength = prev.quarterLength + r.quarterLength
                         v.remove(r)
+                _standard_rests(v)
             if bar.ts == prev_ts:  # written only where it changes
                 meas.timeSignature = None
             part.append(meas)

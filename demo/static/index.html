@@ -85,6 +85,12 @@
   h2 { font-size: 16px; margin: 0; }
   .paper { background: var(--paper); border-radius: 10px; margin-top: 14px; padding: 8px; min-height: 120px; overflow-x: auto; color: #000; }
   .paper .placeholder { color: #777; padding: 40px; text-align: center; }
+  #osmd { position: relative; }  /* OSMD's cursor coordinates start at this box's corner */
+  .playhead { position: absolute; left: 0; top: 0; width: 3px; margin-left: -1px; border-radius: 2px; pointer-events: none;
+              background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+              opacity: 0; transition: opacity .2s; will-change: transform; z-index: 2; }
+  .playhead.on { opacity: .85; }
+  .follow { font-size: 13px; color: var(--muted); margin-top: 6px; }
   .warn { font-size: 13px; color: var(--muted); margin-top: 10px; }
   footer { font-size: 12.5px; color: var(--muted); text-align: center; margin-top: 28px; }
   @media (max-width: 560px) { .steps { flex-direction: column; } .wrap { padding-top: 20px; } }
@@ -163,7 +169,8 @@
         <h2>Score</h2>
         <div class="btns" id="downloads"></div>
       </div>
-      <div class="paper" id="osmd"><div class="placeholder">rendering…</div></div>
+      <div class="follow hidden" id="follow"></div>
+      <div class="paper"><div id="osmd"><div class="placeholder">rendering…</div></div></div>
       <div class="warn">Rendered with OpenSheetMusicDisplay. Open the MusicXML in MuseScore for editing and cleaner engraving.</div>
     </div>
   </section>
@@ -178,7 +185,7 @@ const $ = s => document.querySelector(s);
 const AUDIO = ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.opus', '.aiff', '.aif'];
 const MIDI = ['.mid', '.midi'];
 const LABELS = { musicxml: 'MusicXML', score_midi: 'Score MIDI', transcription_midi: 'Transcription MIDI', tokens: 'Tokens' };
-let poll = null, clock = null, osmd = null, systems = {};
+let poll = null, clock = null, osmd = null, systems = {}, follow = null;
 
 function system() { const c = document.querySelector('input[name=system]:checked'); return c ? c.value : 'seq2seq'; }
 function pill() {
@@ -215,6 +222,7 @@ function reset() {
   input.value = ''; $('#perr').classList.add('hidden'); $('#perrbtn').classList.add('hidden');
   document.querySelectorAll('midi-player').forEach(p => { try { p.stop(); } catch (e) {} });
   $('#audio').pause();
+  if (follow) follow.stop();
   show('#upload');
 }
 
@@ -343,24 +351,186 @@ function showResult(id, job) {
   $('#rerr').classList.toggle('hidden', !errs.length);
   $('#rerr').textContent = errs.length ? 'Some outputs could not be written: ' + errs.join('; ') : '';
   show('#result');
-  renderScore(base + 'musicxml', has('musicxml'));
+  renderScore(base + 'musicxml', has('musicxml'), s);
 }
 
-async function renderScore(url, ok) {
+async function renderScore(url, ok, stats) {
   const box = $('#osmd');
+  if (follow) follow.stop();
+  follow = null;
+  $('#follow').classList.add('hidden');
   if (!ok) { box.innerHTML = '<div class="placeholder">No MusicXML was produced for this file.</div>'; return; }
   if (!window.opensheetmusicdisplay) { box.innerHTML = '<div class="placeholder">The score viewer could not load (offline?). Download the MusicXML instead.</div>'; return; }
   box.innerHTML = '';
   try {
     const xml = await (await fetch(url)).text();
     osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, {
-      autoResize: true, backend: 'svg', drawTitle: false, drawPartNames: false,
+      autoResize: false, backend: 'svg', drawTitle: false, drawPartNames: false,
       drawingParameters: 'compacttight',
     });
     await osmd.load(xml);
     osmd.render();
   } catch (err) {
     box.innerHTML = `<div class="placeholder">The viewer could not draw this score (${err.message || err}). The MusicXML download still works.</div>`;
+    return;
+  }
+  try { follow = new Follow(osmd, box, stats || {}); } catch (err) { console.warn('playback bar unavailable', err); }
+}
+
+// ---- the playback bar: a line over the score at the moment being played -------------------------
+// The score MIDI plays the written score at one tempo (stats.playback_qpm), so its clock maps to the
+// score directly. The recording and the transcription run on the performance's clock: v2 maps it to
+// the score through the beats of its grid (stats.follow: beat times -> quarters from the first
+// written note); seq2seq has no such map, so there only the score MIDI moves the bar.
+function interp(x, xs, ys) {
+  const n = xs.length;
+  if (n < 2) return null;
+  if (x <= xs[0]) return ys[0] + (x - xs[0]) * (ys[1] - ys[0]) / ((xs[1] - xs[0]) || 1);
+  if (x >= xs[n - 1]) return ys[n - 1] + (x - xs[n - 1]) * (ys[n - 1] - ys[n - 2]) / ((xs[n - 1] - xs[n - 2]) || 1);
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (xs[m] <= x) lo = m; else hi = m; }
+  return ys[lo] + (x - xs[lo]) * (ys[hi] - ys[lo]) / ((xs[hi] - xs[lo]) || 1);
+}
+
+class Follow {
+  constructor(osmd, box, stats) {
+    this.osmd = osmd; this.box = box; this.stats = stats; this.map = stats.follow || null;
+    this.source = null; this.frame = null; this.line = -1; this.handlers = [];
+    this.bar = document.createElement('div');
+    this.bar.className = 'playhead';
+    this.steps = this.layout();
+    if (this.steps.length < 2) throw new Error('no cursor positions');
+    this.listen();
+    let t = null;
+    this.onResize = () => {
+      clearTimeout(t);
+      t = setTimeout(() => { this.osmd.render(); this.steps = this.layout(); this.line = -1; this.draw(this.last); }, 250);
+    };
+    window.addEventListener('resize', this.onResize);
+    $('#follow').textContent = this.map
+      ? 'Press play on the recording, the transcription or the score: the bar follows the music.'
+      : 'Press play on the score: the bar follows it.';
+    $('#follow').classList.remove('hidden');
+  }
+
+  // Every cursor step of the score: its time in quarters and where the cursor stands (x, top, height:
+  // the whole system). The cursor is only walked to read its positions; the bar is drawn by us.
+  layout() {
+    const c = this.osmd.cursor, steps = [];
+    // each step's time from its bar's start, the bars laid end to end at their time signatures'
+    // lengths (a first bar shorter than its signature is a pickup): a bar the viewer reads longer
+    // than its signature (a grace note it counted as a note) then shifts only itself, not the rest
+    const ms = this.osmd.Sheet.SourceMeasures, start = [0];
+    ms.forEach((m, i) => {
+      const ts = m.ActiveTimeSignature, own = m.Duration.RealValue * 4;
+      const nominal = ts ? ts.Numerator * 4 / ts.Denominator : own;
+      start.push(start[i] + (i === 0 ? Math.min(own, nominal) : nominal));
+    });
+    const timeOf = () => {
+      const i = c.iterator.CurrentMeasureIndex, m = ms[i];
+      const local = c.iterator.currentTimeStamp.RealValue * 4 - m.AbsoluteTimestamp.RealValue * 4;
+      return start[i] + Math.min(Math.max(local, 0), start[i + 1] - start[i]);
+    };
+    c.show(); c.reset();
+    let first = null, guard = 0;
+    while (!c.iterator.EndReached && guard++ < 200000) {
+      const el = c.cursorElement, q = timeOf();
+      const x = parseFloat(el.style.left) + el.offsetWidth / 2, y = parseFloat(el.style.top), h = el.height || el.offsetHeight;
+      if (first === null) {
+        let notes = [];
+        try { notes = c.NotesUnderCursor(); } catch (e) {}
+        if (notes.some(n => !(n.isRest && n.isRest()))) first = q;
+      }
+      if (isFinite(x) && isFinite(y) && (!steps.length || q > steps[steps.length - 1].q)) steps.push({ q, x, y, h });
+      c.next();
+    }
+    c.hide();
+    this.first = first === null ? (steps.length ? steps[0].q : 0) : first;
+    // the lines of the score; a line's last step slides on by its last gap (within the box)
+    let line = 0;
+    steps.forEach((s, i) => { if (i && Math.abs(s.y - steps[i - 1].y) > 2) line++; s.line = line; });
+    const width = (c.cursorElement.parentElement || this.box).scrollWidth;
+    steps.forEach((s, i) => {
+      const next = steps[i + 1];
+      if (!next || next.line !== s.line) {
+        const prev = steps[i - 1], gap = prev && prev.line === s.line ? s.x - prev.x : 24;
+        s.end = Math.min(width - 4, s.x + Math.max(12, gap));
+      }
+    });
+    (c.cursorElement.parentElement || this.box).appendChild(this.bar);  // OSMD's coordinates are its page's
+    return steps;
+  }
+
+  listen() {
+    const audio = $('#audio'), trans = $('#mtrans'), score = $('#mscore');
+    const start = src => () => { this.source = src; this.last = src; this.run(); };
+    const end = src => () => { if (this.source === src) { this.draw(src); this.source = null; } };
+    if (this.map) {
+      this.on(audio, 'play', start('audio')); this.on(audio, 'pause', end('audio')); this.on(audio, 'ended', end('audio'));
+      this.on(audio, 'seeked', () => { this.last = 'audio'; this.draw('audio'); });
+      this.on(trans, 'start', start('trans')); this.on(trans, 'stop', end('trans'));
+    }
+    this.on(score, 'start', start('score')); this.on(score, 'stop', end('score'));
+  }
+  on(el, ev, fn) { this.handlers.push([el, ev, fn]); el.addEventListener(ev, fn); }
+
+  stop() {
+    cancelAnimationFrame(this.frame);
+    this.handlers.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));
+    this.handlers = [];
+    window.removeEventListener('resize', this.onResize);
+    this.bar.remove();
+    this.source = null;
+  }
+
+  run() {
+    cancelAnimationFrame(this.frame);
+    const tick = () => { if (!this.source) return; this.draw(); this.frame = requestAnimationFrame(tick); };
+    tick();
+  }
+
+  // the score position (quarters, the viewer's clock) a source is at, or null
+  position(src) {
+    if (src === 'score') {
+      const p = $('#mscore'), ns = p.noteSequence;
+      if (!ns || !ns.notes || !ns.notes.length) return null;
+      if (this.t0 === undefined || this.ns !== ns) {
+        this.ns = ns;
+        this.t0 = ns.notes.reduce((m, n) => Math.min(m, n.startTime || 0), Infinity);
+        this.qpm = (ns.tempos && ns.tempos.length && ns.tempos[0].qpm) || this.stats.playback_qpm || 120;
+      }
+      return this.first + (p.currentTime - this.t0) * this.qpm / 60;
+    }
+    if (!this.map) return null;
+    const t = src === 'audio' ? $('#audio').currentTime : $('#mtrans').currentTime;
+    const r = interp(t, this.map.t, this.map.q);
+    return r === null ? null : this.first + r;
+  }
+
+  draw(src) {
+    src = src || this.source;
+    const q = src ? this.position(src) : null;
+    if (q === null || !isFinite(q) || !this.steps.length) return;
+    const st = this.steps;
+    let lo = 0, hi = st.length - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (st[m].q <= q) lo = m; else hi = m; }
+    if (q >= st[hi].q) lo = hi;
+    const a = st[lo], b = st[Math.min(lo + 1, st.length - 1)];
+    let x = a.x;
+    if (b !== a && q > a.q) {
+      const f = Math.min(1, (q - a.q) / (b.q - a.q));
+      x = b.line === a.line ? a.x + f * (b.x - a.x) : a.x + f * ((a.end ?? a.x) - a.x);
+    } else if (b === a && q > a.q && a.end !== undefined) {
+      x = Math.min(a.end, a.x + (q - a.q) * 8);
+    }
+    this.bar.style.transform = `translate(${x}px, ${a.y}px)`;
+    this.bar.style.height = `${a.h}px`;
+    this.bar.classList.add('on');
+    if (a.line !== this.line) {  // a new line: keep it in view (only when it is not)
+      this.line = a.line;
+      const r = this.bar.getBoundingClientRect();
+      if (r.top < 60 || r.bottom > window.innerHeight - 20) this.bar.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
   }
 }
 </script>
