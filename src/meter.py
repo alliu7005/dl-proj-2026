@@ -99,11 +99,16 @@ def written_tempo(gt: dict, t0: float = -np.inf, t1: float = np.inf) -> float:
     return math.log(qpm) if qpm else float("nan")
 
 
+N_BAR_POS = 16      # the position-in-bar head: eighth notes from the bar line (0 .. 7.5 quarters)
+POS_TOL = 0.3       # eighths: a beat further than this from an eighth-note position has no target
+
+
 def targets(beat_t: np.ndarray, gt: dict) -> dict:
     """Per tracked beat: bar (1 / 0; -1 outside the annotated span), step (Q_STEPS index; -1 when
     the true length is no Q_STEPS value within STEP_TOL), ts (TS_CLASSES index of the nearest
-    annotated beat's bar; -1 outside); for the piece, tempo: its written tempo over these beats
-    (``written_tempo``, [1], nan when unknown)."""
+    annotated beat's bar; -1 outside), pos (eighth notes from the annotated bar line before it,
+    N_BAR_POS classes; -1 before the first bar line, outside, or off the eighth-note grid); for the
+    piece, tempo: its written tempo over these beats (``written_tempo``, [1], nan when unknown)."""
     k = len(beat_t)
     inside = (beat_t >= gt["t"][0] - MATCH_TOL) & (beat_t <= gt["t"][-1] + MATCH_TOL)
     bar = np.where(inside, 0, IGNORE)
@@ -123,8 +128,16 @@ def targets(beat_t: np.ndarray, gt: dict) -> dict:
     near = np.where(np.abs(gt["t"][prev] - beat_t) < np.abs(gt["t"][near] - beat_t), prev, near)
     ts = np.where(inside, gt["ts"][near], IGNORE)
     tempo = written_tempo(gt, float(beat_t[0]), float(beat_t[-1])) if k else float("nan")
+    bq = np.asarray(gt["q"], np.float64)[np.asarray(gt["down"], bool)]
+    pos = np.full(k, IGNORE)
+    if len(bq) and k:   # a beat within tolerance of the next bar line is that bar's 0
+        j = np.searchsorted(bq, q + POS_TOL / 2, side="right") - 1
+        e = (q - bq[np.clip(j, 0, None)]) * 2
+        r = np.round(e)
+        ok = inside & (j >= 0) & (np.abs(e - r) <= POS_TOL) & (r >= 0) & (r < N_BAR_POS)
+        pos = np.where(ok, r, IGNORE)
     return {"bar": bar.astype(np.int64), "step": step.astype(np.int64), "ts": ts.astype(np.int64),
-            "tempo": np.array([tempo], np.float32)}
+            "pos": pos.astype(np.int64), "tempo": np.array([tempo], np.float32)}
 
 
 def aligned_grids(times, bars, beats, ts_names, min_beats: int = 16) -> list[dict]:
@@ -368,6 +381,7 @@ class DecodeConfig:
     mid_step_bar: float = math.log(1e-2)  # log-prob of a bar line falling between two tracked beats
     ts_weight: float = 1.0                # weight of the time-signature head's log-probs
     bar_weight: float = 1.0               # weight of the bar head's log-probs
+    pos_weight: float = 1.0               # weight of the position-in-bar head's log-probs (a model with one)
     # a prior on the written tempo each step implies (quarters per minute between two tracked beats):
     # log-normal, centred on the training scores' (median 122, log-mean 116 quarters per minute over
     # 756 ASAP performances, log-std 0.51). Off by default (weight 0); --tune --tempo-prior sets it.
@@ -441,7 +455,7 @@ def _machine(ts_idx: tuple[int, ...]):
 
 
 def decode(logp_bar: np.ndarray, logp_step: np.ndarray, logp_ts: np.ndarray, cfg: DecodeConfig = DecodeConfig(),
-           ts_idx: tuple[int, ...] | None = None, return_steps: bool = False):
+           ts_idx: tuple[int, ...] | None = None, return_steps: bool = False, logp_pos: np.ndarray | None = None):
     """Most probable consistent (time signature, position in the bar) per tracked beat.
     logp_bar [K, 2] (no / yes), logp_step [K, len(Q_STEPS)], logp_ts [K, len(TS_CLASSES)].
     Beat k+1's position = beat k's + its step; reaching the bar length exactly starts a bar on beat
@@ -449,7 +463,9 @@ def decode(logp_bar: np.ndarray, logp_step: np.ndarray, logp_ts: np.ndarray, cfg
     (penalised: a tracker that missed the downbeat's beat). ``cfg`` weighs the bar and
     time-signature heads and sets the two penalties (tuned on validation by scripts/eval_meter.py
     --tune). ``return_steps``: also the Q_STEPS index chosen between each pair of beats (a step can
-    span more than a bar, which the states alone do not show: give both to ``grid_from_states``)."""
+    span more than a bar, which the states alone do not show: give both to ``grid_from_states``).
+    ``logp_pos`` [K, N_BAR_POS] (a model with a position-in-bar head): scored at each state's
+    eighth note (``pos_weight``; a state between eighths, a triplet, at the one below it - 1)."""
     ts_idx = tuple(range(len(TS_CLASSES))) if ts_idx is None else tuple(ts_idx)
     states, src, stp, mid, st_c, at0 = _machine(ts_idx)
     n, k = len(states), len(logp_bar)
@@ -457,8 +473,16 @@ def decode(logp_bar: np.ndarray, logp_step: np.ndarray, logp_ts: np.ndarray, cfg
     rows = np.arange(n)
     starts = np.nonzero(at0)[0]
 
+    if logp_pos is not None:
+        st_p = np.array([p for _, p in states])
+        st_e = np.minimum(st_p // (GRID // 2), N_BAR_POS - 1)
+        off_e = np.where(st_p % (GRID // 2) == 0, 0.0, -1.0)
+
     def emit(j):
-        return cfg.bar_weight * np.where(at0, logp_bar[j, 1], logp_bar[j, 0]) + cfg.ts_weight * logp_ts[j, st_c]
+        e = cfg.bar_weight * np.where(at0, logp_bar[j, 1], logp_bar[j, 0]) + cfg.ts_weight * logp_ts[j, st_c]
+        if logp_pos is not None:
+            e = e + cfg.pos_weight * (logp_pos[j, st_e] + off_e)
+        return e
     score = emit(0)
     back = np.zeros((k, n), np.int64)
     back_step = np.zeros((k, n), np.int64)
@@ -747,7 +771,7 @@ def collate(samples: list, device="cpu"):
     nf = torch.zeros(b, m, N_NOTE_FEATURES)
     npitch = torch.zeros(b, m, dtype=torch.long)
     nbeat = torch.full((b, m), -1, dtype=torch.long)
-    tg = {h: torch.full((b, k), IGNORE, dtype=torch.long) for h in ("bar", "step", "ts")}
+    tg = {h: torch.full((b, k), IGNORE, dtype=torch.long) for h in ("bar", "step", "ts", "pos")}
     tg["tempo"] = torch.full((b,), float("nan"))
     for i, (f, t, _, (a, p, j)) in enumerate(samples):
         x[i, :len(f)] = torch.from_numpy(f)
@@ -756,8 +780,9 @@ def collate(samples: list, device="cpu"):
         npitch[i, :len(p)] = torch.from_numpy(p)
         nbeat[i, :len(j)] = torch.from_numpy(j)
         if t is not None:
-            for h in ("bar", "step", "ts"):
-                tg[h][i, :len(f)] = torch.from_numpy(t[h])
+            for h in ("bar", "step", "ts", "pos"):
+                if h in t:
+                    tg[h][i, :len(f)] = torch.from_numpy(t[h])
             if "tempo" in t:
                 tg["tempo"][i] = float(t["tempo"][0])
     notes = (nf.to(device), npitch.to(device), nbeat.to(device))
@@ -777,6 +802,7 @@ class MeterConfig:
     n_note_features: int = 0     # > 0: the note encoder over note_inputs (N_NOTE_FEATURES); 0 = none
     d_note: int = 64
     tempo_head: bool = False     # a piece-level head: this piece's written tempo (log quarters per minute)
+    n_pos: int = 0               # a position-in-bar head (N_BAR_POS classes), scored by the decoder; 0 = none
 
     def to_dict(self):
         return asdict(self)
@@ -818,6 +844,8 @@ def build_meter_model(cfg: dict):
             self.layers = nn.ModuleList(EncoderLayer(enc) for _ in range(c.layers))
             self.norm = nn.LayerNorm(c.d_model)
             self.head = nn.Linear(c.d_model, 2 + c.n_steps + c.n_ts)
+            if c.n_pos:  # its own layer: a checkpoint without it (--init) loads, the head starts fresh
+                self.pos = nn.Linear(c.d_model, c.n_pos)
             if c.tempo_head:  # mean of the beats' states -> (log-qpm offset from the prior's centre, log std)
                 self.tempo = nn.Sequential(nn.Linear(c.d_model, c.d_model), nn.GELU(), nn.Linear(c.d_model, 2))
             dh = c.d_model // c.n_heads
@@ -853,6 +881,8 @@ def build_meter_model(cfg: dict):
             h = self.norm(h)
             o = self.head(h)
             out = {"bar": o[..., :2], "step": o[..., 2:2 + c.n_steps], "ts": o[..., 2 + c.n_steps:]}
+            if c.n_pos:
+                out["pos"] = self.pos(h)
             if c.tempo_head:
                 w = mask[..., None].to(h.dtype)
                 r = self.tempo((h * w).sum(1) / w.sum(1).clamp(min=1.0))
@@ -869,7 +899,7 @@ def meter_loss(out: dict, tg: dict, tempo_weight: float = 1.0):
     import torch
     import torch.nn.functional as F
     total, parts = 0.0, {}
-    for k in ("bar", "step", "ts"):
+    for k in [h for h in ("bar", "step", "ts", "pos") if h in out and h in tg]:
         y = tg[k]
         m = y >= 0
         loss = F.cross_entropy(out[k][m].float(), y[m]) if m.any() else out[k].sum() * 0.0
@@ -954,7 +984,7 @@ def grid_from_logp(beat_t: np.ndarray, lp: dict | None, cfg: DecodeConfig = Deco
     if lp is None:
         return grid_from_states(beat_t, [(0, 0)] * len(beat_t))
     step = lp["step"] + tempo_logprior(beat_t, cfg) if cfg.tempo_weight > 0 else lp["step"]
-    states, steps = decode(lp["bar"], step, lp["ts"], cfg, return_steps=True)
+    states, steps = decode(lp["bar"], step, lp["ts"], cfg, return_steps=True, logp_pos=lp.get("pos"))
     return choose_level(grid_from_states(beat_t, states, steps), cfg, lp.get("tempo"))
 
 

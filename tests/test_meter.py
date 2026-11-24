@@ -452,6 +452,40 @@ def test_tempo_head():
     assert "tempo" not in predict_logp(off, notes, a["t"], a["down"])
 
 
+def test_pos_head():
+    """The position-in-bar head: off by default (no layer, no output: old checkpoints load as
+    before); its targets are each beat's eighth note from the bar line before it (none before the
+    first bar line); decoding with the true positions as log-probs reproduces the annotated grid
+    (exact and with a wrong bar head); the model's head trains and reaches the decoder."""
+    import torch
+    from src.meter import N_BAR_POS, MeterConfig, meter_loss
+    a = annotation_grid(ann(beats_per_bar=(3,), bars=6))        # 3/4, a one-beat pickup
+    tg = targets(a["t"], a)
+    assert tg["pos"][0] == -1 and tg["pos"][1:].tolist() == [0, 2, 4] * 6, tg["pos"]
+    lb, ls, lt = onehot(tg["bar"], 2), onehot(tg["step"], len(Q_STEPS)), onehot(tg["ts"], len(TS_CLASSES))
+    lpos = onehot(tg["pos"], N_BAR_POS)
+    want = grid_scores(grid_from_states(a["t"], decode(lb, ls, lt)), a)
+    got = grid_scores(grid_from_states(a["t"], decode(lb, ls, lt, logp_pos=lpos)), a)
+    assert got["downbeat_f"] == want["downbeat_f"] == 1.0, (got, want)
+    flat = np.log(np.full((len(a["t"]), 2), 0.5))                 # no bar evidence: the positions alone place it
+    alone = grid_scores(grid_from_states(a["t"], decode(flat, ls, lt, logp_pos=lpos)), a)
+    assert alone["downbeat_f"] == 1.0, alone
+    off = build_meter_model(MeterConfig(d_model=32, layers=1, n_heads=4, ff=64).to_dict())
+    on = build_meter_model(MeterConfig(d_model=32, layers=1, n_heads=4, ff=64, n_pos=N_BAR_POS).to_dict())
+    assert not hasattr(off, "pos") and set(off.state_dict()) < set(on.state_dict())
+    assert on.load_state_dict(off.state_dict(), strict=False).missing_keys == ["pos.weight", "pos.bias"]
+    notes = np.array([[60, 0.1 * k, 0.1 * k + 0.2, 70] for k in range(40)], np.float32)
+    x, mask, nin, tgs = collate([sample({"notes": notes, "gt": a}, np.random.default_rng(0))])
+    out = on(x, mask, nin)
+    assert out["pos"].shape == (1, len(a["t"]), N_BAR_POS) and "pos" not in off(x, mask, nin)
+    loss, parts = meter_loss(out, tgs)
+    assert "pos" in parts and math.isfinite(parts["pos"])
+    assert "pos" not in meter_loss(off(x, mask, nin), tgs)[1]
+    lp = predict_logp(on, notes, a["t"], a["down"])
+    assert lp["pos"].shape == (len(a["t"]), N_BAR_POS) and "pos" not in predict_logp(off, notes, a["t"], a["down"])
+    grid_from_logp(a["t"], lp)                                    # decodes with it
+
+
 def test_window_frame():
     """A decoded grid in a window's frame: its first bar is the bar its first note falls in; a
     window takes the grid of the segment whose span holds it."""

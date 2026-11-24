@@ -89,7 +89,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import lower_priority, pick_device  # noqa: E402
 from scripts.train_model import learning_rate  # noqa: E402
 from src.beats import BeatNoise, f_measure, load_beats  # noqa: E402
-from src.meter import (N_ALL_FEATURES, N_BEAT_FEATURES, N_NOTE_FEATURES, Augment, DecodeConfig, MeterConfig,  # noqa: E402
+from src.meter import (N_ALL_FEATURES, N_BAR_POS, N_BEAT_FEATURES, N_NOTE_FEATURES, Augment, DecodeConfig, MeterConfig,  # noqa: E402
                        build_meter_model, choose_level, collate, grid_from_logp, grid_scores, logp_of, meter_loss,
                        perf_key, sample)
 from src.preprocessing.noise import NoiseModel  # noqa: E402
@@ -309,6 +309,8 @@ def main(argv=None):
     ap.add_argument("--tempo-head", action="store_true",
                     help="a piece-level head estimating the written tempo, for the note-value level (choose_level)")
     ap.add_argument("--tempo-loss", type=float, default=1.0, help="weight of the tempo head's loss")
+    ap.add_argument("--pos-head", action="store_true",
+                    help="a position-in-bar head (which eighth of the bar each beat is on), scored by the decoder")
     ap.add_argument("--init", default=None, help="start from this checkpoint's weights (a new head starts fresh)")
     ap.add_argument("--freeze-trunk", action="store_true",
                     help="train only the tempo head (needs --init and --tempo-head): the other heads stay the checkpoint's")
@@ -398,6 +400,7 @@ def main(argv=None):
         init = torch.load(args.init, map_location=device, weights_only=False)
         cfg = dict(init["config"])
     cfg["tempo_head"] = bool(args.tempo_head or cfg.get("tempo_head", False))
+    cfg["n_pos"] = N_BAR_POS if args.pos_head else int(cfg.get("n_pos", 0))
     ck = None
     if args.resume and (run / "last.pt").exists():
         ck = torch.load(run / "last.pt", map_location=device, weights_only=False)
