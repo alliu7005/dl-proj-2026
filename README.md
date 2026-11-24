@@ -1267,29 +1267,46 @@ ASAP test performances, real = the 24 transcribed from audio):
   before the 2026-11-22 fixes (chord ties, pickups), and the window results were scored against
   them. Scored against the rebuilt targets, their onset F1 changes by at most 0.0004
   (`scripts/rescore.py`, every mode of every run). The test targets barely moved, so the tables
-  hold. The training targets moved more, and the retrained model below settles that.
+  hold. The training targets moved more; the seq2seq model is not retrained on them (fourth round:
+  the GPU time goes to v2), which is a caveat on its numbers.
   `compare_runs.py` marks results scored against the old targets "(old targets)". `rescore.py` now
   re-scores those against the current ones (and adds their onset-scale F1, which it had refused
   because of that 0.0004).
 
-### Finishing the third round (`pace/v2_finish.sh`)
+### Fourth round: rhythm and the written score
 
-Seven jobs (pace/README.md, 4l):
+Not retraining the seq2seq model on the rebuilt data: its test targets moved by at most 0.0004
+onset F1 (above), so the comparison stands with that caveat, and the GPU time goes to v2.
+`pace/v2_round4.sh` (pace/README.md, 4l), one batch of 8 jobs:
 
-- **`sf_base_reg_cab_c128_r`:** the best seq2seq recipe trained again on the rebuilt data, so v2
-  and seq2seq are compared on the same targets. Three chained 8-hour jobs, each resuming the one
-  before, then the evaluation (every mode on the four test sets, only what is missing), then its
-  whole-piece scores with and without the rendered-MIDI beats on clean.
-- **The three seq2seq systems with no whole-piece summary** (`sf_base_reg_cab`, `_s1`, `_c128` in
-  meter mode). Their earlier export hit the time limit; they are written again with the current
-  export.
-- **The beat ablation** (`system_scores.py --clean-beats audio`): v2 on the clean test MIDI with the
-  beats Beat This! tracked in the real recordings (the 24 performances that have one, system
-  `v2_nl_base_gn_meter_v3_ab`). It sits next to the same system with the rendered-MIDI beats, both
-  scored on their shared pieces in `outputs/system_eval_ablation/results.md`. The difference is
-  what the rendered audio costs v2 on clean MIDI.
-- **The final scoring:** `rescore.py` (above), `compare_runs.py`, and every system rated with Beyer &
-  Dai's metrics.
+- **The meter model's note value** (~0.15 of the 0.21 onset F1 the meter model costs on
+  PERiScoPe). A prior on the written tempo each step implies, in the decoder (`src/meter.py
+  tempo_logprior`). Between two tracked beats the decoder chooses a step in quarters, and a step
+  of 1/2 and one of 1 differ by a factor of 2 in quarters per minute. The prior is log-normal,
+  centred on the training scores (median 122, log-mean 116 quarters per minute over 756 ASAP
+  performances, log-std 0.51: a factor of 2 is ~1.4 standard deviations). Its weight and centre are
+  tuned on validation with the decoder's other settings (`eval_meter.py --tune --tempo-prior`); at
+  weight 0 it decodes as before. `meter_v3_tp` is `meter_v3`'s checkpoint with its decoder tuned
+  this way, so `meter_v3`'s results stay as they are.
+- **The labeller's checkpoint.** `nl_base_gn` kept its lowest validation loss, at step 5,000, then
+  stopped early: the loss rose while the decoded onset F1 kept improving (0.840 to 0.854).
+  `train_labeller.py --select onset_f1` keeps, and stops on, the mean decoded onset F1 of the clean
+  and real validation windows (on the tracker-timed grid). `nl_base_gn_f1` trains this way;
+  `nl_base_gn1_f1` also puts every training window on the tracker-timed grid (`--grid-noise 1`).
+- **Written lengths** (`src/pipeline.py tidy_lengths`, `system_scores.py --tidy`). A length running
+  at most a 32nd past the next onset of its staff stops there. That removes extra voices, and agrees
+  with the scores: on the clean test windows (true grid), duration accuracy goes from 0.849 to
+  0.853. Closing gaps (a note ending a 16th early meets the next one) was tried too. It removed
+  42-47% of the rests in two demo pieces, but the scores write those rests: duration accuracy fell
+  to 0.827. So only overlaps are trimmed. On the demo pieces that removes 5-9% of the rests and
+  5-7% of the extra voices.
+- **Notes left out**: the round-3 system at `--delete-above 0.95` and keeping every note
+  (above, "Leaving notes out"), each scored on whole pieces.
+- **The beat ablation**: v2 on the clean test MIDI with the real recordings' beats against the
+  rendered-MIDI beats (24 performances), what clean MIDI's rendered audio costs v2.
+
+Every variant is scored as round 3 was: each labeller on every grid (windows), and v2 on whole
+pieces with Beyer & Dai's metrics, so each change's effect is measured on its own and combined.
 
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
@@ -1656,7 +1673,7 @@ pace/train_labeller.sbatch       one note labeller: train + evaluate (resumes fr
 pace/meter.sh                    v2 Phases 2 + 3: the meter model, then the labellers on its grids (second round)
 pace/v2.sh                       v2 third round, two waves: meter models, oracle, grid-noise labellers, every labeller on every grid, whole-piece comparison
 pace/v2_jobs.sh                  the work of pace/v2.sh's jobs (several models per GPU job)
-pace/v2_finish.sh                the rest of the third round: the best seq2seq recipe on the rebuilt data, missing systems, the beat ablation
+pace/v2_round4.sh                v2 fourth round: tempo prior in the meter decoder, labellers kept on onset F1, length tidying, deletion settings, beat ablation
 pace/rebuild.sh                  data/processed rebuilt with the 2026-11-22 data fixes (old data kept, same vocabulary)
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model
@@ -1669,7 +1686,7 @@ tests/test_reevaluate.py         pace/reevaluate.sh (per run / per test set), pa
 tests/test_system_eval.py        system-level comparison: inputs, our pipeline on them, aggregation, job graph
 tests/test_notelabels.py         v2: labels, ties, rendering, grid features, GridNoise, dataset, labeller training / evaluation
 tests/test_meter.py              v2: meter targets, decoding (vs a plain Viterbi), oracle, note encoder, alignment ground truth, augmentation, time limit + resume, end to end, job graph
-tests/test_v2_system.py          v2 system: onset-scale F1, rescoring, the export (per-bar fallbacks, overflow, spelling, playback tempo), the synthesizer, V2Pipeline, the demo's two systems, pace/v2.sh and v2_jobs.sh
+tests/test_v2_system.py          v2 system: onset-scale F1, rescoring, the export (per-bar fallbacks, overflow, spelling, playback tempo, grace notes, rests), the synthesizer, V2Pipeline (staves, grace notes, deletion threshold, length tidying), the demo, pace/v2.sh, v2_round4.sh and v2_jobs.sh
 tests/test_preprocessing.py      scores -> training data: chord ties, pickups, composition ids, time maps; plan.py leaves v2 runs alone
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV
 tests/test_beats.py              beats vs ASAP annotations, features, tracker errors (bar classes, octave stretches, profiles, fit, vs Beat This!), tracker folds, train / eval / demo

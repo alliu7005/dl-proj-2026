@@ -107,6 +107,15 @@ class Validator:
         return res
 
 
+def selection(res: dict, select: str) -> float:
+    """The value best.pt minimises: the mean validation loss, or minus the mean decoded onset F1 of
+    the validation sets there are (clean, real)."""
+    if select == "loss":
+        return float(res["val_loss"])
+    f1 = [res[k] for k in ("val_onset_f1", "val_real_onset_f1") if k in res]
+    return -float(np.mean(f1)) if f1 else float("inf")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True)
@@ -117,7 +126,12 @@ def main(argv=None):
     ap.add_argument("--warmup", type=int, default=1000)
     ap.add_argument("--weight-decay", type=float, default=0.05)
     ap.add_argument("--epochs", type=float, default=30)
-    ap.add_argument("--patience", type=float, default=4, help="epochs without a better val loss (0 = off)")
+    ap.add_argument("--patience", type=float, default=4, help="epochs without a better selection value (0 = off)")
+    ap.add_argument("--select", default="loss", choices=["loss", "onset_f1"],
+                    help="what keeps best.pt and stops training: the mean validation loss, or the mean onset F1 "
+                         "of the decoded validation windows (clean and real; with --grid-noise, on the "
+                         "tracker-timed grid, as the labeller is used). The loss keeps falling-then-rising "
+                         "while onset F1 still improves: an overconfident model can place notes better")
     ap.add_argument("--cooldown", type=float, default=1)
     ap.add_argument("--batch-notes", type=int, default=16384, help="input notes per batch (context included)")
     ap.add_argument("--batch-size", type=int, default=32, help="evaluation batch size")
@@ -258,7 +272,8 @@ def main(argv=None):
             phase = "done"
         elif phase == "train" and patience_steps and step - best_step >= patience_steps:
             stopped_early = True
-            print(f"early stop at step {step}: no better validation loss for {args.patience:g} epochs", flush=True)
+            print(f"early stop at step {step}: no better validation {args.select} for {args.patience:g} epochs",
+                  flush=True)
             n = max(1, int(args.cooldown * steps_per_epoch)) if args.cooldown > 0 else 0
             if not n:
                 phase = "done"
@@ -315,8 +330,9 @@ def main(argv=None):
                         w.writerow(res)
                     print("  eval " + " | ".join(f"{k}={v:.3f}" for k, v in res.items()
                                                 if isinstance(v, float) and k not in ("lr",)), flush=True)
-                    if res["val_loss"] < best:
-                        best, best_step = res["val_loss"], step
+                    value = selection(res, args.select)
+                    if value < best:
+                        best, best_step = value, step
                         save(run / "best.pt")
                     end_of_training()
                     save(run / "last.pt")
@@ -330,7 +346,8 @@ def main(argv=None):
         print(f"\nstopped at step {step}: python scripts/train_labeller.py --name {args.name} --resume", flush=True)
         sys.exit(130)
     save(run / "last.pt")
-    print(f"done: {step} steps. best mean val loss {best:.4f} at step {best_step} -> {run / 'best.pt'}")
+    shown = best if args.select == "loss" else -best
+    print(f"done: {step} steps. best validation {args.select} {shown:.4f} at step {best_step} -> {run / 'best.pt'}")
 
 
 if __name__ == "__main__":

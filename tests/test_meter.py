@@ -357,6 +357,31 @@ def test_long_steps_and_pickup_bars():
     assert len(cover_notes(g, -1.0)["bars"]) == len(g["bars"]) + 2       # 2.5 s early: two bars
 
 
+def test_tempo_prior():
+    """The written-tempo prior: off by default (an old decode.json decodes as before); on, it picks
+    between steps the step head cannot tell apart (a half or a whole quarter between beats 0.5 s
+    apart: 60 or 120 quarters per minute) the one nearer its centre; --tempo-prior adds it to the
+    tuning's search."""
+    import numpy as np
+    from scripts.eval_meter import SEARCH, TEMPO_SEARCH
+    from src.meter import Q_STEPS, TS_CLASSES, DecodeConfig, grid_from_logp, tempo_logprior
+    assert DecodeConfig().tempo_weight == 0.0 and DecodeConfig.from_dict({"bar_weight": 2.0}).tempo_weight == 0.0
+    assert set(TEMPO_SEARCH) == {"tempo_weight", "tempo_mu"} and not set(TEMPO_SEARCH) & set(SEARCH)
+    k = 33
+    t = 1.0 + 0.5 * np.arange(k)
+    half, one = Q_STEPS.index(Fraction(1, 2)), Q_STEPS.index(Fraction(1))
+    step = np.full((k, len(Q_STEPS)), -20.0)
+    step[:, [half, one]] = math.log(0.5)                      # the step head cannot tell them apart
+    lp = {"bar": np.log(np.full((k, 2), 0.5)), "step": step,
+          "ts": np.log(np.full((k, len(TS_CLASSES)), 1 / len(TS_CLASSES)))}
+    assert not tempo_logprior(t, DecodeConfig()).any()
+    pri = tempo_logprior(t, DecodeConfig(tempo_weight=1.0))
+    assert pri.shape == step.shape and not pri[-1].any() and pri[0, one] > pri[0, half]   # 120 nearer 116 than 60
+    near_120 = grid_from_logp(t, lp, DecodeConfig(tempo_weight=2.0))
+    near_60 = grid_from_logp(t, lp, DecodeConfig(tempo_weight=2.0, tempo_mu=math.log(60.0)))
+    assert np.allclose(np.diff(near_120["q"]), 1.0) and np.allclose(np.diff(near_60["q"]), 0.5)
+
+
 def test_window_frame():
     """A decoded grid in a window's frame: its first bar is the bar its first note falls in; a
     window takes the grid of the segment whose span holds it."""
@@ -437,6 +462,14 @@ def test_scripts_end_to_end():
         assert {"default", "piece_mean", "ts_confusion", "decode"} <= set(res) and res["pieces"] <= res["performances"]
         per = json.loads((tmp / "m" / "meter_scores_clean.json").read_text())
         assert len(per) == res["performances"] and "true_ts" in per[0]
+        (tmp / "mtp").mkdir()   # the same model, its decoder tuned with the written-tempo prior too
+        for f in ("best.pt", "config.json"):
+            shutil.copy(tmp / "m" / f, tmp / "mtp" / f)
+        eval_meter(["--run", "mtp", "--conditions", "clean", "--device", "cpu", "--runs-dir", str(tmp), "--tune",
+                    "--tune-max", "2", "--tempo-prior"])
+        tdec = json.loads((tmp / "mtp" / "decode.json").read_text())
+        assert {"tempo_weight", "tempo_mu", "tempo_sigma"} <= set(tdec["decode"])
+        assert tdec["configs_tried"] > dec["configs_tried"] and tdec["select_tuned"] >= dec["select_tuned"] - 1e-12
         eval_meter(["--run", "oracle", "--oracle", "--conditions", "clean", "--device", "cpu", "--runs-dir", str(tmp)])
         orc = json.loads((tmp / "oracle" / "eval_meter.json").read_text())["clean"]
         assert json.loads((tmp / "oracle" / "config.json").read_text())["arch"] == "meter_oracle"
@@ -466,9 +499,14 @@ def test_scripts_end_to_end():
         assert modes == {"grid_meter_m", "grid_meter_oracle", "grid_true"}, modes   # each grid's predictions kept
         train_labeller(["--name", "gn", "--size", "small", "--max-steps", "2", "--eval-every", "2", "--grid-noise", "0.8",
                         "--eval-loss-windows", "4", "--eval-decode-windows", "2", "--workers", "0", "--device", "cpu",
-                        "--batch-notes", "2048", "--warmup", "1", "--normal-priority", "--runs-dir", str(tmp)])
-        gcfg = json.loads((tmp / "gn" / "config.json").read_text())["data"]
+                        "--batch-notes", "2048", "--warmup", "1", "--normal-priority", "--runs-dir", str(tmp),
+                        "--select", "onset_f1"])
+        gall = json.loads((tmp / "gn" / "config.json").read_text())
+        gcfg = gall["data"]
         assert gcfg["grid_noise"] == 0.8 and gcfg["beat_noise"] == "configs/beat_noise.json", gcfg
+        assert gall["args"]["select"] == "onset_f1" and (tmp / "gn" / "best.pt").exists()
+        assert -1.0 <= json.loads((tmp / "gn" / "status.json").read_text())["best"] <= 0.0   # minus an onset F1
+        assert (tmp / "gn" / "vocab.json").exists() and (tmp / "nl" / "vocab.json").exists()   # pinned
         assert json.loads((tmp / "nl" / "config.json").read_text())["data"]["grid_noise"] == 0.0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

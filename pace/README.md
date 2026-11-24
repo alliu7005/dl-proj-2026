@@ -368,39 +368,40 @@ scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_round3.tgz .
 tar xzf v2_round3.tgz
 ```
 
-## 4l. The rest of the third round
+## 4l. v2, fourth round: rhythm and the written score
 
-After 4k (README, "Third round: results"):
+After 4k (README, "Fourth round"):
 
 ```bash
-bash pace/v2_finish.sh                # 7 jobs
-RETRAIN="" bash pace/v2_finish.sh     # without the seq2seq retraining
+bash pace/v2_round4.sh                # 8 jobs
 ```
 
 | job | what | waits for |
 |---|---|---|
-| `seq_sf_base_reg_cab_c128_r` (x3) | the best seq2seq recipe (`RETRAIN_ARGS`: the flags `sf_base_reg_cab_c128` trained with) on the rebuilt data, as `sf_base_reg_cab_c128_r`. Each job resumes from `last.pt`; once training is done, the evaluation (`SEQ_MODES` on `SEQ_CONDITIONS`, only what is missing). A job fails while training is not done, and the next one continues it | the job before (finished or not) |
-| `sysold_a`, `sysold_b` | `OLD_SYSTEMS` on whole pieces with the current export (the three seq2seq systems whose earlier export hit the time limit); `sysold_b` then runs the beat ablation: `ABLATION` on the clean test MIDI with the beats of the performances' real recordings (`system_scores.py --clean-beats audio`, 24 performances) into `outputs/system_eval_ablation`, next to a link to the same system's rendered-MIDI version | - |
-| `sysnew` | the retrained model on whole pieces, with (`:sb`) and without the rendered-MIDI beats on clean MIDI (refused if training is not finished) | the last `seq_` job (finished or not) |
-| `v2final` | `scripts/rescore.py` (onset-scale F1, and the results on the old targets re-scored on the current ones), `outputs/compare`, every system rated with Beyer & Dai's metrics (`outputs/system_eval/results.md`), then the ablation on its shared pieces (`outputs/system_eval_ablation/results.md`) | all of the above (finished or not) |
+| `r4tests` | the test suites, on PACE's Python (CPU) | - |
+| `r4lab` | `nl_base_gn_f1` (checkpoint kept and training stopped on validation onset F1, `--select onset_f1`) and `nl_base_gn1_f1` (the same, every training window on the tracker-timed grid, `--grid-noise 1`) side by side, then each on the true grid | `r4tests` (cancelled if they fail) |
+| `r4tempo` | `meter_v3_tp`: `meter_v3`'s checkpoint (linked) with its decoder tuned again, the written-tempo prior included (`eval_meter.py --tune --tempo-prior`), evaluated, its grids saved (CPU) | `r4tests` (cancelled if they fail) |
+| `r4evals` | the new labellers and `nl_base_gn` on the true grid, the oracle grid, `meter_v3` and `meter_v3_tp`, every test set | `r4lab`, `r4tempo` (finished or not) |
+| `r4sys_a`, `r4sys_b` | v2 on whole pieces with the new models (`SYS_A`, `SYS_B`), the last of each with every change (`:tidy,d95`) | `r4lab`, `r4tempo` (finished or not) |
+| `r4sys_c` | the round-3 system tidied (`:tidy`), at `:d95` and `:keepall` (`:missing`: what the threshold job wrote is kept), then the beat ablation (`ABLATION` on the clean test MIDI with the real recordings' beats, `outputs/system_eval_ablation`) | `r4tests` (cancelled if they fail) |
+| `r4final` | `outputs/compare`, every system rated with Beyer & Dai's metrics (`outputs/system_eval/results.md`), the ablation on its shared pieces (`outputs/system_eval_ablation/results.md`) | all of the above (finished or not) |
 
-The retraining takes up to 24 h, then up to 8 h for `sysnew` and `v2final`. A run still not trained
-after its three jobs is continued with `sbatch --gres=gpu:1 -c 8 --mem=48G -t 8:00:00 --wrap="source
-pace/common.sh; bash pace/v2_jobs.sh seq2seq sf_base_reg_cab_c128_r <RETRAIN_ARGS>"` (the same
-flags), then `bash pace/v2_jobs.sh systems ...` as in `sysnew`.
+A v2 system spec takes options after a colon, comma-separated (`pace/v2_jobs.sh systems`): `tidy`,
+`d<percent>` (e.g. `d95`), `keepall`, `missing`. The labellers take about an hour each, the tempo
+tuning about one on CPU, each whole-piece system about 25 minutes: the batch takes about half a day.
 
 To bring everything back (PACE, then Windows):
 
 ```bash
-cd ~/scratch/dl-proj-2026 && tar czf v2_finish.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/*/summary.json outputs/system_eval/*/*/*.error.txt outputs/system_eval/*/*/*.tokens.txt outputs/system_eval_ablation/results.md outputs/system_eval_ablation/results.json outputs/system_eval_ablation/*/summary.json outputs/runs/*/eval_pieces_*.json outputs/runs/*/status.json outputs/runs/*/config.json outputs/runs/sf_base_reg_cab_c128_r/log.csv slurm-v2final-*.out 2>/dev/null; ls -la v2_finish.tgz
+cd ~/scratch/dl-proj-2026 && tar czf v2_round4.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/*/summary.json outputs/system_eval/*/*/*.error.txt outputs/system_eval/*/*/*.tokens.txt outputs/system_eval_ablation/results.md outputs/system_eval_ablation/results.json outputs/system_eval_ablation/*/summary.json outputs/runs/meter_v3_tp/*.json outputs/runs/nl_*/*.json outputs/runs/nl_*/log.csv slurm-r4*.out slurm-labeller_*.log 2>/dev/null; ls -la v2_round4.tgz
 ```
 
 ```powershell
-scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_finish.tgz .
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_round4.tgz .
 ```
 
 ```powershell
-tar xzf v2_finish.tgz
+tar xzf v2_round4.tgz
 ```
 
 ## 5. Compare the runs and bring results back

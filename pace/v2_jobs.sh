@@ -16,9 +16,14 @@
 #                          results predate the current evaluation); then on every grid: the oracle,
 #                          GRIDS_OLD, METERS (a grid not there is skipped with the reason)
 #   systems <spec>...      whole pieces (scripts/system_scores.py): <labeller>+<meter> = v2 (only
-#                          with both models finished and the meter model evaluated),
-#                          <run>:<mode> = seq2seq, <run>:<mode>:sb = seq2seq with the rendered-MIDI
-#                          beats on clean MIDI (only a finished seq2seq run)
+#                          with both models finished and the meter model evaluated), with options
+#                          after a colon, comma-separated: tidy (--tidy), d<percent> (--delete-above,
+#                          e.g. d95), keepall (--delete-above 1), missing (--only-missing: what an
+#                          earlier job wrote is kept); <run>:<mode> = seq2seq, <run>:<mode>:sb =
+#                          seq2seq with the rendered-MIDI beats on clean MIDI (a finished seq2seq run)
+#   tempo <meter> <new>    <new>: <meter>'s checkpoint with its decoder tuned again, the written-tempo
+#                          prior included (eval_meter.py --tune --tempo-prior), then evaluated and its
+#                          grids saved; <meter>'s own results stay as they are
 #   seq2seq <run> <args>   train a seq2seq model (scripts/train_model.py <args>, resuming from
 #                          last.pt), then evaluate it (SEQ_MODES on SEQ_CONDITIONS, only what it
 #                          lacks). Fails unless trained and evaluated: the next job goes on.
@@ -50,6 +55,8 @@ nl_flags() {
   case "$1" in
     nl_base_gn) echo "--size base --grid-noise 0.8" ;;
     nl_base_gn_s1) echo "--size base --grid-noise 0.8 --seed 1" ;;
+    nl_base_gn_f1) echo "--size base --grid-noise 0.8 --select onset_f1" ;;
+    nl_base_gn1_f1) echo "--size base --grid-noise 1.0 --select onset_f1" ;;
     *) echo "unknown labeller run $1 (add it to nl_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
   esac
 }
@@ -72,7 +79,21 @@ seq_ready() {  # a seq2seq run to export: its best.pt, and finished (runs older 
   fi
 }
 
-task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation}
+v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
+  local o out=""
+  for o in ${1//,/ }; do
+    case "$o" in
+      tidy) out="$out --tidy" ;;
+      keepall) out="$out --delete-above 1" ;;
+      missing) out="$out --only-missing" ;;
+      d[0-9]*) out="$out --delete-above 0.${o#d}" ;;
+      *) echo "unknown v2 option $o (tidy, d<percent>, keepall, missing)" >&2; return 1 ;;
+    esac
+  done
+  echo "$out"
+}
+
+task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo}
 shift
 case "$task" in
   meters)
@@ -143,11 +164,15 @@ case "$task" in
     for spec in "$@"; do
       echo "== $spec"
       case "$spec" in
-        *+*) nl=${spec%%+*}; m=${spec##*+}
+        *+*) base=${spec%%:*}; opts=""
+             [ "$base" != "$spec" ] && opts=${spec#*:}
+             nl=${base%%+*}; m=${base##*+}
              if ! done_run "$nl" || ! done_run "$m" || [ ! -f "outputs/runs/$m/eval_meter.json" ]; then
                echo "$spec: skipped, $nl or $m not finished (or $m not evaluated)"; ok=1; continue
              fi
-             python scripts/system_scores.py --v2 "$spec" || ok=1 ;;
+             f=$(v2_flags "$opts") || { ok=1; continue; }
+             # shellcheck disable=SC2086
+             python scripts/system_scores.py --v2 "$base" $f || ok=1 ;;
         *:*:sb) r=${spec%%:*}; rest=${spec#*:}
                 seq_ready "$r" || { ok=1; continue; }
                 python scripts/system_scores.py --run "$r" --mode "${rest%%:*}" --midi-beats synth || ok=1 ;;
@@ -180,5 +205,14 @@ case "$task" in
       echo "outputs/system_eval/$sys missing: no rendered-MIDI version to compare with"; ok=1
     fi
     exit $ok ;;
-  *) echo "unknown task $task (meters, labellers, grids, evals, systems, seq2seq, ablation)"; exit 2 ;;
+  tempo)
+    src=${1:?tempo <meter run> <new run>}; dst=${2:?tempo <meter run> <new run>}
+    if ! done_run "$src" || [ ! -f "outputs/runs/$src/best.pt" ]; then echo "$src: not finished"; exit 1; fi
+    mkdir -p "outputs/runs/$dst"
+    for f in best.pt config.json status.json; do
+      [ -e "outputs/runs/$src/$f" ] && ln -sfn "$PWD/outputs/runs/$src/$f" "outputs/runs/$dst/$f"
+    done
+    python scripts/eval_meter.py --run "$dst" --tune --tempo-prior --device cpu
+    exit $? ;;
+  *) echo "unknown task $task (meters, labellers, grids, evals, systems, seq2seq, ablation, tempo)"; exit 2 ;;
 esac

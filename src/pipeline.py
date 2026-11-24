@@ -431,6 +431,57 @@ GRACE_REACH = 1        # quarters: a grace note joins a main note of its staff a
 GRACE_AS_NOTE = 0.25   # quarters: the longest written length of a "grace" note with no main note to join
 
 
+TIDY_TOL = 0.125       # quarters: a written note end at most this far past the next onset of its staff stops there
+
+
+def _bar_starts(placed: list, bar_ts: list[str]) -> list:
+    """Each bar's start in quarters from the first bar line (Fractions), the last bar's length
+    repeated past the grid for notes placed after it."""
+    from fractions import Fraction
+    from .meter import bar_quarters
+    lens = [Fraction(bar_quarters(ts)) for ts in bar_ts] or [Fraction(4)]
+    top = max([p.bar for p in placed] + [0]) + 2
+    lens += [lens[-1]] * max(0, top - len(lens))
+    starts = [Fraction(0)]
+    for L in lens:
+        starts.append(starts[-1] + L)
+    return starts
+
+
+def tidy_lengths(placed: list, bar_ts: list[str], tol: float = TIDY_TOL) -> int:
+    """Written lengths that run at most ``tol`` quarters past the next onset of their staff stop
+    there. The labeller predicts each note's written length on its own, from a performed duration
+    that the pedal and legato playing lengthen; an end a little past the next note puts the two in
+    separate voices. A note held over moving notes (its end far past the next onset) is left alone,
+    and so are gaps: closing them (a note ending a 16th early meets the next) removes many short
+    rests but disagrees with the scores, which write them (clean ASAP test windows, true grid:
+    duration accuracy 0.849 as predicted, 0.827 with gaps up to a 16th closed, 0.853 with overlaps up
+    to a 32nd trimmed, 0.848 up to a 16th). Changes ``placed`` in place; returns how many changed."""
+    from bisect import bisect_right
+    from fractions import Fraction
+    starts = _bar_starts(placed, bar_ts)
+    at = lambda p: starts[p.bar] + Fraction(p.pos)  # noqa: E731
+    onsets = {}
+    for p in placed:
+        if not p.grace:
+            onsets.setdefault(p.staff, set()).add(at(p))
+    onsets = {s: sorted(v) for s, v in onsets.items()}
+    tol, changed = Fraction(tol).limit_denominator(1000), 0
+    for p in placed:
+        if p.grace or not p.total:
+            continue
+        q = at(p)
+        on = onsets[p.staff]
+        k = bisect_right(on, q)
+        if k >= len(on):
+            continue
+        over = q + Fraction(p.total) - on[k]
+        if 0 < over <= tol:
+            p.total = on[k] - q
+            changed += 1
+    return changed
+
+
 def attach_graces(placed: list, bar_ts: list[str]) -> int:
     """The labeller writes a grace note where it was played: just before its main note (1/8 quarter
     before it in a demo piece, 6 of its 7 grace notes), sometimes across the bar line. A score
@@ -441,15 +492,9 @@ def attach_graces(placed: list, bar_ts: list[str]) -> int:
     its staff (at most GRACE_AS_NOTE). Changes ``placed`` in place; returns how many moved or became
     notes."""
     from fractions import Fraction
-    from .meter import bar_quarters
     if not any(p.grace for p in placed):
         return 0
-    lens = [Fraction(bar_quarters(ts)) for ts in bar_ts] or [Fraction(4)]
-    top = max(p.bar for p in placed) + 2
-    lens += [lens[-1]] * max(0, top - len(lens))
-    starts = [Fraction(0)]
-    for L in lens:
-        starts.append(starts[-1] + L)
+    starts = _bar_starts(placed, bar_ts)
     at = lambda p: starts[p.bar] + Fraction(p.pos)  # noqa: E731
     mains = {}
     for p in placed:
@@ -502,7 +547,8 @@ class V2Pipeline(_FrontEnd):
     """
 
     def __init__(self, labeller_ckpt: str | Path, meter_ckpt: str | Path, vocab: str | Path | None = None,
-                 device: str = "auto", window_notes: int = 128, delete_above: float = DELETE_ABOVE):
+                 device: str = "auto", window_notes: int = 128, delete_above: float = DELETE_ABOVE,
+                 tidy: bool = False):
         from .labeller import load_labeller
         from .meter import DecodeConfig, build_meter_model
         from .notelabels import LabelSpace
@@ -533,6 +579,7 @@ class V2Pipeline(_FrontEnd):
         n_lab = sum(p.numel() for p in self.labeller.parameters())
         n_met = sum(p.numel() for p in self.meter.parameters())
         self.delete_above = float(delete_above)
+        self.tidy = bool(tidy)
         self.info = {"system": "v2", "labeller": str(labeller_ckpt), "meter": str(meter_ckpt),
                      "params_M": round((n_lab + n_met) / 1e6, 1), "device": str(self.device),
                      "decode": self.decode_cfg.to_dict()}
@@ -578,10 +625,14 @@ class V2Pipeline(_FrontEnd):
         return items, frames
 
     def label(self, notes: np.ndarray, pedal: np.ndarray, grid: dict,
-              progress: Progress = _noop, delete_above: float | None = None) -> tuple[list[str], dict]:
+              progress: Progress = _noop, delete_above: float | None = None,
+              tidy: bool | None = None) -> tuple[list[str], dict]:
         """Every note labelled in its window, all rendered in the grid's bars as one score.
-        ``delete_above``: leave a note out only above this p(delete) (default: the pipeline's)."""
+        ``delete_above``: leave a note out only above this p(delete); ``tidy``: written lengths stop
+        at the next onset of their staff when they run just past it (tidy_lengths). Defaults: the
+        pipeline's."""
         delete_above = self.delete_above if delete_above is None else float(delete_above)
+        tidy = self.tidy if tidy is None else bool(tidy)
         import sys
         from fractions import Fraction
         from .labeller import predict_placed
@@ -606,6 +657,7 @@ class V2Pipeline(_FrontEnd):
                 p.bar += win.first_bar
                 notes_out.append(p)
         graces = attach_graces(notes_out, list(grid["bars"]))
+        tidied = tidy_lengths(notes_out, list(grid["bars"])) if tidy else 0
         key = int(grid.get("key", 0))
         bars = [(ts, key) for ts in grid["bars"]] or [("4/4", key)]
         opens = True
@@ -624,11 +676,13 @@ class V2Pipeline(_FrontEnd):
         return tokens, {"windows": len(windows), "notes_kept": len(notes_out), "notes_deleted": own - len(notes_out),
                         "bar_ts": [ts for ts, _ in bars], "staves": max([2] + [p.staff + 1 for p in notes_out]),
                         "staff_folded": int(folded), "graces_attached": graces, "delete_above": delete_above,
+                        "tidy": tidy, "lengths_tidied": tidied,
                         "follow": follow_map(grid, notes_out)}
 
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, progress: Progress = _noop, beats: tuple | None = None,
-            beat_checkpoint: str = "final0", delete_above: float | None = None, **_) -> Result:
+            beat_checkpoint: str = "final0", delete_above: float | None = None, tidy: bool | None = None,
+            **_) -> Result:
         """``beats``: (times, down) in the input's seconds, given instead of tracking them.
         ``beat_checkpoint``: the Beat This! model that tracks them (scripts/system_scores.py gives
         each ASAP test piece the cross-validation model that never heard it)."""
@@ -682,7 +736,7 @@ class V2Pipeline(_FrontEnd):
         grid = self.grid(notes, beats)
         timing["grid_s"] = round(time.perf_counter() - t, 1)
         t = time.perf_counter()
-        tokens, counts = self.label(notes, pedal, grid, progress, delete_above=delete_above)
+        tokens, counts = self.label(notes, pedal, grid, progress, delete_above=delete_above, tidy=tidy)
         timing["score_s"] = round(time.perf_counter() - t, 1)
         res.tokens = tokens
         (out / "tokens.txt").write_text(" ".join(tokens))

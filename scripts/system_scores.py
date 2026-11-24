@@ -52,13 +52,13 @@ def parse_v2(spec: str) -> tuple[str, str]:
 
 
 def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, clean_beats: str = "synth",
-                delete_above: float = DELETE_ABOVE) -> str:
+                delete_above: float = DELETE_ABOVE, tidy: bool = False) -> str:
     """The folder (and table row) of a system under outputs/system_eval (v2 with another deletion
-    threshold: _d<percent>, _keepall for none)."""
+    threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy)."""
     if v2:
         lab, met = parse_v2(v2)
         d = "" if delete_above == DELETE_ABOVE else "_keepall" if delete_above >= 1 else f"_d{round(delete_above * 100)}"
-        return f"v2_{lab}_{met}" + d + ("_ab" if clean_beats == "audio" else "")
+        return f"v2_{lab}_{met}" + d + ("_tidy" if tidy else "") + ("_ab" if clean_beats == "audio" else "")
     return f"{run}_{mode}" + ("_sb" if midi_beats == "synth" else "")
 
 
@@ -78,6 +78,9 @@ def main(argv=None):
     ap.add_argument("--delete-above", type=float, default=DELETE_ABOVE,
                     help="v2: leave a note out only above this p(delete) (1 = keep every note); "
                          "a setting other than the default is its own system (_d<percent>, _keepall)")
+    ap.add_argument("--tidy", action="store_true",
+                    help="v2: written lengths stop at the next onset of their staff when they run just past it "
+                         "(src/pipeline.py tidy_lengths); its own system (_tidy)")
     ap.add_argument("--manifest", default="outputs/system_eval/manifest.json")
     ap.add_argument("--conditions", default="clean,real")
     ap.add_argument("--out", default="outputs/system_eval")
@@ -96,7 +99,7 @@ def main(argv=None):
     if args.v2:
         lab, met = parse_v2(args.v2)
         pipe = V2Pipeline(runs / lab / args.ckpt, runs / met / args.ckpt, vocab=args.vocab, device=args.device,
-                          delete_above=args.delete_above)
+                          delete_above=args.delete_above, tidy=args.tidy)
         wants_beats, midi_beats = True, "synth"
     else:
         pipe = ScorePipeline(runs / args.run / args.ckpt, vocab=args.vocab, device=args.device)
@@ -116,9 +119,10 @@ def main(argv=None):
         n = len(entries)
         entries = [e for e in entries if e["condition"] != "clean" or e["performance"] in tracked]
         print(f"--clean-beats audio: {len(entries)} of {n} inputs (clean ones need a recording)", flush=True)
-    if not args.v2 and args.delete_above != DELETE_ABOVE:
-        ap.error("--delete-above is for v2 (--v2)")
-    system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above)
+    if not args.v2 and (args.delete_above != DELETE_ABOVE or args.tidy):
+        ap.error("--delete-above and --tidy are for v2 (--v2)")
+    system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above,
+                         args.tidy)
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before

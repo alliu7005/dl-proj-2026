@@ -311,6 +311,14 @@ class DecodeConfig:
     mid_step_bar: float = math.log(1e-2)  # log-prob of a bar line falling between two tracked beats
     ts_weight: float = 1.0                # weight of the time-signature head's log-probs
     bar_weight: float = 1.0               # weight of the bar head's log-probs
+    # a prior on the written tempo each step implies (quarters per minute between two tracked beats):
+    # log-normal, centred on the training scores' (median 122, log-mean 116 quarters per minute over
+    # 756 ASAP performances, log-std 0.51). Off by default (weight 0); --tune --tempo-prior sets it.
+    # It weighs steps that differ by a factor of 2 (3/8 against 3/4, 2/4 against 2/2): beat and
+    # downbeat F cannot see that choice, and the step head gets it wrong most often.
+    tempo_weight: float = 0.0
+    tempo_mu: float = math.log(116.0)
+    tempo_sigma: float = 0.5
 
     def to_dict(self):
         return asdict(self)
@@ -703,11 +711,27 @@ def oracle_logp(beat_t: np.ndarray, gt: dict, eps: float = 1e-4) -> dict | None:
             "ts": onehot(tg["ts"], len(TS_CLASSES))}
 
 
+def tempo_logprior(beat_t: np.ndarray, cfg: DecodeConfig) -> np.ndarray:
+    """[K, len(Q_STEPS)]: the tempo prior's log-weight of each step between beat k and k + 1 (the
+    written tempo it implies, 60 * step / seconds, against cfg's log-normal; the last row is 0, as
+    the step head's last row is unused)."""
+    t = np.asarray(beat_t, np.float64)
+    out = np.zeros((len(t), len(Q_STEPS)))
+    if len(t) < 2 or cfg.tempo_weight <= 0:
+        return out
+    dt = np.clip(np.diff(t), 1e-3, None)
+    qpm = 60.0 * np.asarray(Q_STEPS, np.float64)[None, :] / dt[:, None]
+    out[:-1] = -0.5 * cfg.tempo_weight * ((np.log(qpm) - cfg.tempo_mu) / cfg.tempo_sigma) ** 2
+    return out
+
+
 def grid_from_logp(beat_t: np.ndarray, lp: dict | None, cfg: DecodeConfig = DecodeConfig()) -> dict:
-    """``predict_logp``'s output decoded into a grid (a single bar without it)."""
+    """``predict_logp``'s output decoded into a grid (a single bar without it), with cfg's tempo
+    prior added to the step head's log-probabilities when its weight is above 0."""
     if lp is None:
         return grid_from_states(beat_t, [(0, 0)] * len(beat_t))
-    states, steps = decode(lp["bar"], lp["step"], lp["ts"], cfg, return_steps=True)
+    step = lp["step"] + tempo_logprior(beat_t, cfg) if cfg.tempo_weight > 0 else lp["step"]
+    states, steps = decode(lp["bar"], step, lp["ts"], cfg, return_steps=True)
     return grid_from_states(beat_t, states, steps)
 
 

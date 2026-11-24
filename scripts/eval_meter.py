@@ -63,6 +63,10 @@ SEARCH = {  # coordinate search over the decoder's settings (each list holds the
     "ts_change": [math.log(x) for x in (1e-1, 1e-2, 1e-3, 1e-5, 1e-8, 1e-12)],
     "mid_step_bar": [math.log(x) for x in (0.3, 1e-1, 1e-2, 1e-3)],
 }
+TEMPO_SEARCH = {  # with --tempo-prior: the prior on the written tempo (src/meter.py tempo_logprior)
+    "tempo_weight": [0.0, 0.25, 0.5, 1.0, 2.0, 4.0],
+    "tempo_mu": [math.log(x) for x in (80.0, 100.0, 116.0, 140.0)],
+}
 
 
 def key_of(perf: dict) -> str:
@@ -90,7 +94,7 @@ def select(groups_scores: list) -> float:
 
 
 def tune(model, data: Path, noise, device, n_periscope: int, rounds: int = 2,
-         max_perfs: int = 0) -> tuple[DecodeConfig, dict]:
+         max_perfs: int = 0, tempo: bool = False) -> tuple[DecodeConfig, dict]:
     """Coordinate search of DecodeConfig on the validation performances (their log-probabilities
     computed once; the tracker drawn with another seed than the test draw)."""
     groups = []
@@ -112,8 +116,9 @@ def tune(model, data: Path, noise, device, n_periscope: int, rounds: int = 2,
             cache[key] = select([score(p, lp, b, c) for _, p, lp, b in groups])
         return cache[key]
     start = value(cfg)
+    search = {**SEARCH, **(TEMPO_SEARCH if tempo else {})}
     for _ in range(rounds):
-        for name, options in SEARCH.items():  # ties go to the value nearest the default
+        for name, options in search.items():  # ties go to the value nearest the default
             best = max(options, key=lambda v: (value(DecodeConfig(**{**cfg.to_dict(), name: v})),
                                                -abs(v - getattr(DecodeConfig(), name))))
             cfg = DecodeConfig(**{**cfg.to_dict(), name: best})
@@ -128,6 +133,8 @@ def main(argv=None):
     ap.add_argument("--ckpt", default="best.pt")
     ap.add_argument("--conditions", default="clean,real,periscope")
     ap.add_argument("--tune", action="store_true", help="tune the decoder on the validation performances first")
+    ap.add_argument("--tempo-prior", action="store_true",
+                    help="--tune also searches the written-tempo prior (src/meter.py tempo_logprior)")
     ap.add_argument("--tune-periscope", type=int, default=150, help="PERiScoPe val performances used by --tune")
     ap.add_argument("--tune-max", type=int, default=0, help="at most this many per validation source (0 = all)")
     ap.add_argument("--beat-noise", default="configs/beat_noise.json")
@@ -154,7 +161,8 @@ def main(argv=None):
         model.load_state_dict(ck["model"])
     dfile = run / "decode.json"
     if args.tune:
-        cfg, info = tune(model, data, noise, device, args.tune_periscope, max_perfs=args.tune_max)
+        cfg, info = tune(model, data, noise, device, args.tune_periscope, max_perfs=args.tune_max,
+                         tempo=args.tempo_prior)
         dfile.write_text(json.dumps({"decode": cfg.to_dict(), **info}, indent=1))
         print(f"decoder tuned on validation ({info['validation']}): selection score {info['select_default']:.3f} "
               f"-> {info['select_tuned']:.3f} with {cfg.to_dict()}", flush=True)

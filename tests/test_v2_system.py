@@ -91,6 +91,37 @@ def test_piece_staves():
     assert [p.staff for p in placed_notes(*args, staves=3)] == [1, 2]
 
 
+def test_tidy_lengths():
+    """A written length running just past the next onset of its staff stops there (at most
+    TIDY_TOL); one held over moving notes, a gap before the next note, the other staff and the
+    last note stay; across a bar line too."""
+    from src.pipeline import TIDY_TOL, tidy_lengths
+    F = Fraction
+    assert TIDY_TOL == 0.125
+    notes = [Placed(0, F(0), 60, F(9, 8), 0),     # 1/8 past the next onset (1): trimmed
+             Placed(0, F(1), 62, F(3, 4), 0),     # 1/4 short of the next (2): a gap, kept
+             Placed(0, F(2), 64, F(4), 0),        # held over the moving notes after it: kept
+             Placed(0, F(3), 65, F(1), 0),        # meets the next bar's first note exactly
+             Placed(1, F(0), 67, F(1, 2), 0),
+             Placed(1, F(1, 2), 69, F(1, 2), 0),  # the last of its staff: kept
+             Placed(0, F(0), 48, F(17, 16), 1),   # the other staff: its own next onset (none): kept
+             Placed(0, F(7, 2), 71, F(5, 8), 0)]  # 1/8 past bar 1's first note: trimmed across the bar line
+    assert tidy_lengths(notes, ["4/4", "4/4"]) == 2
+    assert [n.total for n in notes] == [F(1), F(3, 4), F(4), F(1), F(1, 2), F(1, 2), F(17, 16), F(1, 2)]
+
+
+def test_select_onset_f1():
+    """The labeller's checkpoint selection: the validation loss, or minus the mean decoded onset F1."""
+    from scripts.train_labeller import selection
+    res = {"val_loss": 1.4, "val_onset_f1": 0.84, "val_real_onset_f1": 0.80}
+    assert selection(res, "loss") == 1.4 and abs(selection(res, "onset_f1") + 0.82) < 1e-12
+    assert selection({"val_loss": 1.0, "val_onset_f1": 0.5}, "onset_f1") == -0.5
+    assert selection({"val_loss": 1.0}, "onset_f1") == float("inf")
+    from scripts.system_scores import system_name
+    assert system_name(None, "meter", "none", "nl+m", delete_above=0.95, tidy=True) == "v2_nl_m_d95_tidy"
+    assert system_name(None, "meter", "none", "nl+m", "audio", tidy=True) == "v2_nl_m_tidy_ab"
+
+
 def test_rescore():
     """scripts/rescore.py adds the new metric to a run's stored results from its saved predictions,
     the same value an evaluation computes now; a mode whose re-scored onset F1 differs from the
@@ -603,18 +634,18 @@ def test_rebuild_batch():
         assert "--dependency=afterok:555" in tests[3] and "--kill-on-invalid-dep=yes" in tests[3], tests[3]
 
 
-def test_finish_batch():
-    """pace/v2_finish.sh: the retraining in three chained jobs (each resuming the one before), the
-    old seq2seq systems in two jobs (the second also the ablation), the retrained model's whole-piece
-    scores after the last training job, the scoring (main table and ablation) after everything; at
-    most 8 jobs; refused without the system comparison set up."""
+def test_round4_batch():
+    """pace/v2_round4.sh: the tests first; the new labellers and the tempo-prior decoder after them
+    (cancelled if they fail); the evaluations and the whole-piece systems with the new models after
+    both; the round-3 system's variants and the ablation after the tests; the scoring after
+    everything; 8 jobs; refused without the system comparison set up."""
     if shutil.which("bash") is None:
         print("  (skipped: no bash)")
         return
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
         (tmp / "pace").mkdir()
-        shutil.copy(ROOT / "pace" / "v2_finish.sh", tmp / "pace")
+        shutil.copy(ROOT / "pace" / "v2_round4.sh", tmp / "pace")
         _stub_bin(tmp)
         bd = tmp / "bd"
         bd.mkdir()
@@ -623,7 +654,7 @@ def test_finish_batch():
             for f in (tmp / "jobs.txt", tmp / "jobs.txt.n"):
                 if f.exists():
                     f.unlink()
-            r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/v2_finish.sh'], cwd=tmp,
+            r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/v2_round4.sh'], cwd=tmp,
                                env=batch_env(SUBMITS=str(tmp / "jobs.txt"), BD=str(bd)), capture_output=True, text=True)
             rows = [ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()] if (tmp / "jobs.txt").exists() else []
             return r, rows
@@ -633,27 +664,24 @@ def test_finish_batch():
         (tmp / "outputs" / "system_eval" / "manifest.json").write_text("[]")
         (bd / "MIDI2ScoreTF.ckpt").write_text("x")
         r, rows = run()
-        assert r.returncode == 0 and len(rows) == 7, (r.stdout + r.stderr, len(rows))
-        by = {}
-        for row in rows:
-            by.setdefault(row[3].split("-J ")[1].split()[0], []).append(row)
-        seq = by["seq_sf_base_reg_cab_c128_r"]
-        assert len(seq) == 3 and "--dependency" not in seq[0][3]
-        assert f"--dependency=afterany:{seq[0][0]}" in seq[1][3] and f"--dependency=afterany:{seq[1][0]}" in seq[2][3]
-        assert all("v2_jobs.sh seq2seq sf_base_reg_cab_c128_r --size base --dropout 0.2" in x[3]
-                   and "--context-before 128 --context-after 64 --aux-metrical --beats" in x[3] for x in seq)
-        a, b = by["sysold_a"][0], by["sysold_b"][0]
-        assert "systems sf_base_reg_cab:meter sf_base_reg_cab_s1:meter" in a[3]
-        assert "systems sf_base_reg_cab_c128:meter" in b[3] and "v2_jobs.sh ablation nl_base_gn+meter_v3" in b[3]
-        new = by["sysnew"][0]
-        assert f"--dependency=afterany:{seq[2][0]}" in new[3]
-        assert "systems sf_base_reg_cab_c128_r:meter:sb sf_base_reg_cab_c128_r:meter" in new[3]
-        fin = by["v2final"][0]
+        assert r.returncode == 0 and len(rows) == 8, (r.stdout + r.stderr, len(rows))
+        by = {row[3].split("-J ")[1].split()[0]: row for row in rows}
+        tests = by["r4tests"][0]
+        assert "--dependency" not in by["r4tests"][3] and "tests.test_v2_system" in by["r4tests"][3]
+        lab, tempo = by["r4lab"], by["r4tempo"]
+        for job in (lab, tempo, by["r4sys_c"]):
+            assert f"--dependency=afterok:{tests}" in job[3] and "--kill-on-invalid-dep=yes" in job[3], job[3]
+        assert "v2_jobs.sh labellers nl_base_gn_f1 nl_base_gn1_f1" in lab[3]
+        assert "v2_jobs.sh tempo meter_v3 meter_v3_tp" in tempo[3] and "--gres" not in tempo[3]
+        for name in ("r4evals", "r4sys_a", "r4sys_b"):
+            assert f"--dependency=afterany:{lab[0]}:{tempo[0]}" in by[name][3], by[name][3]
+        assert "v2_jobs.sh evals nl_base_gn_f1 nl_base_gn1_f1 nl_base_gn" in by["r4evals"][3]
+        assert "nl_base_gn_f1+meter_v3_tp:tidy,d95" in by["r4sys_a"][3] and "nl_base_gn1_f1+meter_v3_tp" in by["r4sys_b"][3]
+        assert "nl_base_gn+meter_v3:d95,missing" in by["r4sys_c"][3] and "v2_jobs.sh ablation nl_base_gn+meter_v3" in by["r4sys_c"][3]
+        fin = by["r4final"]
         deps = set(fin[3].split("--dependency=afterany:")[1].split()[0].split(":"))
-        assert deps == {x[0] for x in seq} | {a[0], b[0], new[0]}, deps
-        assert fin[3].index("rescore.py --workers 16") < fin[3].index("compare_runs.py") < fin[3].index("beyer_dai.py")
-        assert fin[3].count("beyer_dai.py score") == 2
-        assert "--conditions clean --out outputs/system_eval_ablation" in fin[3]
+        assert deps == {row[0] for row in rows if row is not fin}, deps
+        assert "compare_runs.py" in fin[3] and fin[3].count("beyer_dai.py score") == 2
 
 
 def test_v2_jobs():
@@ -751,6 +779,21 @@ exit 0
         assert calls == ["scripts/system_scores.py --v2 nl_base_gn+meter_v3 --conditions clean --clean-beats audio "
                          "--out outputs/system_eval_ablation"] and code == 0, (calls, out)
         assert (tmp / "outputs" / "system_eval_ablation" / "v2_nl_base_gn_meter_v3" / "summary.json").exists()
+        # v2 options after a colon: their system_scores.py flags; an unknown one fails that system only
+        code, calls, out = run("systems nl_base_gn+meter_v3:tidy,d95,missing nl_base_gn+meter_v3:keepall "
+                               "nl_base_gn+meter_v3:bogus")
+        assert calls == ["scripts/system_scores.py --v2 nl_base_gn+meter_v3 --tidy --delete-above 0.95 --only-missing",
+                         "scripts/system_scores.py --v2 nl_base_gn+meter_v3 --delete-above 1"], calls
+        assert code == 1 and "unknown v2 option bogus" in out, out
+        # the tempo prior: a new run sharing meter_v3's checkpoint, its decoder tuned again
+        code, calls, out = run("tempo meter_v3 meter_v3_tp")
+        assert calls == ["scripts/eval_meter.py --run meter_v3_tp --tune --tempo-prior --device cpu"] and code == 0
+        tp = tmp / "outputs" / "runs" / "meter_v3_tp"
+        assert all((tp / f).exists() for f in ("best.pt", "status.json", "eval_meter.json")), list(tp.iterdir())
+        code, calls, out = run("systems nl_base_gn+meter_v3_tp")   # finished and evaluated: a v2 system
+        assert calls == ["scripts/system_scores.py --v2 nl_base_gn+meter_v3_tp"] and code == 0, (calls, out)
+        code, calls, out = run("tempo meter_v9 meter_v9_tp")      # nothing to tune
+        assert calls == [] and code == 1 and "not finished" in out
         (tmp / "outputs" / "runs" / "meter_v2_nonote").mkdir(parents=True)
         (tmp / "outputs" / "runs" / "meter_v2_nonote" / "best.pt").write_text("x")
         code, calls, out = run("grids")
