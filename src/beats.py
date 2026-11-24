@@ -103,14 +103,14 @@ def _time_map(pairs, sq, pt, max_ratio: float = 3.0):
 def window_grid(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str], max_extrap: float = 1.0) -> dict | None:
     """The score's beats of one window, timed in the window's frame. Returns arrays bar (window bar
     index, 0 = the target's first bar), beat (index in its bar), t (seconds), extrap (quarters
-    outside the aligned notes; 0 = interpolated), or None if fewer than MIN_PAIRS notes align.
-    Beats more than ``max_extrap`` quarter notes outside the aligned notes are left out."""
+    outside the aligned notes; 0 = interpolated), ts (its bar's time signature), or None if fewer
+    than MIN_PAIRS notes align. Beats more than ``max_extrap`` quarter notes outside the aligned notes are left out."""
     fit = fit_alignment(np.asarray(onsets, np.float64), np.asarray(pitches), tokens)
     if fit is None or len(fit[3]) < MIN_PAIRS:
         return None
     _, sq, _, pairs, pt = fit
     uq, ut, slope = _time_map(pairs, sq, pt)
-    bars, beats, qs = [], [], []
+    bars, beats, qs, tss = [], [], [], []
     start = 0.0
     for j, b in enumerate(parse_tokens(tokens)):
         n, qpb = beat_layout(b.ts)
@@ -118,6 +118,7 @@ def window_grid(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str], max_
             bars.append(j)
             beats.append(k)
             qs.append(start + k * qpb)
+            tss.append(b.ts or "4/4")
         try:
             num, den = (int(x) for x in b.ts.split("/"))
             start += num * 4 / den
@@ -131,7 +132,7 @@ def window_grid(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str], max_
     extrap = np.maximum(uq[0] - q, 0) + np.maximum(q - uq[-1], 0)
     keep = extrap <= max_extrap  # beyond the aligned notes the map is a guess: leave those out
     return {"bar": np.asarray(bars, np.int64)[keep], "beat": np.asarray(beats, np.int64)[keep],
-            "t": t[keep], "extrap": extrap[keep]}
+            "t": t[keep], "extrap": extrap[keep], "ts": np.asarray(tss, object)[keep]}
 
 
 def merge_performance(windows) -> tuple[np.ndarray, np.ndarray]:
@@ -139,24 +140,36 @@ def merge_performance(windows) -> tuple[np.ndarray, np.ndarray]:
     perf_t0, grid or None)]. Each beat (global bar, beat in bar) comes from the window that timed it
     with the least extrapolation (windows overlap at their edges in training splits); times must
     increase, so a beat that does not is dropped. Returns (times, down)."""
+    times, down, _, _, _ = merge_performance_bars(windows)
+    return times, down
+
+
+def merge_performance_bars(windows):
+    """``merge_performance`` with every beat's place in the score: (times, down, global bar, beat
+    in its bar, its bar's time signature; "4/4" from a grid without them)."""
     best = {}
     for bar_start, t0, g in windows:
         if g is None:
             continue
-        for b, k, t, e in zip(g["bar"], g["beat"], g["t"], g["extrap"]):
+        ts = g.get("ts")
+        ts = ["4/4"] * len(g["t"]) if ts is None else ts
+        for b, k, t, e, s in zip(g["bar"], g["beat"], g["t"], g["extrap"], ts):
             key = (int(bar_start) + int(b), int(k))
             if key not in best or e < best[key][1]:
-                best[key] = (float(t0) + float(t), float(e))
-    keys = sorted(best)
-    times, down, last = [], [], -np.inf
-    for key in keys:
+                best[key] = (float(t0) + float(t), float(e), str(s))
+    times, down, bars, beats, tss, last = [], [], [], [], [], -np.inf
+    for key in sorted(best):
         t = best[key][0]
         if t <= last:
             continue
         times.append(t)
         down.append(key[1] == 0)
+        bars.append(key[0])
+        beats.append(key[1])
+        tss.append(best[key][2])
         last = t
-    return np.asarray(times, np.float64), np.asarray(down, bool)
+    return (np.asarray(times, np.float64), np.asarray(down, bool), np.asarray(bars, np.int64),
+            np.asarray(beats, np.int64), tss)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -479,6 +492,39 @@ def f_measure(ref: np.ndarray, est: np.ndarray, tol: float = MATCH_TOL) -> float
         return 0.0
     m = len(match(ref, est, tol))
     return 2 * m / (len(ref) + len(est))
+
+
+DOWNBEAT_WEIGHT = 0.5  # grid_agreement: the tracker's downbeats are less reliable than its beats
+
+
+def grid_agreement(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str], beat_t: np.ndarray,
+                   beat_d: np.ndarray) -> float | None:
+    """How well a decoded window's beats agree with the beats the tracker found: the window's
+    written beats (``beat_layout`` of each bar's time signature, so a 6/8 reading puts its beats
+    on dotted quarters and a 3/4 one on quarters) timed through the alignment of its notes to the
+    performed ones (``window_grid``), against the tracked beats, over the span of the window's
+    notes: beat F-measure + DOWNBEAT_WEIGHT x downbeat F-measure (bar lines vs tracked downbeats).
+    None when it cannot be told (no beats there, too few aligned notes). Window frame seconds;
+    ``onsets`` / ``pitches`` = the window's own notes (carried-over ones have onsets < 0)."""
+    beat_t, beat_d = np.asarray(beat_t, np.float64), np.asarray(beat_d, bool)
+    on = np.asarray(onsets, np.float64)
+    live = on[on >= 0]
+    if len(live) < MIN_PAIRS or len(beat_t) < 2:
+        return None
+    lo, hi = float(live.min()) - MATCH_TOL, float(live.max()) + MATCH_TOL
+    inside = (beat_t >= lo) & (beat_t <= hi)
+    if inside.sum() < 2:
+        return None
+    grid = window_grid(on, np.asarray(pitches), tokens)
+    if grid is None:
+        return None
+    g_in = (grid["t"] >= lo) & (grid["t"] <= hi)
+    gt_, gd = grid["t"][g_in], (grid["beat"] == 0)[g_in]
+    tt, td = beat_t[inside], beat_d[inside]
+    score = f_measure(tt, gt_)
+    if td.any():  # no tracked downbeats here: the bar lines cannot be checked (same for every reading)
+        score += DOWNBEAT_WEIGHT * f_measure(tt[td], gt_[gd])
+    return float(score)
 
 
 def compare(gt_t, gt_d, tr_t, tr_d) -> dict:

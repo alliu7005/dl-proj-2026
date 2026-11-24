@@ -135,7 +135,9 @@ def load_score(path) -> list[Measure]:
                 arp, orn = _is_arpeggio(el), _ornaments(el)
                 sub = el.notes if isinstance(el, m21.chord.Chord) else [el]
                 for nt in sub:
-                    tie = nt.tie if nt.tie is not None else el.tie
+                    # a chord member's own tie only: music21's Chord.tie is the first tie of ANY
+                    # member, which would mark the chord's newly struck notes as tied too
+                    tie = nt.tie if isinstance(el, m21.chord.Chord) else el.tie
                     meas.events.append(NoteEvent(
                         offset=off, staff=staff, pitch=piano_range(int(nt.pitch.midi)), duration=dur, grace=grace,
                         tie=tie is not None and tie.type in ("stop", "continue"),
@@ -158,7 +160,12 @@ def tokenize_bars(measures: list[Measure], bars: list[list[int]],
     ``start_pos`` / ``end_pos`` (quarters) cut the first / last bar: only events at
     ``start_pos <= pos < end_pos`` are kept. A span starting mid-bar gets no leading ``bar`` token
     (``bar`` always means "a bar line here"), so the token streams of consecutive spans concatenate
-    into one valid stream. Pedal items are taken as given."""
+    into one valid stream. Pedal items are taken as given.
+
+    A pickup (the score's first measure, shorter than its time signature) is written where it
+    falls in its bar: it starts mid-bar (no bar line before it) and its positions count from the
+    bar line its time signature implies (a one-beat pickup in 4/4 at pos_3). ``start_pos`` /
+    ``end_pos`` and the pedal positions stay in the measure's own offsets, as the alignment uses."""
     toks: list[str] = []
     prev_ts = prev_key = None
     eps = 1e-9
@@ -166,7 +173,16 @@ def tokenize_bars(measures: list[Measure], bars: list[list[int]],
         first = measures[bar[0]]
         lo = start_pos if j == 0 and start_pos is not None and start_pos > eps else None
         hi = end_pos if j == len(bars) - 1 else None
-        if lo is None:
+        pickup = Fraction(0)
+        if j == 0 and bar[0] == 0:  # the piece's opening (a repeat back to it, mid-span, stays as it was)
+            num, _, den = first.time_signature.partition("/")
+            try:
+                full = Fraction(int(num) * 4, int(den))
+            except (ValueError, ZeroDivisionError):
+                full = first.length
+            if Fraction(0) < first.length < full:
+                pickup = full - first.length
+        if lo is None and not pickup:
             toks.append("bar")
         if first.time_signature != prev_ts:
             toks.append(f"ts_{first.time_signature}")
@@ -184,15 +200,15 @@ def tokenize_bars(measures: list[Measure], bars: list[list[int]],
                 if (lo is not None and float(p) < lo - eps) or (hi is not None and float(p) >= hi - eps):
                     continue
                 # canonical order: grace notes keep their written sequence, other notes go by pitch
-                items.append((p, 1 if e.grace else 2, e.staff, e.seq if e.grace else 0, e.pitch, e))
+                items.append((p + pickup, 1 if e.grace else 2, e.staff, e.seq if e.grace else 0, e.pitch, e))
             shift += measures[mi].length
         for pos, tok in (pedal[j] if pedal else []):
-            items.append((pos, 0, -1, 0, 0, tok))
+            items.append((pos + pickup, 0, -1, 0, 0, tok))
         items.sort(key=lambda x: x[:5])
 
         # staff_k is written when the staff changes, assuming staff 0 at a bar line; a span that
         # starts mid-bar states its first staff explicitly so concatenated spans parse correctly
-        cur_pos, cur_staff = None, (None if lo is not None else 0)
+        cur_pos, cur_staff = None, (None if lo is not None or pickup else 0)
         for pos, _, staff, _, _, e in items:
             if pos != cur_pos:
                 whole = pos.numerator // pos.denominator

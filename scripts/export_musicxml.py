@@ -10,7 +10,8 @@ musicxml/<condition>/<piece>_true.musicxml plus the prediction:
                          <piece>_pred.musicxml, the
                          same file evaluate_pieces.py --musicxml N writes (regenerated, e.g. after a
                          fix to src/preprocessing/detokenize.py)
-  --mode meter / guarded / chained / oracle / none  -> <piece>_pred_<mode>.musicxml, so modes can be
+  --mode meter / piece / tsearch / tsearch_beat / ts_true / guarded / chained / oracle / none
+                         -> <piece>_pred_<mode>.musicxml, so modes can be
                          compared side by side
 Pieces are taken in the same sorted order as evaluate_pieces.py --musicxml N.
 """
@@ -37,7 +38,8 @@ def main():
     ap.add_argument("--run", required=True)
     ap.add_argument("--ckpt", default="best", help="checkpoint stem in the file names (best, last)")
     ap.add_argument("--conditions", default="clean,synthetic,real,real_kong,periscope")
-    ap.add_argument("--mode", default="auto", choices=["auto", "meter", "piece", "guarded", "chained", "oracle", "none"])
+    ap.add_argument("--mode", default="auto", choices=["auto", "meter", "piece", "tsearch", "tsearch_beat", "ts_true",
+                                                       "guarded", "chained", "oracle", "none"])
     ap.add_argument("--n", type=int, default=5, help="pieces per condition (0 = all)")
     args = ap.parse_args()
     run = Path("outputs/runs") / args.run

@@ -18,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from tests.batch_env import batch_env  # noqa: E402
 from src.eval.plan import DEFAULT_MODES, margins_of, mode_names, stamp  # noqa: E402
 
 ALL = DEFAULT_MODES.split(",")
@@ -61,11 +62,12 @@ def setup(tmp: Path):
     run("finished", complete(every), phase="done")
     run("queued")                                             # an evaluation already in the queue
     run("smoke_x")                                            # smoke tests are never evaluated
+    run("split")                                              # one of its per-condition evaluations is queued
     (runs / "no_ckpt").mkdir(parents=True)
 
     bin_ = tmp / "bin"
     bin_.mkdir()
-    (bin_ / "squeue").write_text('#!/bin/bash\necho "777 eval_queued"\n')
+    (bin_ / "squeue").write_text('#!/bin/bash\necho "777 eval_queued"\necho "778 eval_split@real"\n')
     # one line per submission: NAME, ARGS and sbatch's own arguments, tab-separated
     (bin_ / "sbatch").write_text('#!/bin/bash\nprintf "%s\\t%s\\t%s\\n" "$NAME" "$ARGS" "$*" >> "$SUBMITS"\necho 1000\n')
     py = Path(sys.executable).as_posix()
@@ -77,7 +79,7 @@ def setup(tmp: Path):
 
 def reevaluate(tmp, bin_, *runs, **env):
     submits = tmp / f"submits_{len(list(tmp.glob('submits_*')))}.txt"
-    e = dict(os.environ, USER="me", SUBMITS=str(submits), **env)
+    e = batch_env(USER="me", SUBMITS=str(submits), **env)
     r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash pace/reevaluate.sh "$@"',
                         "x", *runs], cwd=tmp, env=e, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -96,7 +98,7 @@ def test_reevaluate():
         assert set(sub) == {"no_real", "big_no_real"}, out
         assert sub["no_real"][1] == "--conditions real --only-missing", sub
         assert "-t 2:30:00" in sub["no_real"][2] and "-t 4:00:00" in sub["big_no_real"][2], sub
-        assert "-J eval_no_real" in sub["no_real"][2] and "--constraint=gpu-h100|gpu-h200|gpu-rtxpro-blackwell" \
+        assert "-J eval_no_real" in sub["no_real"][2] and "--constraint=HX00" \
             in sub["no_real"][2], sub
         assert "real: " + ",".join(NAMES) in out, out                 # what each job will compute
         assert "skip done_all: nothing missing" in out and "skip finished: nothing missing" in out, out
@@ -107,7 +109,8 @@ def test_reevaluate():
         # extra margins: every finished run gets the three new modes, and only those
         out, sub = reevaluate(tmp, bin_, "done_all", ARGS="--conditions clean --extra-margins -0.05")
         assert sub["done_all"][1] == "--conditions clean --extra-margins -0.05 --only-missing", sub
-        assert "clean: guarded@-0.05,meter@-0.05,piece@-0.05\n" in out, out
+        assert "clean: " + ",".join(k + "@-0.05" for k in ("guarded", "meter", "piece", "ts_true", "tsearch",
+                                                         "tsearch_beat")) + "\n" in out, out
         # FORCE recomputes existing results (without --only-missing), but never a run in training
         out, sub = reevaluate(tmp, bin_, "done_all", "training", FORCE="1")
         assert set(sub) == {"done_all"} and sub["done_all"][1] == "", sub
@@ -118,8 +121,42 @@ def test_reevaluate():
         assert "--dependency" not in sub["no_real"][2], sub
         out, _ = reevaluate(tmp, bin_, "no_ckpt")
         assert "skip no_ckpt: outputs/runs/no_ckpt/best.pt not found" in out, out
+        # PER_CONDITION: one job per condition still missing results, named eval_<run>@<condition>
+        # a run evaluated before the time-signature modes existed: they are missing on every test set
+        old_names = mode_names("oracle,chained,none,guarded,meter,piece".split(","), 0.0, [])
+        old_margins = margins_of("oracle,chained,none,guarded,meter,piece".split(","), 0.0, [])
+        old = {c: {n: stamp({"note_f1": 0.5}, old_margins.get(n)) for n in old_names}
+               for c in ("clean", "synthetic", "real", "periscope")}
+        old["real_unseen_audio"] = old["real"]
+        d = tmp / "outputs" / "runs" / "old"
+        d.mkdir(parents=True)
+        (d / "best.pt").write_bytes(b"")
+        (d / "config.json").write_text(json.dumps({"params": 45_000_000}))
+        (d / "eval_pieces_best.json").write_text(json.dumps(old))
+        (d.parent / "split" / "eval_pieces_best.json").write_text(json.dumps(old))  # split: as old
+        out, sub = reevaluate(tmp, bin_, "old", "no_real", "done_all", "split", PER_CONDITION="1",
+                              ARGS="--modes ts_true,tsearch")
+        lines = sorted(tmp.glob("submits_*"), key=lambda f: int(f.stem.split("_")[1]))[-1].read_text().splitlines()
+        jobs = {ln.split("\t")[0] + "@" + ln.split("\t")[1].split("--conditions ")[1]: ln.split("\t") for ln in lines}
+        # split's real is already queued (job 778): its other conditions are not, and get their jobs
+        assert set(jobs) == {"old@clean", "old@synthetic", "old@real", "old@periscope", "no_real@real",
+                             "split@clean", "split@synthetic", "split@periscope"}, jobs
+        assert "skip split@real: already being evaluated (job 778)" in out, out
+        first = out
+        # without PER_CONDITION a queued part of the run keeps the whole run out
+        out, sub = reevaluate(tmp, bin_, "split", ARGS="--modes ts_true,tsearch")
+        assert not sub and "skip split: already being evaluated (job 778)" in out, out
+        j = jobs["old@real"]
+        assert j[1] == "--modes ts_true,tsearch --only-missing --conditions real" and "-J eval_old@real" in j[2]
+        assert "-t 3:00:00" in j[2] and "-t 1:30:00" in jobs["no_real@real"][2], j  # 45M vs 10M parameters
+        assert "old@real: job 1000  (3:00:00) computes: ts_true,tsearch" in first, first
+        assert "skip done_all: nothing missing" in first, first
+        e = batch_env(USER="me", SUBMITS=str(tmp / "pc.txt"), PER_CONDITION="1", FORCE="1")
+        r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/reevaluate.sh'],
+                           cwd=tmp, env=e, capture_output=True, text=True)
+        assert r.returncode != 0 and "do not combine" in r.stdout and not (tmp / "pc.txt").exists(), r.stdout
         # a bad argument stops the script before anything is submitted
-        e = dict(os.environ, USER="me", SUBMITS=str(tmp / "bad.txt"), ARGS="--modes guardd")
+        e = batch_env(USER="me", SUBMITS=str(tmp / "bad.txt"), ARGS="--modes guardd")
         r = subprocess.run([shutil.which("bash"), "-c", f'export PATH="$PWD/bin:$PATH"; bash pace/reevaluate.sh'],
                            cwd=tmp, env=e, capture_output=True, text=True)
         assert r.returncode != 0 and "unknown mode" in r.stdout and not (tmp / "bad.txt").exists(), r.stdout
@@ -140,7 +177,7 @@ def test_beats_batch():
                                      'printf "%s\\t%s\\t%s\\t%s\\n" "$n" "$NAME" "$ARGS" "$*" >> "$SUBMITS"\n'
                                      'echo $n\n')
         (bin_ / "sbatch").chmod(0o755)
-        e = dict(os.environ, USER="me", SUBMITS=str(tmp / "jobs.txt"))
+        e = batch_env(USER="me", SUBMITS=str(tmp / "jobs.txt"))
         r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/beats.sh'],
                            cwd=tmp, env=e, capture_output=True, text=True)
         assert r.returncode == 0, r.stdout + r.stderr
@@ -169,7 +206,7 @@ def test_beats_batch():
         # STAGE=beat-runs: only the two beat runs, from scratch, with the same arguments, no dependency
         def stage(**env):
             out = tmp / f"stage_{len(list(tmp.glob('stage_*')))}.txt"
-            e = {**os.environ, "USER": "me", "SUBMITS": str(out), "STAGE": "beat-runs", **env}
+            e = {**batch_env(), "USER": "me", "SUBMITS": str(out), "STAGE": "beat-runs", **env}
             r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/beats.sh'],
                                cwd=tmp, env=e, capture_output=True, text=True)
             return r, [ln.split("	") for ln in out.read_text().splitlines()] if out.exists() else []
@@ -195,6 +232,72 @@ def test_beats_batch():
             assert j[2] == train[j[1]][2] and "--dependency" not in j[3] and "train.sbatch" in j[3], (j, train[j[1]])
         r, _ = stage(STAGE="nope")
         assert r.returncode != 0 and "unknown STAGE" in r.stdout
+
+
+def test_tsearch_batch():
+    """pace/tsearch.sh: the time-signature modes per test set for the best models (the deciding test
+    sets first, the rest once the trainings have started), and the three trainings."""
+    if shutil.which("bash") is None:
+        print("  (skipped: no bash)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        bin_ = setup(tmp)
+        shutil.copy(ROOT / "pace" / "tsearch.sh", tmp / "pace")
+        (bin_ / "sbatch").write_text('#!/bin/bash\nn=$(( $(cat "$SUBMITS.n" 2>/dev/null || echo 100) + 1 ))\n'
+                                     'echo $n > "$SUBMITS.n"\n'
+                                     'printf "%s\\t%s\\t%s\\t%s\\n" "$n" "$NAME" "$ARGS" "$*" >> "$SUBMITS"\n'
+                                     'echo $n\n')
+        (bin_ / "sbatch").chmod(0o755)
+        # beats for every beat condition, and the fitted tracker noise (the simulated-tracker ones)
+        for split in ("test", "test_transcribed", "test_periscope"):
+            (tmp / "data" / "processed" / split / "beats_gt.npz").write_bytes(b"")
+        (tmp / "data" / "processed" / "test_transcribed" / "beats_tracked.npz").write_bytes(b"")
+        (tmp / "configs").mkdir()
+        (tmp / "configs" / "beat_noise.json").write_text("{}")
+        old_modes = "oracle,chained,none,guarded,meter,piece".split(",")
+        names, margins = mode_names(old_modes, 0.0, []), margins_of(old_modes, 0.0, [])
+        conds = ("clean", "synthetic", "real", "periscope", "clean_gt_beats", "real_gt_beats", "real_no_beats")
+        for run, beats, params in (("sf_base_reg_cab", True, 44_600_000), ("s2s_m_cab", True, 25_900_000),
+                                   ("sf_base_reg_ca", False, 44_600_000)):
+            d = tmp / "outputs" / "runs" / run
+            d.mkdir(parents=True)
+            (d / "best.pt").write_bytes(b"")
+            (d / "config.json").write_text(json.dumps({"params": params, "model": {"beat_features": beats}}))
+            res = {c: {n: stamp({"note_f1": 0.5}, margins.get(n)) for n in names} for c in conds}
+            res["real_unseen_audio"] = res["real"]
+            (d / "eval_pieces_best.json").write_text(json.dumps(res))
+        e = batch_env(USER="me", SUBMITS=str(tmp / "jobs.txt"))
+        r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/tsearch.sh'],
+                           cwd=tmp, env=e, capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        jobs = [ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()]
+        train = [j for j in jobs if "train.sbatch" in j[3]]
+        evals = {j[3].split("-J ")[1].split()[0]: j for j in jobs if "evaluate.sbatch" in j[3]}
+        assert [j[1] for j in train] == ["sf_base_reg_cab_s1", "sf_base_reg_cabx", "sf_base_reg_cab_c128"]
+        base = "--size base --dropout 0.2 --weight-decay 0.1 --lr 2e-4"
+        ctx = "--context-before 64 --context-after 32 --aux-metrical"
+        assert train[0][2] == f"{base} {ctx} --beats --seed 1"
+        assert train[1][2] == f"{base} {ctx} --beats --beat-noise none --transcribed-beats gt"
+        assert train[2][2] == f"{base} --context-before 128 --context-after 64 --aux-metrical --beats"
+        assert all("--dependency" not in j[3] and "-t 8:00:00" in j[3] for j in train)
+        first = {f"eval_{r}@{c}" for r in ("sf_base_reg_cab", "s2s_m_cab")
+                 for c in ("real", "clean", "periscope", "real_gt_beats")}
+        rest = {f"eval_{r}@{c}" for r in ("sf_base_reg_cab", "s2s_m_cab")
+                for c in ("synthetic", "clean_gt_beats", "real_no_beats")}
+        plain = {f"eval_sf_base_reg_ca@{c}" for c in ("real", "clean", "periscope", "synthetic")}
+        assert set(evals) == first | rest | plain, sorted(evals)
+        ids = ":".join(j[0] for j in train)
+        order = [j[0] for j in jobs]
+        for name in first:  # at once, submitted before the trainings (so they start first)
+            j = evals[name]
+            assert "--dependency" not in j[3] and order.index(j[0]) < order.index(train[0][0]), j
+            assert j[2].startswith("--modes ts_true,tsearch,tsearch_beat ") and j[2].endswith(
+                "--conditions " + name.split("@")[1]), j
+        for name in rest | plain:
+            assert f"--dependency=after:{ids}" in evals[name][3], evals[name]
+        assert all(evals[n][2].startswith("--modes ts_true,tsearch --") for n in plain)
+        assert "-t 3:00:00" in evals["eval_s2s_m_cab@real"][3]  # 25.9M parameters: the larger walltime
 
 
 def main():

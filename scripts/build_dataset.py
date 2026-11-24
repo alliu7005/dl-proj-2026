@@ -185,9 +185,13 @@ def main():
     ap.add_argument("--config", default="configs/preprocess.yaml")
     ap.add_argument("--limit", type=int, default=0,
                     help="only process N ASAP pieces and N PianoCoRe scores (debugging)")
+    ap.add_argument("--out", default=None, help="output folder instead of the config's out_dir (a rebuild next to "
+                                                "the data in use: the output's split folders are replaced)")
+    ap.add_argument("--vocab", default=None, help="use this vocab.json instead of building one (its token ids stay, "
+                                                  "so models trained on it read the new data; other tokens -> <unk>)")
     args = ap.parse_args()
     cfg = yaml.safe_load(open(args.config))
-    root, out = Path(cfg["asap_root"]), Path(cfg["out_dir"])
+    root, out = Path(cfg["asap_root"]), Path(args.out or cfg["out_dir"])
     shard_dir = out / "_shards"
     if out.exists():
         for sp in SPLITS:
@@ -215,7 +219,8 @@ def main():
         splits = composer_stratified_val(asap_like, composer_of,
                                          {c for c, sp in fixed.items() if sp == "test"},
                                          cfg.get("val_frac", 0.1), seed=cfg["seed"],
-                                         weight=Counter({cids[f]: len(by_piece[f]) for f in by_piece}))
+                                         weight=sum((Counter({cids[f]: len(by_piece[f])}) for f in by_piece),
+                                                    Counter()))  # folders of one composition add up
     else:
         splits = assign_splits(asap_like, tuple(cfg["split_ratios"]), cfg["seed"], fixed)
     # PianoCoRe-only works (not in ASAP): hashed into train / val / test_periscope by work
@@ -257,7 +262,13 @@ def main():
                 shards[sp].append(shard)
                 sizes[sp] = [x + y for x, y in zip(sizes[sp], sz)]
 
-    vocab = Vocab.from_counts(train_counts, cfg.get("vocab_min_count", 2))
+    if args.vocab:
+        vocab = Vocab.load(args.vocab)
+        oov = {t: n for t, n in train_counts.items() if t not in vocab.stoi}
+        print(f"vocab from {args.vocab}: {len(vocab)} tokens; {sum(oov.values())} training tokens of "
+              f"{len(oov)} kinds not in it (-> <unk>): {sorted(oov.items(), key=lambda kv: -kv[1])[:20]}", flush=True)
+    else:
+        vocab = Vocab.from_counts(train_counts, cfg.get("vocab_min_count", 2))
     vocab.save(out / "vocab.json")
     for sp in SPLITS:
         write_split(out / sp, iter_shards(shards[sp]), tuple(sizes[sp]), vocab)

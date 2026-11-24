@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from fractions import Fraction
+from pathlib import Path
 
 PAD, BOS, EOS, UNK, SEP = "<pad>", "<bos>", "<eos>", "<unk>", "<sep>"
 SPECIALS = [PAD, BOS, EOS, UNK, SEP]  # SEP separates the context prompt from the target
@@ -83,3 +84,21 @@ class Vocab:
         with open(path) as f:
             d = json.load(f)
         return cls(d["itos"], d.get("counts"))
+
+
+def pin_vocab(data_vocab, run_dir) -> Path:
+    """Keep the vocabulary a run trains with in its folder (``run_dir/vocab.json``), where the demo
+    and the pipelines look first: a checkpoint's token ids (and a labeller's sub-position / length
+    classes) mean nothing without it, and the data folder may be another build by the time the model
+    is used. A run resumed against data whose tokens differ from the ones it started with is refused
+    (its outputs would change meaning mid-training). Returns the run's copy."""
+    src, dst = Path(data_vocab), Path(run_dir) / "vocab.json"
+    if dst.exists():
+        if Vocab.load(str(dst)).itos != Vocab.load(str(src)).itos:
+            raise SystemExit(f"{src} has other tokens than the vocabulary {run_dir} was started with ({dst}): "
+                             "resume it on the data it trained on, or start a new run")
+        return dst
+    tmp = dst.with_name("vocab.json.tmp")
+    tmp.write_bytes(src.read_bytes())
+    tmp.replace(dst)
+    return dst

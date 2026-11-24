@@ -9,12 +9,13 @@ import re
 def composition_id(dataset: str, piece: str) -> str:
     """Normalized ID shared by every performance/version of the same composition.
 
-    Strips variants such as ``_no_repeat`` so they can't land in different splits.
+    Strips version suffixes (ASAP: ``_repeat``, ``_no_repeat(s)``, ``_no_2_repeat``,
+    ``_no_first_repeat``) so two versions of a piece can't land in different splits.
     When adding PianoCoRe, map its pieces to the SAME ids as ASAP (composer/work/movement)
     so a composition never appears in two splits across datasets.
     """
     pid = piece.lower().replace("\\", "/")
-    pid = re.sub(r"_no_repeats?$", "", pid)
+    pid = re.sub(r"_(no_([a-z0-9]+_)?)?repeats?$", "", pid)
     return pid
 
 

@@ -12,7 +12,7 @@
 #   sf_small_ctx   both                                              sf_small, s2s_ctx
 #   sf_base_reg    45M model with more regularization, shorter run   sf_base
 set -euo pipefail
-GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}  # node features: whichever of these GPUs frees up first
+GPUS=${GPUS:-HX00}  # node feature: an H100 or an H200 (one feature: see pace/README.md, "Which GPU")
 G=(--gres=gpu:1 "--constraint=$GPUS")
 
 test_id=$(sbatch --parsable -J ctxtest -c 4 --mem=16G -t 0:30:00 -o slurm-ctxtest-%j.out \

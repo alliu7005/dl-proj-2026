@@ -29,7 +29,7 @@
 # Each training job then evaluates its run on every test set and mode, including the beat-only
 # conditions (annotated beats, no beats) for the beat models (src/eval/plan.py BEATS).
 set -euo pipefail
-GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}  # node features: whichever of these GPUs frees up first
+GPUS=${GPUS:-HX00}  # node feature: an H100 or an H200 (one feature: see pace/README.md, "Which GPU")
 G=(--gres=gpu:1 "--constraint=$GPUS")
 STAGE=${STAGE:-all}
 BEAT_RUNS=(sf_base_reg_cab s2s_m_cab)

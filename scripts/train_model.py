@@ -63,7 +63,7 @@ from src.eval.metrics import Accumulator  # noqa: E402
 from src.metrical import aux_counts, aux_loss, aux_scores  # noqa: E402
 from src.model import token_loss  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
-from src.preprocessing.vocab import EOS  # noqa: E402
+from src.preprocessing.vocab import EOS, pin_vocab  # noqa: E402
 from src.scoreformer import PRESETS, build_model  # noqa: E402
 
 D = Path("data/processed")
@@ -202,6 +202,10 @@ def main():
                     help="tracker errors to simulate (scripts/fit_beat_noise.py); 'none' = exact beats")
     ap.add_argument("--beat-dropout", type=float, default=0.15,
                     help="share of training windows without beats (input without a tracker)")
+    ap.add_argument("--transcribed-beats", default="tracked", choices=["tracked", "gt"],
+                    help="beats of the real-transcription windows: the tracker's own (beats_tracked.npz), or the "
+                         "ground truth with --beat-noise like the clean data (with --beat-noise none: exact "
+                         "beats everywhere, the ceiling of what beats can give)")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--eval-every", type=int, default=2000)
     ap.add_argument("--eval-loss-windows", type=int, default=400)
@@ -225,6 +229,7 @@ def main():
     run = Path("outputs/runs") / args.name
     run.mkdir(parents=True, exist_ok=True)
     vocab_path = str(D / "vocab.json")
+    pin_vocab(vocab_path, run)  # the run keeps the vocabulary it trains with (demo, pipelines)
 
     # ---- data (same recipe as scripts/train.py)
     real_ok = has_split("train_transcribed")
@@ -243,6 +248,8 @@ def main():
         if beats_on and beat_rec:  # the same tracker noise and dropout as when it started
             args.beat_noise, args.beat_dropout = beat_rec.get("noise", args.beat_noise), beat_rec.get("dropout", args.beat_dropout)
             recorded_noise = beat_rec.get("noise_values")
+            if beat_rec.get("train_transcribed") in ("tracked", "gt"):  # kept even if the file is gone now
+                args.transcribed_beats = beat_rec["train_transcribed"]
     n_ctx = notes_ctx["context_before"] + notes_ctx["context_after"]
     notes_ctx_m = {**notes_ctx, "metrical": aux_on}  # dataset arguments
     # beats: ground truth + fitted tracker noise; the real transcriptions use the tracker's own beats
@@ -262,13 +269,16 @@ def main():
                if recorded_noise is not None else f"tracker errors from {args.beat_noise}")
         print(f"beats: {src}" + ("" if bn is None else f" (fitted: {bn.fitted}; p_double {bn.p_double:.3f}, "
                                  f"miss {bn.miss:.3f}, down_hit {bn.down_hit:.3f})"), flush=True)
-        for split in ("train", "val"):
+        gt_splits = ["train", "val"] + ([s for s in ("train_transcribed", "val_transcribed") if has_split(s)]
+                                        if args.transcribed_beats == "gt" else [])
+        for split in gt_splits:
             if not beats_path(D / split, "gt").exists():
                 raise SystemExit(f"{beats_path(D / split, 'gt')} missing: run scripts/build_beats.py first")
 
         def split_beats(split, dropout):
-            """Tracked beats where they exist (real errors already), else ground truth + noise."""
-            if beats_path(D / split, "tracked").exists():
+            """Tracked beats where they exist (real errors already), else ground truth + noise;
+            the ground truth + noise always with --transcribed-beats gt."""
+            if args.transcribed_beats == "tracked" and beats_path(D / split, "tracked").exists():
                 return {"beats": "tracked", "beat_noise": None, "beat_dropout": dropout}
             return {"beats": "gt", "beat_noise": bn, "beat_dropout": dropout}
         beat_args = {"beats": "gt", "beat_noise": bn, "beat_dropout": args.beat_dropout}
@@ -369,11 +379,14 @@ def main():
 
     weights = torch.tensor(vocab.loss_weights(args.ornament_weight), device=device)
     step, epoch, best = 0, 0, float("inf")
+    in_epoch = 0
     best_step = 0  # step of the best validation loss (early stopping)
     if ck is not None:
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
         step, epoch, best = ck["step"], ck["epoch"], ck.get("best", best)
+        in_epoch = ck.get("batch_in_epoch", 0)  # batches of this epoch trained on already
+        batches.skip = in_epoch
         best_step = ck.get("best_step", step)
         phase = ck.get("phase", "train" if step < total_steps else "done")
         cool = ck.get("cool", cool)
@@ -402,6 +415,7 @@ def main():
         # instead of a truncated file that the resubmitted job cannot load
         tmp = path.with_name(path.name + ".tmp")
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "epoch": epoch,
+                    "batch_in_epoch": in_epoch,
                     "best": best, "best_step": best_step, "phase": phase, "cool": cool,
                     "stopped_early": stopped_early,
                     "arch": args.arch, "config": cfg}, tmp)
@@ -459,6 +473,7 @@ def main():
             batches.set_epoch(epoch)
             t_wait = time.time()
             for b in dl:
+                in_epoch += 1
                 wait_int += time.time() - t_wait
                 b = {k: v.to(device, non_blocking=True) for k, v in b.items()}
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
@@ -509,6 +524,7 @@ def main():
                 t_wait = time.time()
             else:  # the epoch's batches ran out (not stopped by total_steps or early stopping)
                 epoch += 1
+                in_epoch = 0
     except KeyboardInterrupt:
         save(run / "last.pt")
         print(f"\nstopped at step {step}: saved {run / 'last.pt'}. Continue with: "

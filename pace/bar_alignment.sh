@@ -20,7 +20,7 @@
 #              given the true context, which falls behind without it (bar F1
 #              0.42 vs 0.52 with no context); these fixes target that gap
 set -euo pipefail
-GPUS=${GPUS:-gpu-h100|gpu-h200|gpu-rtxpro-blackwell}  # node features: whichever of these GPUs frees up first
+GPUS=${GPUS:-HX00}  # node feature: an H100 or an H200 (one feature: see pace/README.md, "Which GPU")
 G=(--gres=gpu:1 "--constraint=$GPUS")
 
 prep=$(sbatch --parsable -J barprep -c 8 --mem=32G -t 1:00:00 -o slurm-barprep-%j.out --wrap="source pace/common.sh; \

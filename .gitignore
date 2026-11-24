@@ -6,3 +6,8 @@ data/
 outputs/
 *.pt
 .ipynb_checkpoints/
+models/
+models.partial/
+slurm-*.out
+slurm-*.log
+*.tgz

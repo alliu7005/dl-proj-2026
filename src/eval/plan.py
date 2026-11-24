@@ -41,13 +41,17 @@ SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed",
 BEATS = {"clean": "sim", "synthetic": "sim", "real": "tracked", "real_kong": "sim", "periscope": "sim",
          "clean_gt_beats": "gt", "real_gt_beats": "gt", "real_no_beats": "none"}
 BEAT_ONLY = ("clean_gt_beats", "real_gt_beats", "real_no_beats")  # identical to another condition without beats
-DEFAULT_MODES = "oracle,chained,none,guarded,meter,piece"
+DEFAULT_MODES = "oracle,chained,none,guarded,meter,piece,ts_true,tsearch,tsearch_beat"
 DEFAULT_CONDITIONS = "clean,synthetic,real,real_kong,periscope,clean_gt_beats,real_gt_beats,real_no_beats"
 DEFAULT_BEAT_NOISE = "configs/beat_noise.json"
 # results derived from another condition's decoding, never requested on their own
 DERIVED = {"real_unseen_audio": "real"}
-DECODED = ("chained", "guarded", "meter", "piece")  # modes decoded piece by piece (src/decoding.py)
-GUARDED = ("guarded", "meter", "piece")  # modes with a guard margin
+# modes decoded piece by piece (src/decoding.py), in decoding order: ts_true (each window's true
+# time signature forced: the most a time-signature choice can give), tsearch / tsearch_beat (one
+# time-signature search; candidates kept by the model's probability / by the tracked beats)
+DECODED = ("chained", "guarded", "meter", "piece", "ts_true", "tsearch", "tsearch_beat")
+GUARDED = DECODED[1:]  # modes with a guard margin
+TSEARCH = ("tsearch", "tsearch_beat")  # decoded together (one search), kept by different rules
 # piece: meter with no limit on the length of a run that is smoothed away, so a piece keeps one
 # time signature unless it really changes for a stretch at least as long as the rest
 PIECE_MAX_BLIP = 10 ** 6
@@ -61,7 +65,12 @@ DEFAULT_GUARD_MARGIN = 0.0
 # max_new_tokens), guarded with margin recorded, meter with the forced time signature banned
 # elsewhere in the window.
 EVAL_VERSION = 1
-MISSING, NOTHING_MISSING, TRAINING = 0, 3, 4  # exit statuses of the command line
+# the targets a result was scored against: 2 = data rebuilt on 2026-11-22 (chord ties, pickups, the
+# train / val leak fixed: pace/rebuild.sh). Recorded only, not compared by present(): an earlier
+# result stays valid for its own targets; the tables mark it.
+TARGETS_VERSION = 2
+MISSING, NOTHING_MISSING, TRAINING, NOT_SEQ2SEQ = 0, 3, 4, 5  # exit statuses of the command line
+OTHER_ARCHS = ("labeller", "meter", "meter_oracle")  # v2 runs: scripts/eval_labeller.py / eval_meter.py
 
 
 def join_dash_values(argv, flags=("--extra-margins",)):
@@ -173,6 +182,7 @@ def condition_available(cond, data_dir, beats, beat_noise=DEFAULT_BEAT_NOISE):
 def stamp(result, margin=None, limit_perfs=0):
     """Record how a result was computed (what present() compares)."""
     result["eval_version"] = EVAL_VERSION
+    result["targets"] = TARGETS_VERSION
     result["limit_perfs"] = int(limit_perfs)
     if margin is not None:
         result["guard_margin"] = margin
@@ -251,8 +261,21 @@ def plan(args):
     return training_state(run_dir), todo
 
 
+def run_arch(run_dir):
+    """The run's architecture from its config.json ("" if it has none)."""
+    p = Path(run_dir) / "config.json"
+    try:
+        return json.loads(p.read_text()).get("arch", "") if p.exists() else ""
+    except ValueError:
+        return ""
+
+
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    arch = run_arch(Path(args.runs_dir) / args.run)
+    if arch in OTHER_ARCHS:
+        print("not a seq2seq model (arch {}): evaluated by scripts/eval_labeller.py / eval_meter.py".format(arch))
+        return NOT_SEQ2SEQ
     phase, todo = plan(args)
     if phase != "done":
         print("training not finished (phase {})".format(phase))

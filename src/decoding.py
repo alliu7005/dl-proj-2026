@@ -19,6 +19,19 @@ so far), which tells it where in the bar the window starts and which time / key 
            piece is decoded again from there, so the corrected meter also reaches the context of
            the windows after it. A wrong time signature mis-sizes every bar of the window, so it
            shifts every position after it (onset F1, bar F1).
+  tsearch  time-signature search: guarded decoding of the whole piece once per candidate time
+           signature (forced in every window), keeping the candidate the model itself finds most
+           probable (mean log-probability per generated token, ``Scored``). Without the right
+           meter's context the model picks a window's time signature in one greedy step, before
+           it has written a single note; this lets the whole piece's notes vote. The candidates
+           are the piece's most frequent time signatures in its guarded and no-context outputs,
+           topped up with the commonest ones overall (``FALLBACK_TS``).
+  tsearch_beat  the same candidates, keeping the one whose written beats agree best with the
+           beats the tracker found (src/beats.py grid_agreement: the notes' alignment times the
+           written beats and bar lines, which are compared with the tracked beats and downbeats);
+           the model's probability breaks ties and decides where there are no beats.
+  ts_true  (diagnostic) guarded decoding with each window's true time signature forced: the most
+           any time-signature choice can give.
 """
 from __future__ import annotations
 
@@ -29,6 +42,25 @@ from .eval.plan import DEFAULT_GUARD_MARGIN  # noqa: F401  (defined with the eva
 from .preprocessing.segment import prompt_from_output  # readable on the PACE login node without torch)
 
 W = TypeVar("W")  # a window, in whatever form the caller uses (dataset index, dict of arrays, ...)
+TS_CANDIDATES = 3  # time signatures tsearch tries per piece
+# the commonest time signatures of the training targets, in order: candidates when a piece's own
+# outputs name fewer than TS_CANDIDATES
+FALLBACK_TS = ("ts_4/4", "ts_3/4", "ts_6/8", "ts_2/4", "ts_12/8", "ts_2/2")
+
+
+class Scored(list):
+    """A decoded window's tokens with the log-probability the model gave the tokens it generated
+    (``logp``, summed) and how many there were (``n``; forced start tokens are not counted). A
+    ``Decode`` may return these instead of plain lists; tsearch ranks candidates by them."""
+    logp: float = 0.0
+    n: int = 0
+
+    def __new__(cls, tokens=(), logp: float = 0.0, n: int = 0):
+        return super().__new__(cls, tokens)
+
+    def __init__(self, tokens=(), logp: float = 0.0, n: int = 0):
+        super().__init__(tokens)
+        self.logp, self.n = float(logp), int(n)
 # (windows, contexts, starts) -> outputs. A context of [] = none. starts[k] = tokens the output of
 # window k must begin with (forced after the context; [] = free); they are part of the returned output.
 Decode = Callable[[list, list, list], list]
@@ -244,3 +276,93 @@ def decode_pieces_meter(pieces: dict[Hashable, list[W]], decode: Decode, *, guar
             if j < first_forced.get(p, len(ws))}
     outs, hist, fbs = decode_pieces(pieces, decode, alone=reuse, starts=forced, keep=keep, progress=progress, **kw)
     return outs, hist, fbs, forced
+
+
+def forced_starts(pieces: dict, first_outs: dict, meters: Callable[[Hashable, int], str | None]) -> dict:
+    """{(piece id, j): start tokens} forcing time signature ``meters(p, j)`` in every window (None:
+    left free), after a ``bar`` token wherever the window's first-pass output opened with one (as
+    meter mode forces its corrections: the bar phase stays the model's own)."""
+    out = {}
+    for p, ws in pieces.items():
+        for j in range(len(ws)):
+            ts = meters(p, j)
+            if ts:
+                out[(p, j)] = (["bar"] if list(first_outs[(p, j)][:1]) == ["bar"] else []) + [ts]
+    return out
+
+
+def ts_candidates(pieces: dict, outputs: Iterable[dict], k: int = TS_CANDIDATES) -> dict:
+    """{piece id: k time signatures}: the most frequent ones among the piece's windows in the given
+    output dicts ({(piece id, j): tokens}; ties: alphabetical), then FALLBACK_TS."""
+    outputs = list(outputs)
+    out = {}
+    for p, ws in pieces.items():
+        c = Counter()
+        for o in outputs:
+            for j in range(len(ws)):
+                m = window_meter(o.get((p, j)) or [])
+                if m:
+                    c[m] += 1
+        ranked = [m for m, _ in sorted(c.items(), key=lambda x: (-x[1], x[0]))][:k]
+        for m in FALLBACK_TS:
+            if len(ranked) >= k:
+                break
+            if m not in ranked:
+                ranked.append(m)
+        out[p] = ranked[:k]
+    return out
+
+
+def decode_pieces_tsearch(pieces: dict[Hashable, list[W]], decode: Decode, *, guard_margin: float,
+                          pitches: Callable[[W], Iterable], first_pass: tuple, alone: dict,
+                          contiguous: Callable[[W, W], bool] | None = None, candidates: int = TS_CANDIDATES,
+                          beat_score: Callable[[W, list], float | None] | None = None,
+                          progress: Callable[[int, int], None] | None = None):
+    """Time-signature search (tsearch / tsearch_beat in the module docstring).
+
+    ``first_pass`` = (outputs, histories, fallbacks) of guarded decoding at this margin and
+    ``alone`` its no-context outputs: they name the candidates (``ts_candidates``) and say which
+    windows open with a bar line. Each candidate rank is one guarded decoding of every piece with
+    that piece's candidate forced in all its windows (``forced_starts``), so the pieces share the
+    batches. ``decode`` should return ``Scored`` outputs (plain lists score 0: the first candidate,
+    the piece's most frequent time signature, wins); ``beat_score(window, tokens)`` (or None) rates
+    one decoded window against the tracked beats (src/beats.py grid_agreement).
+
+    Returns ({"tsearch": result, "tsearch_beat": result}, candidates {piece id: [ts]}), each result
+    = (outputs, histories, fallbacks, chosen {piece id: time signature}).
+    """
+    outs1, _, _ = first_pass
+    cands = ts_candidates(pieces, (outs1, alone), candidates)
+    runs = []
+    for k in range(candidates):
+        starts = forced_starts(pieces, outs1, lambda p, j: cands[p][k])
+        runs.append(decode_pieces(pieces, decode, guard_margin=guard_margin, pitches=pitches,
+                                  contiguous=contiguous, alone={}, starts=starts, progress=progress))
+    lik, beat = {}, {}
+    for p, ws in pieces.items():
+        for k, (outs, _, _) in enumerate(runs):
+            lp = sum(getattr(outs[(p, j)], "logp", 0.0) for j in range(len(ws)))
+            n = sum(getattr(outs[(p, j)], "n", 0) for j in range(len(ws)))
+            lik[(p, k)] = lp / n if n else 0.0
+            if beat_score is not None:
+                vals = [v for v in (beat_score(ws[j], list(outs[(p, j)])) for j in range(len(ws))) if v is not None]
+                beat[(p, k)] = sum(vals) / len(vals) if vals else None
+    chosen = {"tsearch": {}, "tsearch_beat": {}}
+    for p in pieces:
+        ks = range(candidates)
+        chosen["tsearch"][p] = max(ks, key=lambda k: (lik[(p, k)], -k))
+        rated = [k for k in ks if beat.get((p, k)) is not None]
+        if len(rated) == candidates:  # every candidate rated: the beats decide, the model breaks ties
+            chosen["tsearch_beat"][p] = max(ks, key=lambda k: (round(beat[(p, k)], 9), lik[(p, k)], -k))
+        else:
+            chosen["tsearch_beat"][p] = chosen["tsearch"][p]
+    results = {}
+    for rule, pick in chosen.items():
+        outs, hist, fbs = {}, {}, []
+        for p, ws in pieces.items():
+            o, h, f = runs[pick[p]]
+            outs.update({(p, j): o[(p, j)] for j in range(len(ws))})
+            hist[p] = h[p]
+            fbs += [x for x in f if x[0] == p]
+        results[rule] = (outs, hist, fbs, {p: cands[p][k] for p, k in pick.items()})
+    return results, cands

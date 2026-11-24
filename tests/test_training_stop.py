@@ -198,6 +198,29 @@ def test_context_and_aux_training():
         shutil.rmtree(RUNS / name, ignore_errors=True)
 
 
+def test_batches_resume_mid_epoch():
+    """TokenBudgetBatches: an epoch's batches depend on (seed, epoch) only, not on the global torch
+    RNG (a resumed run re-seeds it); skipping k batches gives exactly the rest of the epoch; the
+    epoch length counts whichever budget binds (notes here)."""
+    import numpy as np
+    from scripts.train import TokenBudgetBatches
+    w = torch.ones(500, dtype=torch.double)
+    tok, notes = np.full(500, 20), np.full(500, 100)
+
+    def batches(epoch, global_seed, skip=0):
+        torch.manual_seed(global_seed)
+        b = TokenBudgetBatches(torch.utils.data.WeightedRandomSampler(w, 500, replacement=True), tok, notes,
+                               max_tokens=400, max_notes=600, seed=3)
+        b.set_epoch(epoch)
+        b.skip = skip
+        return list(b), len(b)
+    e1, n = batches(1, 0)
+    assert batches(1, 99)[0] == e1 and batches(2, 0)[0] != e1
+    assert batches(1, 7, skip=10)[0] == e1[10:]
+    assert len(batches(1, 0, skip=0)[0]) == len(e1)          # skip is used once
+    assert abs(n - len(e1)) <= 0.1 * len(e1), (n, len(e1))   # 6 notes-bound per batch, not 20 token-bound
+
+
 def main():
     tests = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     for t in tests:

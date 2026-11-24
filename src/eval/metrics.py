@@ -12,6 +12,10 @@ Metrics (micro-averaged over all notes / events of a split):
   onset_f1       pitch + exact onset position (quarters)                      -> "rhythm F1"
   onset_f1_shift same, after the best constant shift of the predicted window (forgives a window
                  whose start position is misplaced but whose rhythm is right)
+  onset_scaled_f1 the best of onset_f1_shift with the predicted note values as written, all halved
+                 or all doubled (3/8 written for 3/4, 2/4 for 2/2: the same music at another note
+                 value, the "allowed metrical levels" of beat tracking): what is left is rhythm
+                 really wrong, not a notation convention
   duration_acc   exact written duration, over onset-matched non-grace notes
   staff_acc      correct staff, over onset-matched notes
   bar_f1         bar-line positions (quarters from the first bar line)
@@ -72,6 +76,14 @@ def _match(gt, pr, shift=Fraction(0)):
     return out
 
 
+SCALES = (Fraction(1), Fraction(1, 2), Fraction(2))  # onset_scaled_f1: note values as written, halved, doubled
+
+
+def _scaled(notes, s: Fraction):
+    """Notes with every position (quarters from the window's first bar line) times ``s``."""
+    return notes if s == 1 else [(n[0] * s,) + tuple(n[1:]) for n in notes]
+
+
 def _best_shift(gt, pr, max_cands: int = 12):
     """Constant shift (quarters) maximizing exact onset matches; candidates from same-pitch pairs."""
     if not gt or not pr:
@@ -107,7 +119,10 @@ class Accumulator:
         c["note_tp"] += sum((Counter(n[1] for n in g) & Counter(n[1] for n in p)).values())
         m = _match(g, p)
         c["onset_tp"] += len(m)
-        c["onset_tp_shift"] += len(_match(g, p, _best_shift(g, p)))
+        shifted = len(_match(g, p, _best_shift(g, p)))
+        c["onset_tp_shift"] += shifted
+        c["onset_tp_scaled"] += max([shifted] + [len(_match(g, sp, _best_shift(g, sp)))
+                                                 for sp in (_scaled(p, s) for s in SCALES[1:])])
         for gi, pi in m:
             if not g[gi][4]:
                 c["dur_n"] += 1
@@ -143,7 +158,8 @@ class Accumulator:
     def result(self) -> dict:
         c = self.c
         out = {"windows": c["windows"], "gt_notes": c["gt_notes"]}
-        for name, tp in (("note", "note_tp"), ("onset", "onset_tp"), ("onset_shift", "onset_tp_shift")):
+        for name, tp in (("note", "note_tp"), ("onset", "onset_tp"), ("onset_shift", "onset_tp_shift"),
+                         ("onset_scaled", "onset_tp_scaled")):
             out[f"{name}_p"], out[f"{name}_r"], out[f"{name}_f1"] = self._prf(c[tp], c["pr_notes"], c["gt_notes"])
         out["duration_acc"] = c["dur_ok"] / c["dur_n"] if c["dur_n"] else float("nan")
         out["staff_acc"] = c["staff_ok"] / c["staff_n"] if c["staff_n"] else float("nan")
