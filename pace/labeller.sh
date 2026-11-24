@@ -5,7 +5,7 @@
 #   GPUS=gpu-h100 bash pace/labeller.sh
 #
 # The labeller writes the score note by note: every performed note gets its bar, position, written
-# length, staff and flags (or "delete") in one pass, from where a metrical grid puts it (README,
+# length, staff and flags (or "delete") in one pass, from where a metrical grid puts it (docs/experiments.md,
 # "v2: grid first, then label every note"). Phase 1 gives it the true grid, as the beat-snap
 # baselines are given the annotated beats: the number to beat is Baseline 2's onset F1 0.718 (clean)
 # / 0.738 (real), and the seq2seq model's 0.58 with the true previous bars.

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Rebuild data/processed with the 2026-11-22 fixes to how scores become training data (README,
+# Rebuild data/processed with the 2026-11-22 fixes to how scores become training data (docs/experiments.md,
 # "Repo sweep, 2026-11-22"): ties in chords, pickups, one piece in train and val. On the login node
 # from the repo root, after git pull:
 #   bash pace/rebuild.sh                  # one CPU job (up to 8 h); prints its id

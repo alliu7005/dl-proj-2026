@@ -534,7 +534,7 @@ def follow_map(grid: dict, placed: list) -> dict | None:
 
 
 class V2Pipeline(_FrontEnd):
-    """v2 (README "v2: grid first, then label every note"): the piece's beats (Beat This! on the
+    """v2 (docs/experiments.md, "v2: grid first, then label every note"): the piece's beats (Beat This! on the
     audio; a MIDI input rendered to audio first, src/synth.py), the meter model's grid of the whole
     piece over them (src/meter.py: bars, time signatures; its tuned decoder, decode.json) and a key
     signature from the notes, then the note labeller on every window cut as the test sets are,

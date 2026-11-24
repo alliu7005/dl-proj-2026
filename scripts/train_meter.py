@@ -31,7 +31,7 @@ cleanly (last.pt) before a job's time limit, and --resume goes on from there.
 Inputs: per-beat features (src/meter.py beat_features). --note-encoder adds an embedding of every
 note pooled into its beat; off by default since the second round: with PERiScoPe it overfits
 (best validation at 4k steps, then early stopping) where the beat features alone kept improving
-to 26k and won on every test set (README, "Meter model, second round: results").
+to 26k and won on every test set (docs/experiments.md, "Meter model, second round: results").
 """
 from __future__ import annotations
 

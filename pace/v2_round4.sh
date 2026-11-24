@@ -3,7 +3,7 @@
 # git pull; after pace/v2.sh):
 #   bash pace/v2_round4.sh
 #
-# What the third round left (README, "Third round: results"; "Fourth round"):
+# What the third round left (docs/experiments.md, "Third round: results"; "Fourth round"):
 #   * the meter model's note value: 3/8 written for 3/4, 2/4 for 2/2 costs ~0.15 of the 0.21 onset
 #     F1 the meter model loses on PERiScoPe. meter_v3_tp: meter_v3's decoder tuned again with a prior
 #     on the written tempo each step implies (src/meter.py tempo_logprior; weight 0 = as before);

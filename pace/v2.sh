@@ -9,7 +9,7 @@
 # PACE limits how many jobs a user may have submitted at once, so several models share one GPU job
 # (pace/v2_jobs.sh does the work) and the batch comes in two waves of at most 8 jobs each.
 #
-# The second round's results (README, "Meter model, second round: results"): PERiScoPe helps, the
+# The second round's results (docs/experiments.md, "Meter model, second round: results"): PERiScoPe helps, the
 # note encoder overfits, the labeller on a meter grid keeps only ~0.35 onset F1 of its 0.85 with the
 # true grid. This round: longer meter training without the note encoder (3 seeds, one larger
 # model); the oracle grid (every meter head certain of the truth on the same tracked beats), which

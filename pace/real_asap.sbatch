@@ -10,7 +10,7 @@
 #   train_transcribed  only audio Transkun never trained on (MAESTRO test / validation): 85 performances
 #   val_transcribed    same rule: 22 performances
 # Training runs that start afterwards mix train_transcribed in automatically (scripts/train_model.py),
-# and evaluations add the "real" condition: the baselines' real-transcription numbers (README) are on
+# and evaluations add the "real" condition: the baselines' real-transcription numbers (docs/baselines.md) are on
 # these same test windows.
 #SBATCH -J realasap
 # GPU: any of H100 / H200 / RTX Pro Blackwell, whichever frees up first (node features; see

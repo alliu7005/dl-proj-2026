@@ -107,7 +107,7 @@ chained evaluation every model scored below decoding with no context at all, bec
 ever showed it correct context.
 
 Since then, every training run stops early (no validation improvement for 5 epochs, then a 1-epoch
-learning-rate cooldown from the best checkpoint; see the main README), and every evaluation also
+learning-rate cooldown from the best checkpoint; see docs/experiments.md), and every evaluation also
 runs the `guarded` mode, so new `pace/train.sbatch` jobs need no extra flags.
 
 ## 4c. Re-evaluate and test the regularization
@@ -244,7 +244,7 @@ bash pace/tsearch.sh               # the new decoding modes on the best models +
 
 | job / run | what | starts |
 |---|---|---|
-| `eval_<run>@<condition>` | `ts_true`, `tsearch`, `tsearch_beat` (README: time-signature search) for `sf_base_reg_cab` and `s2s_m_cab` on real, clean, PERiScoPe, real_gt_beats: one job per test set (`PER_CONDITION=1 bash pace/reevaluate.sh`, 3 h each) | at once |
+| `eval_<run>@<condition>` | `ts_true`, `tsearch`, `tsearch_beat` (docs/experiments.md: time-signature search) for `sf_base_reg_cab` and `s2s_m_cab` on real, clean, PERiScoPe, real_gt_beats: one job per test set (`PER_CONDITION=1 bash pace/reevaluate.sh`, 3 h each) | at once |
 | `sf_base_reg_cab_s1` | the best recipe, seed 1: how much one run differs from the next | queued after those |
 | `sf_base_reg_cabx` | the best recipe with exact beats in training, the real transcriptions too | " |
 | `sf_base_reg_cab_c128` | the best recipe with 128 / 64 context notes | " |
@@ -315,7 +315,7 @@ and meter-grid results side by side ("Note labeller (v2)").
 
 ## 4j2. Rebuild the data with the 2026-11-22 fixes
 
-The sweep of 2026-11-22 (README, "Repo sweep") fixed three errors in how scores become training
+The sweep of 2026-11-22 (docs/experiments.md, "Repo sweep") fixed three errors in how scores become training
 data: ties in chords, pickups, and one piece in both train and val. They take effect once the data
 is rebuilt:
 
@@ -382,7 +382,7 @@ tar xzf v2_round3.tgz
 
 ## 4l. v2, fourth round: rhythm and the written score
 
-After 4k (README, "Fourth round"):
+After 4k (docs/experiments.md, "Fourth round"):
 
 ```bash
 bash pace/v2_round4.sh                # 8 jobs
@@ -414,6 +414,54 @@ scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_round4.tgz .
 
 ```powershell
 tar xzf v2_round4.tgz
+```
+
+## 4m. The release
+
+After 4l (docs/experiments.md, "Fourth round: results"):
+
+```bash
+bash pace/v2_release.sh               # 3 jobs
+```
+
+| job | what | waits for |
+|---|---|---|
+| `reltests` | the test suites, including the release's (CPU) | - |
+| `relsys` | v2 on whole pieces in the released configuration (`nl_base_gn+meter_v3_tp:tidy,d95`), the same at `d80`, and with the labeller's second seed | `reltests` (cancelled if they fail) |
+| `relfinal` | `models/` (`scripts/export_models.py`: each model without its optimizer state, its training vocabulary, the tempo-prior decoder, the model card, a manifest with sha256 sums; loaded once to check it), every system rated with Beyer & Dai's metrics, the paired comparisons (`outputs/system_eval/paired.md`) | `relsys` (finished or not) |
+
+About 1.5 hours. `relfinal`'s log lists each model's size and ends with `wrote models (... MB)`;
+if it shows a traceback instead, `models/` is left as it was (the export builds in
+`models.partial/` and only replaces `models/` once the release loads).
+
+**Upload** (from PACE: the models are already there). Once, a Hugging Face account and a token
+with write access (huggingface.co, Settings, Access Tokens):
+
+```bash
+cd ~/scratch/dl-proj-2026 && module load anaconda3 && conda activate dl-proj && hf auth login
+```
+
+```bash
+cd ~/scratch/dl-proj-2026 && module load anaconda3 && conda activate dl-proj && python scripts/download_models.py --check && python scripts/upload_models.py --repo <hf-user>/piano-score-models
+```
+
+`--private` keeps the repo to you (and an organization's members). The upload is tagged with the
+release's name (`v2-round4`), so `download_models.py --revision v2-round4` always gets this
+version. Then set `HF_REPO` in `src/release.py`, and anyone gets the models with
+`python scripts/download_models.py`.
+
+To bring the results back (PACE, then Windows):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_release.tgz outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json models/manifest.json slurm-rel*.out 2>/dev/null; ls -la v2_release.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_release.tgz .
+```
+
+```powershell
+tar xzf v2_release.tgz
 ```
 
 ## 5. Compare the runs and bring results back

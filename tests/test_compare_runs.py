@@ -270,16 +270,55 @@ def test_labeller_tables():
         assert orow[1:5] == ["oracle", compare_runs.DASH, compare_runs.DASH, compare_runs.DASH], orow
 
 
+def test_compare_systems():
+    """scripts/compare_systems.py: A - B per performance on the ones both scored; a difference every
+    piece shares is bold (its interval excludes 0), one that flips sign between pieces is not; the
+    ablation's _ab system against its own; pairs with a missing system are left out."""
+    import json
+    import tempfile
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import compare_systems as cs
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        perfs = [f"P{k}/perf{j}.mid" for k in range(6) for j in range(3)]
+
+        def entry(system, cond, perf, err):
+            return {"system": system, "condition": cond, "performance": perf, "muster": {"MeanER": err}}
+        pieces = []
+        for i, p in enumerate(perfs):
+            piece = int(p[1])
+            pieces += [entry("a", "real", p, 10.0 - 1.0 - 0.1 * (i % 3)), entry("b", "real", p, 10.0),
+                       entry("c", "real", p, 10.0 + (2.0 if piece % 2 else -2.0))]
+        pieces.append(entry("a", "real", "P9/only_a.mid", 50.0))          # not in b: not compared
+        pieces.append({"system": "b", "condition": "real", "performance": "P9/failed.mid", "muster": None})
+        (tmp / "r.json").write_text(json.dumps({"pieces": pieces}))
+        ab = [entry("v_ab", "clean", p, 8.0) for p in perfs[:6]] + [entry("v", "clean", p, 10.0) for p in perfs]
+        (tmp / "ab.json").write_text(json.dumps({"pieces": ab}))
+        out = tmp / "paired.md"
+        cs.main(["--results", str(tmp / "r.json"), "--ablation", str(tmp / "ab.json"), "--out", str(out),
+                 "--pair", "a", "b", "--pair", "c", "b", "--pair", "zzz", "b"])
+        res = cs.load(tmp / "r.json")
+        r = cs.paired(res[("a", "real")], res[("b", "real")])
+        assert r["n"] == 18 and r["pieces"] == 6 and r["better"] == 18 and r["hi"] < 0, r
+        assert abs(r["mean"] + 1.1) < 1e-9, r
+        r = cs.paired(res[("c", "real")], res[("b", "real")])
+        assert r["lo"] < 0 < r["hi"] and r["better"] == 9, r
+        md = out.read_text()
+        assert "| a vs b | `a` | `b` | **-1.10** |" in md and "| c vs b | `c` | `b` | +0.00 |" in md, md
+        assert "zzz" not in md and "## beat ablation" in md and "**-2.00**" in md and "6/6" in md, md
+
+
 def test_login_node_python():
     """Runs with the login node's system python3: standard library only, Python 3.6 syntax."""
-    src = (ROOT / "scripts" / "compare_runs.py").read_text(encoding="utf-8")
-    ast.parse(src, feature_version=(3, 6))
-    stdlib = set(sys.stdlib_module_names)
-    for node in ast.walk(ast.parse(src)):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
-            for n in names:
-                assert n.split(".")[0] in stdlib, n
+    for script in ("compare_runs.py", "compare_systems.py"):
+        src = (ROOT / "scripts" / script).read_text(encoding="utf-8")
+        ast.parse(src, feature_version=(3, 6))
+        stdlib = set(sys.stdlib_module_names)
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+                for n in names:
+                    assert n.split(".")[0] in stdlib, (script, n)
 
 
 def main():

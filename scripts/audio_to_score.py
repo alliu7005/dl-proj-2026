@@ -18,15 +18,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.pipeline import GUARD_MARGIN, MODES, ScorePipeline, V2Pipeline  # noqa: E402
+from src.release import DELETE_ABOVE, TIDY, default_path  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("input", help="audio file (wav, mp3, flac, ...) or .mid")
     ap.add_argument("--v2", action="store_true", help="v2: meter model + note labeller (else the seq2seq model)")
-    ap.add_argument("--labeller", default="outputs/runs/nl_base_gn/best.pt", help="v2: the note labeller")
-    ap.add_argument("--meter", default="outputs/runs/meter_v3/best.pt", help="v2: the meter model")
-    ap.add_argument("--ckpt", default="outputs/runs/sf_base_reg_cab/best.pt", help="the seq2seq model")
+    ap.add_argument("--labeller", default=default_path("v2_labeller"),
+                    help="v2: the note labeller (default: models/, else outputs/runs/)")
+    ap.add_argument("--meter", default=default_path("v2_meter"), help="v2: the meter model")
+    ap.add_argument("--ckpt", default=default_path("seq2seq"), help="the seq2seq model")
     ap.add_argument("--vocab", default=None, help="default: next to the checkpoint, else data/processed")
     ap.add_argument("--out", default=None, help="default: outputs/demo/<input name>")
     ap.add_argument("--mode", default=MODES[0], choices=list(MODES),
@@ -34,14 +36,16 @@ def main():
                          "as context, degenerate windows redone without it; chained: previous output as context, "
                          "unguarded; none: no context")
     ap.add_argument("--guard-margin", type=float, default=GUARD_MARGIN)
-    ap.add_argument("--delete-above", type=float, default=0.95,
+    ap.add_argument("--delete-above", type=float, default=DELETE_ABOVE,
                     help="v2: leave a note out only when the labeller's p(delete) is above this (0.5: as "
-                         "evaluated, 1: keep every note; default 0.95, as the demo)")
+                         f"trained, 1: keep every note; default {DELETE_ABOVE}, as the demo)")
+    ap.add_argument("--no-tidy", action="store_true",
+                    help="v2: keep written lengths that run just past the next onset (default: trim them)")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
     if args.v2:
-        pipe = V2Pipeline(args.labeller, args.meter, args.vocab, args.device)
+        pipe = V2Pipeline(args.labeller, args.meter, args.vocab, args.device, tidy=TIDY and not args.no_tidy)
     else:
         pipe = ScorePipeline(args.ckpt, args.vocab, args.device)
     print(f"model: {pipe.info}", flush=True)

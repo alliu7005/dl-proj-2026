@@ -4,6 +4,9 @@
     python demo/app.py --device cpu --port 8000
     python demo/app.py --labeller outputs/runs/nl_base_gn/best.pt --meter outputs/runs/meter_v3/best.pt                        --ckpt outputs/runs/sf_base_reg_cab/best.pt
 
+The models: models/ (python scripts/download_models.py), else the training runs in outputs/runs/
+(src/release.py default_path).
+
 Two systems, chosen per upload on the page (each loaded if its checkpoints exist):
   v2       (default) the meter model's grid of the whole piece from Beat This!'s beats, then the
            note labeller on every note (src/pipeline.py V2Pipeline; --labeller, --meter)
@@ -34,6 +37,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 
 from src.pipeline import AUDIO_EXT, MIDI_EXT, MODES, ScorePipeline, V2Pipeline  # noqa: E402
+from src.release import TIDY, default_path  # noqa: E402
 
 MAX_MB = 100
 STAGES = {"transcribe": (0.0, 0.45), "beats": (0.45, 0.5), "grid": (0.5, 0.55), "score": (0.55, 0.95),
@@ -160,9 +164,11 @@ def create_app(pipes: dict, out_root: Path, default: str | None = None) -> FastA
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ckpt", default="outputs/runs/sf_base_reg_cab/best.pt", help="the seq2seq model")
-    ap.add_argument("--labeller", default="outputs/runs/nl_base_gn/best.pt", help="v2: the note labeller")
-    ap.add_argument("--meter", default="outputs/runs/meter_v3/best.pt", help="v2: the meter model")
+    ap.add_argument("--ckpt", default=default_path("seq2seq"), help="the seq2seq model")
+    ap.add_argument("--labeller", default=default_path("v2_labeller"), help="v2: the note labeller")
+    ap.add_argument("--meter", default=default_path("v2_meter"), help="v2: the meter model")
+    ap.add_argument("--no-tidy", action="store_true",
+                    help="v2: keep written lengths that run just past the next onset (default: trim them)")
     ap.add_argument("--system", default="v2", choices=list(SYSTEMS), help="the page's default system")
     ap.add_argument("--vocab", default=None, help="default: next to the checkpoint, else data/processed")
     ap.add_argument("--device", default="auto")
@@ -175,7 +181,7 @@ def main():
     pipes = {}
     if Path(args.labeller).exists() and Path(args.meter).exists():
         print(f"loading v2: {args.labeller} + {args.meter} ...", flush=True)
-        pipes["v2"] = V2Pipeline(args.labeller, args.meter, args.vocab, args.device)
+        pipes["v2"] = V2Pipeline(args.labeller, args.meter, args.vocab, args.device, tidy=TIDY and not args.no_tidy)
     else:
         print(f"no v2 ({args.labeller} / {args.meter} missing)", flush=True)
     if Path(args.ckpt).exists():
