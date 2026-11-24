@@ -1103,7 +1103,7 @@ piece-level readout of the meter model picks the note-value level better than th
 The right level depends on the piece's own music, which the model has not learned from 1,100
 works. The release keeps `meter_v3` with the tempo-prior decoder, without the level choice.
 `choose_level`, the tempo head and `--level` stay in the code (off by default) for a meter model
-trained on more, and more varied, data (docs/handoff.md, options 8 and 9).
+trained on more, and more varied, data (docs/handoff.md, options 7 and 10: Gangqinpu first).
 
 ### Sixth round: more varied meter data, beat times from the notes, beats for MIDI input
 
