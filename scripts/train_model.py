@@ -63,7 +63,7 @@ from src.eval.metrics import Accumulator  # noqa: E402
 from src.metrical import aux_counts, aux_loss, aux_scores  # noqa: E402
 from src.model import token_loss  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
-from src.preprocessing.vocab import EOS  # noqa: E402
+from src.preprocessing.vocab import EOS, pin_vocab  # noqa: E402
 from src.scoreformer import PRESETS, build_model  # noqa: E402
 
 D = Path("data/processed")
@@ -229,6 +229,7 @@ def main():
     run = Path("outputs/runs") / args.name
     run.mkdir(parents=True, exist_ok=True)
     vocab_path = str(D / "vocab.json")
+    pin_vocab(vocab_path, run)  # the run keeps the vocabulary it trains with (demo, pipelines)
 
     # ---- data (same recipe as scripts/train.py)
     real_ok = has_split("train_transcribed")

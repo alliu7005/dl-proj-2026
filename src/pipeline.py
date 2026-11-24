@@ -409,6 +409,23 @@ class ScorePipeline(_FrontEnd):
 # v2: the metrical grid of the whole piece first, then every note labelled against it
 # ---------------------------------------------------------------------------------------------
 
+# A third or fourth staff is written only when at least this share of the piece's notes is on it.
+# In the target scores such staves hold 28-100% of a piece's notes, but for one piece a single short
+# passage holds 0.6%. Below this share they are stray predictions (one note of 1,221 in a demo piece
+# opened two staves for all 73 bars), and those notes go on their likeliest of the staves kept.
+MIN_EXTRA_STAFF = 0.02
+
+
+def piece_staves(staffs: list[int]) -> int:
+    """How many staves a piece's score gets from its notes' predicted staves: always the first two,
+    and a higher one (and those below it) when it holds at least MIN_EXTRA_STAFF of the notes."""
+    if not staffs:
+        return 2
+    count = np.bincount(np.asarray(staffs, np.int64))
+    kept = [s for s in range(2, len(count)) if count[s] >= MIN_EXTRA_STAFF * len(staffs)]
+    return max([2] + [s + 1 for s in kept])
+
+
 class V2Pipeline(_FrontEnd):
     """v2 (README "v2: grid first, then label every note"): the piece's beats (Beat This! on the
     audio; a MIDI input rendered to audio first, src/synth.py), the meter model's grid of the whole
@@ -445,7 +462,9 @@ class V2Pipeline(_FrontEnd):
         self.space = LabelSpace(self.vocab.itos)
         if (self.space.n_sub, self.space.n_dur) != (self.cfg.n_sub, self.cfg.n_dur):
             raise ValueError(f"{vocab_path} gives {self.space.n_sub} sub-positions / {self.space.n_dur} lengths but "
-                             f"the labeller has {self.cfg.n_sub} / {self.cfg.n_dur}: use the vocab.json of its data")
+                             f"the labeller has {self.cfg.n_sub} / {self.cfg.n_dur}: put the vocab.json of the data it "
+                             f"trained on next to it ({Path(labeller_ckpt).parent / 'vocab.json'}; on PACE: "
+                             "data/processed/vocab.json), or give --vocab")
         self.scale = (np.array([1, 2, 3, 4]), np.asarray(self.cfg.feat_mean, np.float32),
                       np.asarray(self.cfg.feat_std, np.float32))
         self.window_notes = window_notes
@@ -510,6 +529,11 @@ class V2Pipeline(_FrontEnd):
         items, frames = self.items(windows, grid)
         coll = TruncatingCollate(self.cfg.max_notes, 10 ** 9)
         placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False)
+        staves = piece_staves([p.staff for pl in placed for p in pl])
+        folded = sum(p.staff >= staves for pl in placed for p in pl)
+        if folded:  # a stray third / fourth staff: those notes on their likeliest of the staves kept
+            placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
+                                    staves=staves)
         notes_out = []
         for win, pl in zip(frames, placed):
             for p in pl:
@@ -531,7 +555,8 @@ class V2Pipeline(_FrontEnd):
         tokens = render(piece, notes_out)
         own = int(sum(int((it["roles"] == 0).sum()) for it in items))
         return tokens, {"windows": len(windows), "notes_kept": len(notes_out), "notes_deleted": own - len(notes_out),
-                        "bar_ts": [ts for ts, _ in bars]}
+                        "bar_ts": [ts for ts, _ in bars], "staves": max([2] + [p.staff + 1 for p in notes_out]),
+                        "staff_folded": int(folded)}
 
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, progress: Progress = _noop, beats: tuple | None = None,

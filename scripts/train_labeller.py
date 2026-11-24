@@ -44,6 +44,7 @@ from src.eval.metrics import Accumulator  # noqa: E402
 from src.labeller import PRESETS, build_labeller, head_counts, labeller_loss, predict_windows  # noqa: E402
 from src.notelabels import GridNoise, score_notes  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
+from src.preprocessing.vocab import pin_vocab  # noqa: E402
 
 D = Path("data/processed")
 SHOW = ("onset_f1", "onset_shift_f1", "duration_acc", "staff_acc", "bar_f1", "note_f1")
@@ -148,6 +149,7 @@ def main(argv=None):
     run = Path(args.runs_dir) / args.name
     run.mkdir(parents=True, exist_ok=True)
     vocab_path = str(data / "vocab.json")
+    pin_vocab(vocab_path, run)  # the run keeps the vocabulary it trains with (demo, pipelines)
     ctx = {"context_before": args.context_before, "context_after": args.context_after}
 
     # ---- data

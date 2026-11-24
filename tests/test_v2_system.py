@@ -66,10 +66,37 @@ def test_onset_scaled():
     assert a.result()["onset_scaled_f1"] < 0.5
 
 
+def test_piece_staves():
+    """A third / fourth staff only when enough of the piece is on it; otherwise each of its notes
+    goes on its likeliest of the first two (the labeller's own scores, not a pitch rule)."""
+    from src.labeller import N_POS, N_STAFF, placed_notes
+    from src.notelabels import N_FLAGS, LabelSpace
+    from src.pipeline import MIN_EXTRA_STAFF, piece_staves
+    from src.preprocessing.vocab import Vocab
+    assert piece_staves([]) == 2 and piece_staves([0, 1, 1]) == 2
+    assert piece_staves([0] * 610 + [1] * 610 + [3]) == 2            # the demo piece: one stray note
+    assert piece_staves([0] * 70 + [1] * 70 + [2] * 60) == 3          # a real third staff
+    assert piece_staves([0] * 50 + [1] * 45 + [3] * 5) == 4           # staff 4 used: 3 kept below it
+    n = 1000
+    assert piece_staves([0] * (n - 20) + [2] * 20) == 3 and MIN_EXTRA_STAFF == 0.02
+    assert piece_staves([0] * (n - 19) + [2] * 19) == 2
+    space = LabelSpace(Vocab.load(str(V)).itos)
+    staff = torch.tensor([[[0.0, 1.0, 0.0, 5.0], [2.0, 0.5, 9.0, 0.0]]])   # 2 notes: argmax 3 and 2
+    out = {"keep": torch.ones(1, 2), "delta": torch.zeros(1, 2, 3), "pos": torch.zeros(1, 2, N_POS),
+           "sub": torch.zeros(1, 2, space.n_sub), "dur": torch.zeros(1, 2, space.n_dur), "staff": staff,
+           "flags": torch.full((1, 2, N_FLAGS), -1.0)}
+    args = (out, 0, np.array([60.0, 50.0]), np.array([1, 1]), np.ones(2, bool), space)
+    assert [p.staff for p in placed_notes(*args)] == [3, 2] and N_STAFF == 4
+    assert [p.staff for p in placed_notes(*args, staves=2)] == [1, 0]   # next best of staves 1 and 2
+    assert [p.staff for p in placed_notes(*args, staves=3)] == [1, 2]
+
+
 def test_rescore():
     """scripts/rescore.py adds the new metric to a run's stored results from its saved predictions,
     the same value an evaluation computes now; a mode whose re-scored onset F1 differs from the
-    stored one (other windows, other targets) is left alone."""
+    stored one (other windows) is left alone. A mode scored on the targets before the rebuild (no
+    stamp) that differs by what the rebuild explains gets every metric re-scored and the stamp; the
+    same gap on a stamped mode is refused."""
     if not (D / "test" / "index.npy").exists():
         print("  (skipped: no data/processed/test)")
         return
@@ -80,12 +107,13 @@ def test_rescore():
     with tempfile.TemporaryDirectory() as t:
         run = Path(t) / "r"
         run.mkdir()
-        rows, acc = [], {"a": Accumulator(), "b": Accumulator()}
+        modes = ("a", "b", "c", "d")
+        rows, acc = [], {k: Accumulator() for k in modes}
         for i in range(6):
             m = store.meta[i]
             gt = vocab.decode(store.get(i)[2].tolist())
             pred = gt[: len(gt) // 2] if i % 2 else gt
-            for mode in ("a", "b"):
+            for mode in modes:
                 rows.append({"performance": m["performance"], "win": m["win"], "mode": mode, "pred": pred})
                 acc[mode].add(gt, pred)
         (run / "pred_pieces_best_clean.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
@@ -93,11 +121,20 @@ def test_rescore():
         stored = {k: {kk: vv for kk, vv in v.items() if not kk.startswith("onset_scaled")} for k, v in full.items()}
         stored["b"]["onset_f1"] += 0.01  # as if evaluated on other windows
         stored["a"]["guard_margin"] = 0.5  # keys the metric does not make are kept
+        for k in ("c", "d"):   # as if scored on the targets before the rebuild
+            stored[k]["onset_f1"] -= 0.0003
+            stored[k]["bar_f1"] -= 0.02
+            stored[k]["fallback_rate"] = 0.4
+        stored["d"]["targets"] = 2   # ... but stamped as the current targets: a mismatch
         (run / "eval_pieces_best.json").write_text(json.dumps({"clean": stored}))
         rescore(["--runs", "r", "--runs-dir", t, "--data", str(D)])
         out = json.loads((run / "eval_pieces_best.json").read_text())["clean"]
         assert out["a"]["onset_scaled_f1"] == full["a"]["onset_scaled_f1"] and out["a"]["guard_margin"] == 0.5
         assert "onset_scaled_f1" not in out["b"]
+        c = out["c"]
+        assert c["targets"] == 2 and c["fallback_rate"] == 0.4, c
+        assert all(c[k] == v for k, v in full["c"].items() if v == v), [k for k, v in full["c"].items() if c[k] != v]
+        assert "onset_scaled_f1" not in out["d"] and out["d"]["bar_f1"] == stored["d"]["bar_f1"]
 
 
 def test_export_last_resort():
@@ -486,6 +523,59 @@ def test_rebuild_batch():
         assert "--dependency=afterok:555" in tests[3] and "--kill-on-invalid-dep=yes" in tests[3], tests[3]
 
 
+def test_finish_batch():
+    """pace/v2_finish.sh: the retraining in three chained jobs (each resuming the one before), the
+    old seq2seq systems in two jobs (the second also the ablation), the retrained model's whole-piece
+    scores after the last training job, the scoring (main table and ablation) after everything; at
+    most 8 jobs; refused without the system comparison set up."""
+    if shutil.which("bash") is None:
+        print("  (skipped: no bash)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        (tmp / "pace").mkdir()
+        shutil.copy(ROOT / "pace" / "v2_finish.sh", tmp / "pace")
+        _stub_bin(tmp)
+        bd = tmp / "bd"
+        bd.mkdir()
+
+        def run():
+            for f in (tmp / "jobs.txt", tmp / "jobs.txt.n"):
+                if f.exists():
+                    f.unlink()
+            r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/v2_finish.sh'], cwd=tmp,
+                               env=batch_env(SUBMITS=str(tmp / "jobs.txt"), BD=str(bd)), capture_output=True, text=True)
+            rows = [ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()] if (tmp / "jobs.txt").exists() else []
+            return r, rows
+        r, rows = run()
+        assert r.returncode == 1 and not rows and "bd_setup.sh" in r.stdout
+        (tmp / "outputs" / "system_eval").mkdir(parents=True)
+        (tmp / "outputs" / "system_eval" / "manifest.json").write_text("[]")
+        (bd / "MIDI2ScoreTF.ckpt").write_text("x")
+        r, rows = run()
+        assert r.returncode == 0 and len(rows) == 7, (r.stdout + r.stderr, len(rows))
+        by = {}
+        for row in rows:
+            by.setdefault(row[3].split("-J ")[1].split()[0], []).append(row)
+        seq = by["seq_sf_base_reg_cab_c128_r"]
+        assert len(seq) == 3 and "--dependency" not in seq[0][3]
+        assert f"--dependency=afterany:{seq[0][0]}" in seq[1][3] and f"--dependency=afterany:{seq[1][0]}" in seq[2][3]
+        assert all("v2_jobs.sh seq2seq sf_base_reg_cab_c128_r --size base --dropout 0.2" in x[3]
+                   and "--context-before 128 --context-after 64 --aux-metrical --beats" in x[3] for x in seq)
+        a, b = by["sysold_a"][0], by["sysold_b"][0]
+        assert "systems sf_base_reg_cab:meter sf_base_reg_cab_s1:meter" in a[3]
+        assert "systems sf_base_reg_cab_c128:meter" in b[3] and "v2_jobs.sh ablation nl_base_gn+meter_v3" in b[3]
+        new = by["sysnew"][0]
+        assert f"--dependency=afterany:{seq[2][0]}" in new[3]
+        assert "systems sf_base_reg_cab_c128_r:meter:sb sf_base_reg_cab_c128_r:meter" in new[3]
+        fin = by["v2final"][0]
+        deps = set(fin[3].split("--dependency=afterany:")[1].split()[0].split(":"))
+        assert deps == {x[0] for x in seq} | {a[0], b[0], new[0]}, deps
+        assert fin[3].index("rescore.py --workers 16") < fin[3].index("compare_runs.py") < fin[3].index("beyer_dai.py")
+        assert fin[3].count("beyer_dai.py score") == 2
+        assert "--conditions clean --out outputs/system_eval_ablation" in fin[3]
+
+
 def test_v2_jobs():
     """pace/v2_jobs.sh with a stand-in python: meter models trained side by side with their own
     options and logs, then each finished one tuned and evaluated (once: not again on the next job),
@@ -507,7 +597,7 @@ echo "$*" >> "$CALLS"
 name=""; prev=""
 for a in "$@"; do [ "$prev" = "--name" ] || [ "$prev" = "--run" ] && name=$a; prev=$a; done
 case "$1" in
-  scripts/train_meter.py|scripts/train_labeller.py)
+  scripts/train_meter.py|scripts/train_labeller.py|scripts/train_model.py)
     mkdir -p "outputs/runs/$name"; touch "outputs/runs/$name/last.pt"
     case " $DONE " in *" $name "*) echo '{"phase": "done"}' > "outputs/runs/$name/status.json"
       touch -d '2 days ago' "outputs/runs/$name/best.pt" ;; *) echo '{"phase": "train"}' > "outputs/runs/$name/status.json" ;; esac ;;
@@ -547,6 +637,9 @@ exit 0
         assert calls[0].startswith("scripts/train_labeller.py --name nl_base_gn --size base --grid-noise 0.8")
         assert calls[1] == "scripts/eval_labeller.py --run nl_base_gn --normal-priority"
         assert [c.split("--grid meter:")[1].split()[0] for c in calls[2:]][:2] == ["meter_oracle", "meter_v2_nonote"]
+        for r in ("sf_base_reg_cab", "s2s_m_cab"):   # seq2seq runs from before status.json: finished
+            (tmp / "outputs" / "runs" / r).mkdir(parents=True)
+            (tmp / "outputs" / "runs" / r / "best.pt").write_text("x")
         code, calls, out = run("systems nl_base_gn+meter_v3 sf_base_reg_cab:meter:sb s2s_m_cab:meter")
         assert calls == ["scripts/system_scores.py --v2 nl_base_gn+meter_v3",
                          "scripts/system_scores.py --run sf_base_reg_cab --mode meter --midi-beats synth",
@@ -557,8 +650,27 @@ exit 0
         assert len(trains) == 1 and "--name nl_base_gn_s1" in trains[0] and "--seed 1" in trains[0] and code == 0
         assert [c for c in calls if c.startswith("scripts/eval_labeller.py")] == [
             "scripts/eval_labeller.py --run nl_base_gn --normal-priority", "scripts/eval_labeller.py --run nl_base_gn_s1 --normal-priority"]
-        code, calls, out = run("systems nl_base_gn+meter_v3_s1")   # meter_v3_s1 never trained here: refused
+        code, calls, out = run("systems nl_base_gn+meter_v3_s1 never_trained:meter")   # not trained here: refused
+        assert calls == [] and code == 1 and out.count("not finished") == 2, (calls, out)
+        code, calls, out = run("systems nl_base_gn+meter_v3_s1")
         assert calls == [] and code == 1 and "not finished" in out, (calls, out)
+        # a seq2seq model trained (resuming) then evaluated; not finished: the job fails, no evaluation
+        code, calls, out = run("seq2seq sq --size base --beats")
+        assert calls == ["scripts/train_model.py --name sq --normal-priority --workers 7 --size base --beats"] and code == 1
+        code, calls, out = run("seq2seq sq --size base --beats", done="sq")
+        assert calls[0] == "scripts/train_model.py --name sq --normal-priority --workers 7 --resume --size base --beats"
+        assert calls[1].startswith("scripts/evaluate_pieces.py --run sq --normal-priority --musicxml 5 --only-missing")
+        assert "--modes oracle,none,guarded,meter --conditions clean,synthetic,real,periscope" in calls[1] and code == 0
+        code, calls, out = run("seq2seq sq --size base --beats")   # trained already: only the evaluation
+        assert [c.split()[0] for c in calls] == ["scripts/evaluate_pieces.py"], calls
+        # the ablation: real-audio beats on clean MIDI, next to the rendered-MIDI version
+        (tmp / "outputs" / "system_eval" / "v2_nl_base_gn_meter_v3").mkdir(parents=True)
+        (tmp / "outputs" / "system_eval" / "v2_nl_base_gn_meter_v3" / "summary.json").write_text("{}")
+        (tmp / "outputs" / "system_eval_ablation").mkdir(parents=True)
+        code, calls, out = run("ablation nl_base_gn+meter_v3")
+        assert calls == ["scripts/system_scores.py --v2 nl_base_gn+meter_v3 --conditions clean --clean-beats audio "
+                         "--out outputs/system_eval_ablation"] and code == 0, (calls, out)
+        assert (tmp / "outputs" / "system_eval_ablation" / "v2_nl_base_gn_meter_v3" / "summary.json").exists()
         (tmp / "outputs" / "runs" / "meter_v2_nonote").mkdir(parents=True)
         (tmp / "outputs" / "runs" / "meter_v2_nonote" / "best.pt").write_text("x")
         code, calls, out = run("grids")

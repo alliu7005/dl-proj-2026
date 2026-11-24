@@ -12,6 +12,13 @@ system gets them without decoding again. A mode is only updated when the re-scor
 equals the stored one (the same windows, the same targets): otherwise it is reported and left
 alone. real_unseen_audio (the real windows whose audio Transkun did not train on) is re-scored
 with real.
+
+A mode scored before the data rebuild of 2026-11-22 (no ``targets`` stamp, src/eval/plan.py
+TARGETS_VERSION) was scored against the old targets, so its onset F1 differs a little from the
+re-scored one (at most 0.0004 over every seq2seq result on PACE). Such a mode gets every window
+metric re-scored against the current targets and the stamp, as long as no window is missing and the
+onset F1 moved by at most RETARGET_TOL (more than that is not the rebuild: other windows or another
+model's predictions). What the decoding recorded (fallback, ts fixed, the margin) is kept.
 """
 from __future__ import annotations
 
@@ -25,12 +32,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.evaluate_pieces import merge_results  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
-from src.eval.plan import SPLITS  # noqa: E402
+from src.eval.plan import SPLITS, TARGETS_VERSION  # noqa: E402
 from src.preprocessing.store import SegmentStore  # noqa: E402
 from src.preprocessing.vocab import Vocab  # noqa: E402
 
 NEW_KEYS = ("onset_scaled_p", "onset_scaled_r", "onset_scaled_f1")
 TOL = 1e-9
+RETARGET_TOL = 0.005  # a result on the old targets: the largest onset F1 change the rebuild can explain
 
 
 def rescore_file(pred_file: Path, store: SegmentStore, vocab: Vocab, unseen: bool) -> dict:
@@ -114,15 +122,21 @@ def main(argv=None):
             old = stored[cond].get(mode)
             if not isinstance(old, dict):
                 continue
-            if missing or abs(res["onset_f1"] - old.get("onset_f1", float("nan"))) > TOL:
+            retarget = old.get("targets", 1) < TARGETS_VERSION
+            gap = abs(res["onset_f1"] - old.get("onset_f1", float("nan")))
+            if missing or not gap <= (RETARGET_TOL if retarget else TOL):
                 report.append(f"{mode}: NOT updated (onset F1 {res['onset_f1']:.4f} re-scored vs "
                               f"{old.get('onset_f1', float('nan')):.4f} stored, {missing} windows not in {split.name})")
                 continue
-            new.setdefault(cond, {})[mode] = {**old, **{k: res[k] for k in keys}}
-            if unseen is not None and isinstance(stored.get("real_unseen_audio", {}).get(mode), dict):
-                new.setdefault("real_unseen_audio", {})[mode] = {**stored["real_unseen_audio"][mode],
-                                                                 **{k: unseen[k] for k in keys}}
-            report.append(f"{mode} {res.get('onset_scaled_f1', float('nan')):.3f}")
+            take = list(res) if retarget else keys   # old targets: every window metric, against the current ones
+            stamp = {"targets": TARGETS_VERSION} if retarget else {}
+            new.setdefault(cond, {})[mode] = {**old, **{k: res[k] for k in take}, **stamp}
+            old_u = stored.get("real_unseen_audio", {}).get(mode)
+            if unseen is not None and isinstance(old_u, dict):
+                new.setdefault("real_unseen_audio", {})[mode] = {**old_u, **{k: unseen[k] for k in take}, **stamp}
+            report.append(f"{mode} {res.get('onset_scaled_f1', float('nan')):.3f}"
+                          + (f" (re-scored on the current targets: onset F1 {old['onset_f1']:.4f} -> "
+                             f"{res['onset_f1']:.4f})" if retarget else ""))
         if new:
             merge_results(runs_dir / run / f"eval_pieces_{args.ckpt}.json", new)
         print(f"{run}/{cond}: " + ", ".join(report), flush=True)

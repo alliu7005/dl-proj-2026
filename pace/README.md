@@ -368,6 +368,41 @@ scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_round3.tgz .
 tar xzf v2_round3.tgz
 ```
 
+## 4l. The rest of the third round
+
+After 4k (README, "Third round: results"):
+
+```bash
+bash pace/v2_finish.sh                # 7 jobs
+RETRAIN="" bash pace/v2_finish.sh     # without the seq2seq retraining
+```
+
+| job | what | waits for |
+|---|---|---|
+| `seq_sf_base_reg_cab_c128_r` (x3) | the best seq2seq recipe (`RETRAIN_ARGS`: the flags `sf_base_reg_cab_c128` trained with) on the rebuilt data, as `sf_base_reg_cab_c128_r`. Each job resumes from `last.pt`; once training is done, the evaluation (`SEQ_MODES` on `SEQ_CONDITIONS`, only what is missing). A job fails while training is not done, and the next one continues it | the job before (finished or not) |
+| `sysold_a`, `sysold_b` | `OLD_SYSTEMS` on whole pieces with the current export (the three seq2seq systems whose earlier export hit the time limit); `sysold_b` then runs the beat ablation: `ABLATION` on the clean test MIDI with the beats of the performances' real recordings (`system_scores.py --clean-beats audio`, 24 performances) into `outputs/system_eval_ablation`, next to a link to the same system's rendered-MIDI version | - |
+| `sysnew` | the retrained model on whole pieces, with (`:sb`) and without the rendered-MIDI beats on clean MIDI (refused if training is not finished) | the last `seq_` job (finished or not) |
+| `v2final` | `scripts/rescore.py` (onset-scale F1, and the results on the old targets re-scored on the current ones), `outputs/compare`, every system rated with Beyer & Dai's metrics (`outputs/system_eval/results.md`), then the ablation on its shared pieces (`outputs/system_eval_ablation/results.md`) | all of the above (finished or not) |
+
+The retraining takes up to 24 h, then up to 8 h for `sysnew` and `v2final`. A run still not trained
+after its three jobs is continued with `sbatch --gres=gpu:1 -c 8 --mem=48G -t 8:00:00 --wrap="source
+pace/common.sh; bash pace/v2_jobs.sh seq2seq sf_base_reg_cab_c128_r <RETRAIN_ARGS>"` (the same
+flags), then `bash pace/v2_jobs.sh systems ...` as in `sysnew`.
+
+To bring everything back (PACE, then Windows):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_finish.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/*/summary.json outputs/system_eval/*/*/*.error.txt outputs/system_eval/*/*/*.tokens.txt outputs/system_eval_ablation/results.md outputs/system_eval_ablation/results.json outputs/system_eval_ablation/*/summary.json outputs/runs/*/eval_pieces_*.json outputs/runs/*/status.json outputs/runs/*/config.json outputs/runs/sf_base_reg_cab_c128_r/log.csv slurm-v2final-*.out 2>/dev/null; ls -la v2_finish.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_finish.tgz .
+```
+
+```powershell
+tar xzf v2_finish.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

@@ -18,7 +18,13 @@
 #   systems <spec>...      whole pieces (scripts/system_scores.py): <labeller>+<meter> = v2 (only
 #                          with both models finished and the meter model evaluated),
 #                          <run>:<mode> = seq2seq, <run>:<mode>:sb = seq2seq with the rendered-MIDI
-#                          beats on clean MIDI
+#                          beats on clean MIDI (only a finished seq2seq run)
+#   seq2seq <run> <args>   train a seq2seq model (scripts/train_model.py <args>, resuming from
+#                          last.pt), then evaluate it (SEQ_MODES on SEQ_CONDITIONS, only what it
+#                          lacks). Fails unless trained and evaluated: the next job goes on.
+#   ablation <spec>        v2 <labeller>+<meter> on clean MIDI with the beats Beat This! tracked in the
+#                          performances' real recordings, next to the same system's rendered-MIDI
+#                          beats, in outputs/system_eval_ablation (scored on the shared pieces)
 #
 # Run options come from pace/v2.sh (METERS, GRIDS_OLD, NEW_NLS and the flags below).
 set -uo pipefail
@@ -27,6 +33,8 @@ NEW_NLS=${NEW_NLS-"nl_base_gn nl_base_gn_s1"}
 GRIDS_OLD=${GRIDS_OLD-"meter_v2_nonote"}
 GRIDS_REEVAL=${GRIDS_REEVAL-"meter_v2_nonote meter_v2 meter_v2_s1 meter_v2_asap meter_base"}
 MAX_HOURS=${MAX_HOURS:-7.5}
+SEQ_MODES=${SEQ_MODES:-"oracle,none,guarded,meter"}
+SEQ_CONDITIONS=${SEQ_CONDITIONS:-"clean,synthetic,real,periscope"}
 JOB=${SLURM_JOB_ID:-local}
 
 meter_flags() {
@@ -57,7 +65,14 @@ train_labeller() {  # name -> trains (or resumes) it; logs to slurm-labeller_<na
     > "slurm-labeller_$nl-$JOB.log" 2>&1
 }
 
-task=${1:?task: meters, labellers, grids, evals, systems}
+seq_ready() {  # a seq2seq run to export: its best.pt, and finished (runs older than status.json are)
+  if [ ! -f "outputs/runs/$1/best.pt" ] || { [ -f "outputs/runs/$1/status.json" ] && ! done_run "$1"; }; then
+    echo "$1: skipped, not finished (outputs/runs/$1)"
+    return 1
+  fi
+}
+
+task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation}
 shift
 case "$task" in
   meters)
@@ -133,12 +148,37 @@ case "$task" in
                echo "$spec: skipped, $nl or $m not finished (or $m not evaluated)"; ok=1; continue
              fi
              python scripts/system_scores.py --v2 "$spec" || ok=1 ;;
-        *:*:sb) r=${spec%%:*}; rest=${spec#*:}; python scripts/system_scores.py --run "$r" --mode "${rest%%:*}" \
-                  --midi-beats synth || ok=1 ;;
-        *:*) python scripts/system_scores.py --run "${spec%%:*}" --mode "${spec##*:}" || ok=1 ;;
+        *:*:sb) r=${spec%%:*}; rest=${spec#*:}
+                seq_ready "$r" || { ok=1; continue; }
+                python scripts/system_scores.py --run "$r" --mode "${rest%%:*}" --midi-beats synth || ok=1 ;;
+        *:*) seq_ready "${spec%%:*}" || { ok=1; continue; }
+             python scripts/system_scores.py --run "${spec%%:*}" --mode "${spec##*:}" || ok=1 ;;
         *) echo "unknown system $spec"; ok=1 ;;
       esac
     done
     exit $ok ;;
-  *) echo "unknown task $task (meters, labellers, grids, evals, systems)"; exit 2 ;;
+  seq2seq)
+    r=${1:?seq2seq <run> <train_model.py args>}
+    shift
+    if ! done_run "$r"; then
+      # shellcheck disable=SC2046
+      python scripts/train_model.py --name "$r" --normal-priority --workers 7 $(resume "$r") "$@"
+    fi
+    done_run "$r" || { echo "$r: not done yet (the next job resumes it)"; exit 1; }
+    python scripts/evaluate_pieces.py --run "$r" --normal-priority --musicxml 5 --only-missing \
+      --modes "$SEQ_MODES" --conditions "$SEQ_CONDITIONS"
+    exit $? ;;
+  ablation)
+    spec=${1:?ablation <labeller>+<meter>}
+    sys="v2_${spec%%+*}_${spec##*+}"
+    ok=0
+    python scripts/system_scores.py --v2 "$spec" --conditions clean --clean-beats audio \
+      --out outputs/system_eval_ablation || ok=1
+    if [ -f "outputs/system_eval/$sys/summary.json" ]; then  # the rendered-MIDI beats' version, made before
+      ln -sfn "$PWD/outputs/system_eval/$sys" "outputs/system_eval_ablation/$sys"
+    else
+      echo "outputs/system_eval/$sys missing: no rendered-MIDI version to compare with"; ok=1
+    fi
+    exit $ok ;;
+  *) echo "unknown task $task (meters, labellers, grids, evals, systems, seq2seq, ablation)"; exit 2 ;;
 esac

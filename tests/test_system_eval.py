@@ -169,6 +169,17 @@ def test_system_scores_v2_and_failures():
         assert set(got) == {"clean", "real"} and got["real"]["musicxml"] and (d / "X_Y_perf.musicxml").exists(), got
         assert not (d / "X_Y_perf.error.txt").exists() and not (d / "X_Y_perf.tokens.txt").exists()
         assert got["clean"] == pieces["clean"]  # not run again
+        # --clean-beats audio: clean MIDI with the recording's beats (here the tracked ones), system v2_nl_m_ab
+        system_scores.main(["--v2", "nl+m", "--conditions", "clean", "--clean-beats", "audio"] + common)
+        ab = json.loads((tmp / "out" / "v2_nl_m_ab" / "summary.json").read_text())
+        assert ab["clean_beats"] == "audio" and [p["beats"] for p in ab["pieces"]] == ["given: 40 beats, 10 downbeats"]
+        try:
+            system_scores.main(["--run", "beat", "--clean-beats", "audio"] + common)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("--clean-beats audio is for v2 only")
+        (tmp / "out" / "v2_nl_m_ab" / "summary.json").unlink()
         assert beyer_dai.all_systems(tmp / "out") == ["beat_none_sb", "v2_nl_m"]
         (tmp / "out" / "beyer_dai").mkdir()
         (tmp / "out" / "beyer_dai" / "summary.json").write_text("{}")

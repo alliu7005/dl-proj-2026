@@ -264,7 +264,9 @@ def summary(runs, res, info, now, meters=None):
 
     out += ["## System output ({} mode) per test set".format(SYSTEM), "",
             "The decoding the demo runs. fallback = share of windows where the no-context output was kept; "
-            "ts fixed = share of windows whose time signature meter mode corrected.", ""]
+            "ts fixed = share of windows whose time signature meter mode corrected. (old targets) = scored "
+            "against the targets before the data rebuild of 2026-11-22 (chord ties, pickups): not comparable "
+            "with rows scored against the rebuilt ones.", ""]
     for cond, desc in CONDITIONS:
         have = [r for r in runs if SYSTEM in res[r].get(cond, {})]
         if not have:
@@ -273,7 +275,8 @@ def summary(runs, res, info, now, meters=None):
         rows = []
         for r in have:
             v = res[r][cond][SYSTEM]
-            rows.append([r] + [num(v.get(k)) for k, _ in METRICS]
+            name = r if v.get("targets", 1) >= 2 else r + " (old targets)"
+            rows.append([name] + [num(v.get(k)) for k, _ in METRICS]
                         + [num(v.get("fallback_rate"), True), num(v.get("meter_fix_rate"), True)])
         out += ["### {}: {}".format(cond, desc), "",
                 table(hdr, rows, {k + 1: "max" for k in range(len(METRICS))}), ""]

@@ -65,6 +65,10 @@ DEFAULT_GUARD_MARGIN = 0.0
 # max_new_tokens), guarded with margin recorded, meter with the forced time signature banned
 # elsewhere in the window.
 EVAL_VERSION = 1
+# the targets a result was scored against: 2 = data rebuilt on 2026-11-22 (chord ties, pickups, the
+# train / val leak fixed: pace/rebuild.sh). Recorded only, not compared by present(): an earlier
+# result stays valid for its own targets; the tables mark it.
+TARGETS_VERSION = 2
 MISSING, NOTHING_MISSING, TRAINING, NOT_SEQ2SEQ = 0, 3, 4, 5  # exit statuses of the command line
 OTHER_ARCHS = ("labeller", "meter", "meter_oracle")  # v2 runs: scripts/eval_labeller.py / eval_meter.py
 
@@ -178,6 +182,7 @@ def condition_available(cond, data_dir, beats, beat_noise=DEFAULT_BEAT_NOISE):
 def stamp(result, margin=None, limit_perfs=0):
     """Record how a result was computed (what present() compares)."""
     result["eval_version"] = EVAL_VERSION
+    result["targets"] = TARGETS_VERSION
     result["limit_perfs"] = int(limit_perfs)
     if margin is not None:
         result["guard_margin"] = margin

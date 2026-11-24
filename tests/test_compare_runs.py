@@ -69,7 +69,11 @@ def build(runs):
         v.pop("guard_margin", None)
     make_run(runs, "s2s", sweep, cfg(10e6), [(0.30, 1000), (0.2781, 1500), (0.29, 2000)],
              {"phase": "done", "stopped_early": False})
-    make_run(runs, "s2s_ca", full(0.25, ("clean", "synthetic", "periscope")), cfg(10.2e6, cb=64, ca=32, aux=True),
+    rebuilt = full(0.25, ("clean", "synthetic", "periscope"))   # scored against the rebuilt targets
+    for c in rebuilt.values():
+        for v in c.values():
+            v["targets"] = 2
+    make_run(runs, "s2s_ca", rebuilt, cfg(10.2e6, cb=64, ca=32, aux=True),
              [(0.2779, 1560)], {"phase": "done", "stopped_early": True})
     make_run(runs, "sf_old", {"clean": {"oracle": metrics(0.5), "none": metrics(0.1)}},
              {"arch": "scoreformer", "params": 44.6e6, "args": {"size": "base"}, "model": {}})  # no data / log
@@ -129,7 +133,9 @@ def test_tables():
         assert "sf_old" not in clean.split("\n\n")[1]  # no meter result -> not in the system table
         s2s_row = next(ln for ln in clean.splitlines() if ln.startswith("| s2s "))
         assert "45%" in s2s_row and "8%" in s2s_row
+        assert s2s_row.startswith("| s2s (old targets) ")   # no targets stamp: before the rebuild
         best = next(ln for ln in clean.splitlines() if ln.startswith("| s2s_ca "))
+        assert "old targets" not in best
         assert best.count("**") == 2 * len(KEYS)  # highest in every metric column
 
         # context-mode tables include runs without meter, with dashes for the missing modes

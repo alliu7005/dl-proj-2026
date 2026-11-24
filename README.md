@@ -1127,7 +1127,8 @@ where it expects them.
   global scaling). It separates a notation convention from rhythm that is really wrong.
   `scripts/rescore.py` adds it to every run's stored results from the saved predictions, so the
   seq2seq models get it without decoding again. It updates a mode only when the re-scored onset F1
-  equals the stored one.
+  equals the stored one. A result scored against the targets before the rebuild may differ by up to
+  0.005; it then gets every window metric re-scored against the current targets.
 - **v2 as a system** (`src/pipeline.py V2Pipeline`, used by the demo and the whole-piece
   comparison). It takes the piece's beats, the meter model's grid of the whole piece with its tuned
   decoder, and a key signature from the notes. The labeller runs on each window cut as the test
@@ -1167,7 +1168,128 @@ where it expects them.
   batch writes the seq2seq systems' scores again with this export (`sysre_*`), so every system in
   the comparison is spelled the same way and the four real pieces they had no score for get one.
 
-Results: pending (the batch above).
+Results: the next section.
+
+### Third round: results
+
+Every model on the rebuilt data (`pace/rebuild.sh`), meter results with the fixed decoder, labellers
+with the current evaluation (`outputs/compare/summary.md`, `outputs/system_eval/results.md`). The
+seq2seq window results below are from before the rebuild (see the last point).
+
+**Meter models.** Downbeat F / time signature per bar, on the three test sets:
+
+| run | clean ASAP (simulated tracker) | real ASAP (Beat This!) | PERiScoPe |
+|---|---|---|---|
+| tracked beats alone | 0.618 / - | 0.596 / - | 0.608 / - |
+| meter_v2_nonote (round 2) | 0.775 / 0.550 | 0.624 / 0.384 | 0.752 / 0.611 |
+| meter_v3 | 0.790 / 0.552 | 0.651 / **0.440** | **0.773 / 0.643** |
+| meter_v3_s1 | 0.739 / 0.570 | 0.621 / 0.347 | 0.719 / 0.598 |
+| meter_v3_s2 | **0.803** / 0.570 | **0.663** / 0.385 | 0.765 / 0.573 |
+| meter_v3_large (14.2M) | 0.714 / 0.565 | 0.624 / 0.404 | 0.693 / 0.548 |
+| oracle grid (no model) | 0.907 / 0.992 | 0.880 / 0.998 | 0.912 / 0.991 |
+
+- **Longer training alone gains nothing that holds across seeds.** The three seeds average 0.752
+  downbeat F and 0.605 time signature on PERiScoPe, the same as `meter_v2_nonote` (0.752 / 0.611).
+  Between seeds the time signature moves by 0.07 (0.573-0.643), and by up to 0.09 on the 24 real
+  performances. `meter_v3` is the best seed and the one the systems use. Read it as a lucky draw of
+  the same model, not a better recipe.
+- **The larger model overfits.** At 14.2M parameters it is worse on every test set (PERiScoPe
+  0.693 / 0.548).
+- **The beats are not the limit.** With every head right on the same tracked beats (the oracle),
+  0.99 of the bars have the right time signature. The remaining errors are the meter model's own,
+  mostly half and double note values (3/4 written 3/8, 2/2 as 2/4, 6/4 as 6/8).
+
+**Where the labeller loses notes** (`nl_base_gn` on PERiScoPe; note F1 / onset F1 / onset-scale F1):
+
+| grid | nl_base (round 1) | nl_base_gn (tracker timing in training) |
+|---|---|---|
+| true grid (the score's beats) | 0.924 / 0.854 / 0.855 | 0.932 / 0.857 / 0.858 |
+| oracle grid (tracked beats, every meter head right) | 0.739 / 0.548 / 0.609 | **0.920 / 0.697 / 0.788** |
+| meter_v3's grid (the real system) | 0.756 / 0.391 / 0.583 | **0.922 / 0.488 / 0.730** |
+
+- **Training with the tracker's timing (`--grid-noise 0.8`) works.** On grids from tracked beats
+  the labeller stops deleting notes: PERiScoPe note F1 0.756 -> 0.922, on ASAP clean 0.844 -> 0.922
+  and real 0.775 -> 0.906. Onset F1 rises 0.391 -> 0.488 (clean 0.345 -> 0.407, real 0.315 ->
+  0.382). On the true grid it loses nothing (0.857 vs 0.854). The second seed (`nl_base_gn_s1`)
+  gives the same numbers to 0.002. `nl_large` without grid noise reaches 0.427 on `meter_v3`: size
+  does not replace training on the right grids.
+- **The decomposition** (onset F1 on PERiScoPe):
+  - true grid -> oracle grid, the tracker's timing: 0.857 -> 0.697;
+  - oracle -> meter_v3, the meter model's errors: 0.697 -> 0.488.
+
+  In onset-scale F1, which forgives a uniform halving or doubling of the note values, the second
+  step is 0.788 -> 0.730. Of the 0.21 the meter model costs, 0.15 goes away once a uniform halving or
+  doubling is forgiven: note values at the other metrical level, a notation convention rather than
+  wrong rhythm.
+- **On the windows v2 now matches or beats the seq2seq system.** Each cell is onset F1 / bar F1 /
+  time signature; the seq2seq model runs in meter mode:
+
+  | test set | v2: nl_base_gn on meter_v3 | seq2seq: sf_base_reg_cab_c128 |
+  |---|---|---|
+  | clean | **0.407 / 0.713 / 0.509** | 0.348 / 0.689 / 0.446 |
+  | periscope | 0.488 / **0.780 / 0.670** | **0.492** / 0.754 / 0.569 |
+  | real | **0.382** / 0.644 / 0.349 | 0.357 / **0.681 / 0.391** |
+
+  v2 is ahead on clean ASAP and PERiScoPe (time signature +0.06 and +0.10). On the 24 real
+  performances the seq2seq model has the better bar lines.
+
+**Whole pieces, Beyer & Dai's metrics** (error rates in %, lower is better; clean = the 59 clean
+ASAP test performances, real = the 24 transcribed from audio):
+
+| system | MUSTER mean clean / real | pitch | missing | extra | onset | spelling (sim) |
+|---|---|---|---|---|---|---|
+| Beyer & Dai | 11.05 / 11.14 | 3.21 / 2.38 | **7.54 / 7.10** | **6.48 / 7.75** | 14.43 / 13.60 | **8.58 / 2.41** |
+| seq2seq sf_base_reg_cab_c128 (meter, rendered-MIDI beats on clean) | 11.74 / **10.65** | 3.87 / 3.06 | 8.57 / 7.57 | 13.46 / 13.48 | **12.80 / 9.90** | 12.21 / 10.92 |
+| v2 nl_base_gn_s1 + meter_v3 | 14.92 / 12.63 | **2.82 / 2.27** | 15.72 / 11.89 | 9.71 / 10.18 | 18.27 / 13.79 | 11.52 / 6.31 |
+| v2 nl_base_gn + meter_v3 | 15.07 / 12.83 | 2.85 / 2.34 | 15.29 / 11.96 | 10.49 / 10.73 | 18.22 / 13.81 | 11.69 / 6.30 |
+| v2 nl_base + meter_v3 | 21.07 / 19.75 | 3.08 / 2.49 | 34.49 / 34.00 | 11.52 / 11.82 | 22.27 / 18.40 | 9.32 / 4.42 |
+
+- **Training with the tracker's timing matters even more for whole pieces.** It cuts MUSTER
+  missing from 34% to 12-15%, and the mean from 21.1 to 15.1 (clean) and 19.8 to 12.8 (real).
+- **v2 is not yet the better whole-piece system.** On real audio it trails the seq2seq system by
+  2.0 (12.63 vs 10.65) and Beyer & Dai by 1.5. It has the lowest pitch error of all systems, fewer
+  extra notes than seq2seq, and better spelling than seq2seq. Its losses are missing notes and
+  onsets.
+- **The missing notes are v2's own deletions plus a floor every system has.** Beyer & Dai keeps
+  every note and still scores 7.1-7.5% missing: notes MUSTER's alignment does not match. v2's
+  summaries record what the labeller deleted: 4.6% of the notes on real, 7.9% on clean. Floor plus
+  deletions gives 11.7 and 15.4, against 12.0 and 15.3 measured. Per piece they go together (r =
+  0.76 on real). The worst piece deletes 26% (Rachmaninoff op. 23/4 on clean); otherwise the high
+  missing rates are pieces every system finds hard (Ondine, Gondoliera).
+- **Beats from rendered MIDI are poor.** Clean MIDI has no recording, so its beats come from Beat
+  This! on the MIDI rendered by `src/synth.py`, for v2 and for the `_sb` seq2seq systems alike. On
+  the 24 performances that also have a real recording, the rendered MIDI gets beat F 0.576 /
+  downbeat F 0.422; the recording gets 0.709 / 0.592 (`outputs/system_eval/beats_synth.json`). That
+  is likely why v2 deletes more on clean (7.9%) than on real (4.6%). It would also explain why its
+  clean MUSTER is 2.3 worse than its real one: the seq2seq system's is 1.1 worse, and Beyer & Dai's,
+  with no beats at all, 0.1 better. The ablation below measures it.
+- **The seq2seq window numbers predate the rebuild.** Their models were trained on the targets
+  before the 2026-11-22 fixes (chord ties, pickups), and the window results were scored against
+  them. Scored against the rebuilt targets, their onset F1 changes by at most 0.0004
+  (`scripts/rescore.py`, every mode of every run). The test targets barely moved, so the tables
+  hold. The training targets moved more, and the retrained model below settles that.
+  `compare_runs.py` marks results scored against the old targets "(old targets)". `rescore.py` now
+  re-scores those against the current ones (and adds their onset-scale F1, which it had refused
+  because of that 0.0004).
+
+### Finishing the third round (`pace/v2_finish.sh`)
+
+Seven jobs (pace/README.md, 4l):
+
+- **`sf_base_reg_cab_c128_r`:** the best seq2seq recipe trained again on the rebuilt data, so v2
+  and seq2seq are compared on the same targets. Three chained 8-hour jobs, each resuming the one
+  before, then the evaluation (every mode on the four test sets, only what is missing), then its
+  whole-piece scores with and without the rendered-MIDI beats on clean.
+- **The three seq2seq systems with no whole-piece summary** (`sf_base_reg_cab`, `_s1`, `_c128` in
+  meter mode). Their earlier export hit the time limit; they are written again with the current
+  export.
+- **The beat ablation** (`system_scores.py --clean-beats audio`): v2 on the clean test MIDI with the
+  beats Beat This! tracked in the real recordings (the 24 performances that have one, system
+  `v2_nl_base_gn_meter_v3_ab`). It sits next to the same system with the rendered-MIDI beats, both
+  scored on their shared pieces in `outputs/system_eval_ablation/results.md`. The difference is
+  what the rendered audio costs v2 on clean MIDI.
+- **The final scoring:** `rescore.py` (above), `compare_runs.py`, and every system rated with Beyer &
+  Dai's metrics.
 
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
@@ -1256,7 +1378,11 @@ Two systems, chosen per upload on the page (each is loaded when its checkpoints 
   signatures of the whole piece from them, and the note labeller places every note in them
   (`src/pipeline.py V2Pipeline`; `--labeller`, `--meter`). A MIDI upload is rendered to audio for
   Beat This! (`src/synth.py`). The page shows the main time signature, the key signature and how
-  many notes it left out as transcription errors.
+  many notes it left out as transcription errors. A third or fourth staff is written only when at
+  least 2% of the piece's notes are on it (`MIN_EXTRA_STAFF`; in the target scores such staves hold
+  28-100% of a piece, or one short passage). Below that the staff is a stray prediction, and its
+  notes go on the likeliest of the staves kept: one note of 1,221 had given a demo piece two empty
+  staves for all 73 bars.
 - **seq2seq:** the Scoreformer writes the score window by window (`--ckpt`, default
   `sf_base_reg_cab`). It runs in meter mode by default, the best in its evaluation: guarded
   decoding (each window's context is the model's own previous output, and degenerate windows are
@@ -1290,6 +1416,11 @@ shows how many beats it found; MIDI input, or no beat-this package, runs it with
 
 The demo needs `vocab.json` (and, for Score2Seq checkpoints, `feature_stats.json`) next to the
 checkpoint or in `data/processed/`. Copy both next to `best.pt` when sharing a checkpoint.
+`train_model.py` and `train_labeller.py` now keep the vocabulary they train with in the run folder
+(`src/preprocessing/vocab.py pin_vocab`; a resume on data with other tokens is refused). For a run
+trained before that, copy the `data/processed/vocab.json` it trained on (PACE's) next to its
+`best.pt`: a local `data/processed/` from another build has other tokens, and the labeller refuses it
+(its length classes would mean other note values).
 
 ## Baselines
 
@@ -1485,7 +1616,7 @@ scripts/compare_runs.py          tables of every evaluated run -> outputs/compar
 scripts/system_inputs.py         whole-piece test inputs (clean MIDI, cut Transkun transcriptions) + references
 scripts/system_scores.py         our pipelines on them (seq2seq or v2) -> one MusicXML per performance
 scripts/synth_beats.py           Beat This! on the clean test MIDI rendered to audio (held-out folds) -> beats_synth.npz
-scripts/rescore.py               metrics added since an evaluation, from its saved predictions (onset-scale F1)
+scripts/rescore.py               metrics added since an evaluation, from its saved predictions (onset-scale F1; results on the old targets re-scored)
 scripts/beyer_dai.py             Baseline 3: Beyer & Dai's model (predict) and their metrics for every system (score)
 src/notelabels.py                v2: per-note score labels, tie-aware rendering back to tokens, grid features
 src/labeller.py                  v2: the note labeller (Scoreformer encoder + per-note heads), prediction -> tokens
@@ -1508,6 +1639,7 @@ pace/train_labeller.sbatch       one note labeller: train + evaluate (resumes fr
 pace/meter.sh                    v2 Phases 2 + 3: the meter model, then the labellers on its grids (second round)
 pace/v2.sh                       v2 third round, two waves: meter models, oracle, grid-noise labellers, every labeller on every grid, whole-piece comparison
 pace/v2_jobs.sh                  the work of pace/v2.sh's jobs (several models per GPU job)
+pace/v2_finish.sh                the rest of the third round: the best seq2seq recipe on the rebuilt data, missing systems, the beat ablation
 pace/rebuild.sh                  data/processed rebuilt with the 2026-11-22 data fixes (old data kept, same vocabulary)
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model

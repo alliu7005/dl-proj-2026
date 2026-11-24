@@ -106,6 +106,29 @@ def test_plan_skips_v2_runs():
         assert plan.main(["--run", "s2s", "--runs-dir", t, "--conditions", "clean"]) != plan.NOT_SEQ2SEQ
 
 
+def test_pin_vocab():
+    """A run keeps the vocabulary it trains with: copied on the first start, accepted on a resume
+    against the same tokens (other counts are fine), refused against other tokens."""
+    from src.preprocessing.vocab import Vocab, pin_vocab
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        data, run = t / "data.json", t / "run"
+        run.mkdir()
+        Vocab(["<pad>", "a", "b"], {"a": 3}).save(str(data))
+        kept = pin_vocab(data, run)
+        assert kept == run / "vocab.json" and Vocab.load(str(kept)).itos == ["<pad>", "a", "b"]
+        Vocab(["<pad>", "a", "b"], {"a": 9}).save(str(data))   # rebuilt with the same tokens
+        assert pin_vocab(data, run) == kept
+        Vocab(["<pad>", "a", "b", "c"]).save(str(data))         # a build with another token
+        try:
+            pin_vocab(data, run)
+        except SystemExit as e:
+            assert "other tokens" in str(e)
+        else:
+            raise AssertionError("a resume on other tokens must be refused")
+        assert Vocab.load(str(kept)).itos == ["<pad>", "a", "b"] and not (run / "vocab.json.tmp").exists()
+
+
 def main():
     tests = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     for t in tests:

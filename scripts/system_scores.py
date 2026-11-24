@@ -4,8 +4,10 @@
     python scripts/system_scores.py --run sf_base_reg_cab --mode tsearch_beat
     python scripts/system_scores.py --run sf_base_reg_cab --midi-beats synth
     python scripts/system_scores.py --v2 nl_base_gn+meter_v3              # v2: labeller + meter model
+    python scripts/system_scores.py --v2 nl_base_gn+meter_v3 --conditions clean --clean-beats audio                                     --out outputs/system_eval_ablation    # clean MIDI, real-audio beats
     -> outputs/system_eval/<system>/<condition>/<slug>.musicxml   (+ summary.json)
-       system = <run>_<mode> (+ "_sb" with --midi-beats synth), or v2_<labeller>_<meter>
+       system = <run>_<mode> (+ "_sb" with --midi-beats synth), or v2_<labeller>_<meter> (+ "_ab" with
+       --clean-beats audio)
 
 Runs the demo pipeline (src/pipeline.py) exactly as the demo does on a file: windows cut from the
 performance itself (no score information). The seq2seq models decode window by window
@@ -16,6 +18,9 @@ MIDI): what the demo gets from audio. A clean MIDI file has no audio: a seq2seq 
 beats there (as the demo's MIDI input) unless --midi-beats synth; v2 always gets Beat This!'s beats
 of the MIDI rendered to audio (scripts/synth_beats.py made them with the cross-validation model
 that never heard the piece: outputs/system_eval/beats_synth.npz; tracked here if that is missing).
+--clean-beats audio gives v2 on clean MIDI the beats Beat This! tracked in the performance's real
+recording instead (the ASAP test performances with MAESTRO audio; the others are left out): what the
+rendered audio costs, measured on the same pieces.
 
 A piece whose score cannot be written keeps its tokens and the error (<slug>.tokens.txt,
 <slug>.error.txt next to where its score would be), so it can be reproduced; --only-missing runs
@@ -46,11 +51,11 @@ def parse_v2(spec: str) -> tuple[str, str]:
     return lab, met
 
 
-def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None) -> str:
+def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, clean_beats: str = "synth") -> str:
     """The folder (and table row) of a system under outputs/system_eval."""
     if v2:
         lab, met = parse_v2(v2)
-        return f"v2_{lab}_{met}"
+        return f"v2_{lab}_{met}" + ("_ab" if clean_beats == "audio" else "")
     return f"{run}_{mode}" + ("_sb" if midi_beats == "synth" else "")
 
 
@@ -64,6 +69,9 @@ def main(argv=None):
     ap.add_argument("--midi-beats", default="none", choices=["none", "synth"],
                     help="seq2seq beat models on clean MIDI: no beats (as the demo's MIDI input), or Beat This! "
                          "on the MIDI rendered to audio (v2 always gets those)")
+    ap.add_argument("--clean-beats", default="synth", choices=["synth", "audio"],
+                    help="v2 on clean MIDI: Beat This! on the MIDI rendered to audio, or on the performance's real "
+                         "recording (only the performances that have one)")
     ap.add_argument("--manifest", default="outputs/system_eval/manifest.json")
     ap.add_argument("--conditions", default="clean,real")
     ap.add_argument("--out", default="outputs/system_eval")
@@ -95,7 +103,13 @@ def main(argv=None):
         if not synth:
             folds = load_folds(Path(args.folds))
             print(f"{args.synth_beats} missing: tracking the rendered MIDI here", flush=True)
-    system = system_name(args.run, args.mode, args.midi_beats, args.v2)
+    if args.clean_beats == "audio":
+        if not args.v2:
+            raise SystemExit("--clean-beats audio is for v2 (--v2)")
+        n = len(entries)
+        entries = [e for e in entries if e["condition"] != "clean" or e["performance"] in tracked]
+        print(f"--clean-beats audio: {len(entries)} of {n} inputs (clean ones need a recording)", flush=True)
+    system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats)
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before
@@ -108,7 +122,7 @@ def main(argv=None):
     for k, e in enumerate(entries):
         dst = out / e["condition"] / f"{e['slug']}.musicxml"
         beats, kw = None, {}
-        if e["condition"] == "real":
+        if e["condition"] == "real" or args.clean_beats == "audio":
             beats = tracked.get(e["performance"])
         elif wants_beats and midi_beats == "synth":
             beats = synth.get(e["performance"])
@@ -150,6 +164,7 @@ def main(argv=None):
     (out / "summary.json").write_text(json.dumps({"system": system, "run": None if args.v2 else args.run,
                                                   "v2": args.v2, "mode": None if args.v2 else args.mode,
                                                   "midi_beats": midi_beats if wants_beats else None,
+                                                  "clean_beats": args.clean_beats if args.v2 else None,
                                                   "pieces": done}, indent=1))
     print(f"wrote {out}: {sum(d['musicxml'] is not None for d in done)}/{len(done)} scores")
 
