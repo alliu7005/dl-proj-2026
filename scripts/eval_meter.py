@@ -14,6 +14,9 @@ Conditions:
              simulated on, and scored against, the score's beats timed through the note alignment
              (scripts/build_meter_data.py; within 70 ms of ASAP's human annotations for 81% of
              beats, the same time signature for >99.9%), one grid per segment of the performance
+  gangqinpu  Gangqinpu test (build_meter_data.py --gangqinpu): web piano recordings of many genres,
+             real transcriptions, the tracker simulated on the score's beats timed through the
+             release's alignment: music outside the classical benchmark (skipped when not built)
 
 --tune: the decoder's weights and penalties (src/meter.py DecodeConfig: bar / time-signature head
 weights, the time-signature change and mid-step bar line penalties) chosen on the validation
@@ -34,6 +37,29 @@ the right level (decoded quarters / true quarters within LEVEL_TOL of 1 in log2)
 oracle_logp), decoded alike: the best grid these beats allow (``python scripts/eval_meter.py --run
 meter_oracle --oracle``). The labeller on it (scripts/eval_labeller.py --grid meter:meter_oracle)
 separates what the tracker's beats cost from what the meter model's errors cost.
+
+--snap S / --fill F: the decoded grid's beat times taken from the notes (src/meter.py refine_grid:
+an anchor onto a chord onset within S seconds; a notated beat no tracked beat times added at a chord
+onset within F beats of where the anchors around it put it), saved into the run's decode.json with
+the other settings (0 turns one off), so everything that decodes with that file (the labeller's
+grids, scripts/system_scores.py, the demo) gets the same grids. A run sharing another's checkpoint
+(pace/v2_jobs.sh refine) compares them on the same model. ``refined`` in the results: anchors
+moved and added per performance.
+
+--tracker pm2s: every performance's beats from PM2S on its notes (src/pm2s_beats.py) instead of
+the simulated / recorded Beat This! ones, every condition then under <condition>_pm2s in the results
+and the file names (the Beat This! results stay). With a model trained for either tracker, the 2 x 2
+of tracker in training and at test. PM2S's released weights were trained on all of ASAP (clean /
+real here: optimistic); PERiScoPe and Gangqinpu are music it did not train on.
+
+--real-tracked: Beat This!'s real beats where scripts/track_meter_data.py stored them for the
+condition (Gangqinpu's test recordings: meter/tracked_test_gangqinpu_beat_this.npz), only those
+performances, under <condition>_real: with --tracker pm2s on the same condition, the two real
+trackers on the same music.
+
+A model that reads a second tracker (train_meter.py --aux pm2s) gets PM2S's beats of each
+performance's notes as that evidence everywhere here (tuning and every condition), as in the
+pipeline: "aux": "pm2s" in its results.
 
 Writes outputs/runs/<run>/eval_meter.json (means per condition and per piece, the time-signature
 confusions), meter_scores_<condition>.json (per performance) and grids_<condition>.pkl ({key:
@@ -56,12 +82,13 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import pick_device  # noqa: E402
 from scripts.train_meter import load  # noqa: E402
-from src.beats import MATCH_TOL, BeatNoise, f_measure  # noqa: E402
+from src.beats import MATCH_TOL, BeatNoise, f_measure, load_beats  # noqa: E402
 from src.meter import (DecodeConfig, build_meter_model, choose_level, cover_notes, grid_from_logp,  # noqa: E402
-                       grid_scores, oracle_logp, predict_logp)
+                       grid_scores, oracle_logp, perf_key, predict_logp, refine_grid, uses_aux)
 from src.notelabels import estimate_key  # noqa: E402
 
-CONDITIONS = {"clean": "test", "real": "test_transcribed", "periscope": "test_periscope"}
+CONDITIONS = {"clean": "test", "real": "test_transcribed", "periscope": "test_periscope",
+              "gangqinpu": "test_gangqinpu"}
 DECODER_VERSION = 2  # 2: a step longer than a bar keeps the bars it passes (src/meter.py grid_from_states)
 VAL = {"asap": "val", "real": "val_transcribed", "periscope": "val_periscope"}
 SEED = 12345  # the simulated tracker's draw on the clean performances (fixed: comparable runs)
@@ -84,7 +111,7 @@ LEVEL_SEARCH = {  # with --level: the piece's note-value level (src/meter.py cho
 
 def key_of(perf: dict) -> str:
     """A grid's key in grids_<condition>.pkl: the performance, #segment when it has several."""
-    return perf["performance"] if perf.get("segments", 1) <= 1 else f"{perf['performance']}#{perf['segment']}"
+    return perf_key(perf)
 
 
 def tracked(perf: dict, k: int, noise, seed: int = SEED) -> tuple[np.ndarray, np.ndarray]:
@@ -146,7 +173,7 @@ def select(groups_scores: list) -> float:
     return float(np.mean(vals)) if vals else 0.0
 
 
-def val_groups(model, data: Path, noise, device, n_periscope: int, max_perfs: int = 0) -> list:
+def val_groups(model, data: Path, noise, device, n_periscope: int, max_perfs: int = 0, aux_of=None) -> list:
     """The validation performances per source with their tracked beats and the model's
     log-probabilities (computed once; the tracker drawn with another seed than the test draw)."""
     groups = []
@@ -158,7 +185,8 @@ def val_groups(model, data: Path, noise, device, n_periscope: int, max_perfs: in
         if not perfs:
             continue
         beats = [tracked(p, k, noise, seed=SEED + 1) for k, p in enumerate(perfs)]
-        lps = [predict_logp(model, p["notes"], bt, bd, device) for p, (bt, bd) in zip(perfs, beats)]
+        lps = [predict_logp(model, p["notes"], bt, bd, device, aux_of(p) if aux_of else None)
+               for p, (bt, bd) in zip(perfs, beats)]
         groups.append((name, perfs, lps, beats))
     return groups
 
@@ -188,7 +216,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
     ap.add_argument("--ckpt", default="best.pt")
-    ap.add_argument("--conditions", default="clean,real,periscope")
+    ap.add_argument("--conditions", default="clean,real,periscope,gangqinpu")
     ap.add_argument("--tune", action="store_true", help="tune the decoder on the validation performances first")
     ap.add_argument("--tempo-prior", action="store_true",
                     help="--tune also searches the written-tempo prior (src/meter.py tempo_logprior)")
@@ -198,7 +226,20 @@ def main(argv=None):
                     help="start from this decode.json's settings (with --level and no --tune: only the level is tuned)")
     ap.add_argument("--tune-periscope", type=int, default=150, help="PERiScoPe val performances used by --tune")
     ap.add_argument("--tune-max", type=int, default=0, help="at most this many per validation source (0 = all)")
-    ap.add_argument("--beat-noise", default="configs/beat_noise.json")
+    ap.add_argument("--beat-noise", default="configs/beat_noise.json",
+                    help="the simulated tracker at test (Beat This!'s fitted errors)")
+    ap.add_argument("--tune-noise", default=None,
+                    help="the simulated tracker the decoder is tuned with (default: --beat-noise); "
+                         "configs/beat_noise_pm2s.json for a model trained for PM2S")
+    ap.add_argument("--tracker", choices=("beat_this", "pm2s"), default="beat_this",
+                    help="the beats at test: Beat This!'s (simulated, or recorded on real), or PM2S on the notes")
+    ap.add_argument("--real-tracked", action="store_true",
+                    help="Beat This!'s real beats stored for the condition (track_meter_data.py), its performances "
+                         "that have them only: <condition>_real")
+    ap.add_argument("--snap", type=float, default=None,
+                    help="move each grid anchor onto a chord onset within this many seconds (saved in decode.json)")
+    ap.add_argument("--fill", type=float, default=None,
+                    help="add notated beats the tracker missed at chord onsets within this many beats (saved in decode.json)")
     ap.add_argument("--oracle", action="store_true",
                     help="no model: every head certain of the truth on the tracked beats (the best grid they allow)")
     ap.add_argument("--device", default="auto")
@@ -208,6 +249,8 @@ def main(argv=None):
     device = pick_device(args.device)
     run, data = Path(args.runs_dir) / args.run, Path(args.data)
     noise = BeatNoise.from_json(args.beat_noise)
+    tune_noise = BeatNoise.from_json(args.tune_noise) if args.tune_noise else noise
+    aux_tracker = None
     if args.oracle:
         if args.tune:
             raise SystemExit("--oracle has no model to tune a decoder for")
@@ -219,12 +262,27 @@ def main(argv=None):
     else:
         ck = torch.load(run / args.ckpt, map_location=device, weights_only=False)
         model = build_meter_model(ck["config"]).to(device)
+        if uses_aux(ck["config"]):
+            if args.tracker == "pm2s":
+                raise SystemExit(f"{args.run} reads PM2S as its second tracker: test it with Beat This!'s beats "
+                                 "(not --tracker pm2s)")
+            from src.pm2s_beats import PM2SBeats
+            aux_tracker = PM2SBeats(device=str(device) if str(device).startswith("cuda") else "cpu")
         model.load_state_dict(ck["model"])
+    aux_of = None
+    if aux_tracker is not None:
+        aux_cache = {}
+
+        def aux_of(perf):   # PM2S on the performance's notes, once per performance
+            key = (perf["performance"], perf.get("segment", 0), len(perf["notes"]))
+            if key not in aux_cache:
+                aux_cache[key] = aux_tracker(np.asarray(perf["notes"], np.float64))
+            return aux_cache[key]
     dfile = run / "decode.json"
     if args.level and model is None:
         raise SystemExit("--level needs a model (the oracle's grids are at the right level already)")
     if args.tune or args.level:
-        groups = val_groups(model, data, noise, device, args.tune_periscope, max_perfs=args.tune_max)
+        groups = val_groups(model, data, tune_noise, device, args.tune_periscope, max_perfs=args.tune_max, aux_of=aux_of)
         if args.tune:
             cfg, info = tune(groups, tempo=args.tempo_prior)
             print(f"decoder tuned on validation ({info['validation']}): selection score {info['select_default']:.3f} "
@@ -249,19 +307,53 @@ def main(argv=None):
     elif args.decode_from:
         dfile.write_text(Path(args.decode_from).read_text())
     cfg = DecodeConfig.from_dict(json.loads(dfile.read_text())["decode"]) if dfile.exists() else DecodeConfig()
+    if args.snap is not None or args.fill is not None:
+        cfg.snap_s = cfg.snap_s if args.snap is None else float(args.snap)
+        cfg.fill_tol = cfg.fill_tol if args.fill is None else float(args.fill)
+        saved = json.loads(dfile.read_text()) if dfile.exists() else {}
+        dfile.write_text(json.dumps({**saved, "decode": cfg.to_dict()}, indent=1))
     out_file = run / "eval_meter.json"
     results = json.loads(out_file.read_text()) if out_file.exists() else {}
-    for cond in args.conditions.split(","):
-        perfs = load(data, CONDITIONS[cond])
+    if args.real_tracked and args.tracker != "beat_this":
+        raise SystemExit("--real-tracked is Beat This!'s stored beats: not with --tracker pm2s (PM2S runs here)")
+    pm2s = None
+    if args.tracker == "pm2s":
+        from src.pm2s_beats import PM2SBeats
+        pm2s = PM2SBeats(device=str(device) if str(device).startswith("cuda") else "cpu")
+    for cond_name in args.conditions.split(","):
+        perfs = load(data, CONDITIONS[cond_name])
         if not perfs:
-            print(f"skip {cond}: no {CONDITIONS[cond]} performances (scripts/build_meter_data.py)")
+            print(f"skip {cond_name}: no {CONDITIONS[cond_name]} performances (scripts/build_meter_data.py)")
             continue
+        cond = cond_name if pm2s is None else f"{cond_name}_pm2s"   # results / file names
+        real = None
+        if args.real_tracked:
+            from scripts.track_meter_data import tracked_path
+            real = load_beats(tracked_path(data / "meter", CONDITIONS[cond_name], "beat_this"))
+            perfs = [p for p in perfs if perf_key(p) in real]
+            if not perfs:
+                print(f"skip {cond_name}: no Beat This! beats stored for {CONDITIONS[cond_name]} (track_meter_data.py)")
+                continue
+            cond = f"{cond_name}_real"
+        fallbacks = 0                                                # PM2S found < 2 beats: the simulated tracker
         grids, scores, default, raw, per = {}, [], [], [], []
-        confusion = Counter()
+        confusion, refined = Counter(), Counter()
         for k, perf in enumerate(perfs):
-            bt, bd = tracked(perf, k, noise)
-            lp = oracle_logp(bt, perf["gt"]) if model is None else predict_logp(model, perf["notes"], bt, bd, device)
+            if real is not None:
+                bt, bd = (np.asarray(x) for x in real[perf_key(perf)])
+            elif pm2s is None:
+                bt, bd = tracked(perf, k, noise)
+            else:  # PM2S on the performance's notes (np arrays as tracked() gives)
+                bt, bd = pm2s(np.asarray(perf["notes"], np.float64))
+                if len(bt) < 2:
+                    bt, bd = tracked(perf, k, noise)
+                    fallbacks += 1
+            lp = (oracle_logp(bt, perf["gt"]) if model is None
+                  else predict_logp(model, perf["notes"], bt, bd, device, aux_of(perf) if aux_of else None))
             grid = grid_from_logp(bt, lp, cfg)
+            if len(perf["notes"]):  # beat times onto the notes (refine_grid; off unless --snap / --fill)
+                grid = refine_grid(grid, np.asarray(perf["notes"], np.float64)[:, 1], cfg)
+            refined.update(grid.get("refined", {}))
             grid["key"] = estimate_key(perf["notes"])  # the key signature the rendered score gets
             grid["performance"] = perf["performance"]
             grid["span"] = tuple(perf.get("span") or (float(bt[0]) - 1.0, float(bt[-1]) + 1.0))
@@ -295,6 +387,12 @@ def main(argv=None):
         res["decode"] = cfg.to_dict()
         res["decoder_version"] = DECODER_VERSION
         res["ts_confusion"] = [[a, b, n] for (a, b), n in confusion.most_common(25)]
+        res["refined"] = {k: v / len(perfs) for k, v in refined.items()}   # anchors moved / added per performance
+        res["tracker"] = args.tracker + ("_real" if real is not None else "")
+        if aux_of is not None:
+            res["aux"] = "pm2s"
+        if pm2s is not None:
+            res["pm2s_fallbacks"] = fallbacks
         results[cond] = res
         with open(run / f"grids_{cond}.pkl", "wb") as f:
             pickle.dump(grids, f, protocol=pickle.HIGHEST_PROTOCOL)

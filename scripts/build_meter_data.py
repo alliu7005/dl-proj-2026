@@ -18,6 +18,14 @@ of grid (src/meter.py aligned_grids: one per run of consecutive bars, a dropped 
 performance into segments); the windows' notes (real Transkun output) are joined back into the
 performance (stitch_notes). The meter model trains on them with the tracker simulated.
 
+Gangqinpu (--gangqinpu DIR: the downloaded Hugging Face release; train_gangqinpu / val_gangqinpu /
+test_gangqinpu): 18,786 web piano recordings (pop, classical, jazz, folk, ...) transcribed by
+Transkun V2 and aligned to their scores; the score's beats timed through that alignment come with
+the release, so each performance's trusted bars become the same kind of grid
+(src/preprocessing/gangqinpu.py: the filters, and why beats were dropped in
+meter/gangqinpu_report.json). The notes are real transcriptions; the tracker is simulated.
+--gangqinpu-only builds just these three files (the ASAP and PERiScoPe ones stay as they are).
+
 --check times the ASAP test performances the same way (from their windows' alignments) and
 compares the result with their annotations: how far the PERiScoPe ground truth can be trusted
 (written to data/processed/meter/check.json).
@@ -39,6 +47,8 @@ from scripts.system_inputs import MARGIN, crop  # noqa: E402
 from src.beats import MATCH_TOL, beats_path, f_measure, load_beats, merge_performance_bars, window_grid  # noqa: E402
 from src.meter import aligned_grids, annotation_grid, stitch_notes  # noqa: E402
 from src.preprocessing.performance import load_performance  # noqa: E402
+from src.preprocessing import gangqinpu  # noqa: E402
+from src.preprocessing.gangqinpu import GridFilter  # noqa: E402
 
 PERISCOPE = {"train_periscope": "train", "val_periscope": "val", "test_periscope": "test_periscope"}
 
@@ -179,11 +189,32 @@ def main(argv=None):
     ap.add_argument("--no-periscope", action="store_true", help="ASAP (and its transcriptions) only")
     ap.add_argument("--check", action="store_true",
                     help="also time the ASAP test performances from their alignments and compare with the annotations")
+    ap.add_argument("--gangqinpu", default=None, help="the Gangqinpu release (its data/*.parquet): build its splits too")
+    ap.add_argument("--gangqinpu-only", action="store_true", help="build only the Gangqinpu splits")
+    ap.add_argument("--gangqinpu-limit", type=int, default=0, help="rows per split (0 = all; for a quick look)")
+    ap.add_argument("--gangqinpu-min-confidence", type=float, default=GridFilter.min_confidence)
+    ap.add_argument("--gangqinpu-keep-inferred", action="store_true",
+                    help="keep bars whose time signature the release inferred (not written in the score)")
     args = ap.parse_args(argv)
     data = Path(args.data)
-    out = build(Path(args.asap), data, Path(args.transcribed), Path(args.maestro))
+    if args.gangqinpu_only and not args.gangqinpu:
+        raise SystemExit("--gangqinpu-only needs --gangqinpu <release folder>")
+    out = {} if args.gangqinpu_only else build(Path(args.asap), data, Path(args.transcribed), Path(args.maestro))
     vocab = data / "vocab.json"
-    if not args.no_periscope:
+    if args.gangqinpu:
+        flt = GridFilter(min_confidence=args.gangqinpu_min_confidence, keep_inferred=args.gangqinpu_keep_inferred)
+        reports = {}
+        for split in gangqinpu.SPLITS:
+            if not gangqinpu.split_files(Path(args.gangqinpu), split):
+                print(f"gangqinpu {split}: not downloaded, skipped", flush=True)
+                continue
+            perfs, reports[split] = gangqinpu.build_split(Path(args.gangqinpu), split, flt, args.gangqinpu_limit)
+            out[f"{split}_gangqinpu"] = perfs
+            print(f"gangqinpu {split}: {json.dumps(reports[split])}", flush=True)
+        (data / "meter").mkdir(parents=True, exist_ok=True)
+        (data / "meter" / "gangqinpu_report.json").write_text(
+            json.dumps({"filter": vars(flt), "splits": reports}, indent=1))
+    if not args.no_periscope and not args.gangqinpu_only:
         for name, split in PERISCOPE.items():
             if (data / split / "index.npy").exists():
                 perfs = from_alignment(data / split, vocab, "pianocore", args.workers)
@@ -198,7 +229,7 @@ def main(argv=None):
         n_piece = len({p.get("piece") for p in perfs})
         print(f"{split}: {n_perf} performances ({len(perfs)} segments, {n_piece} pieces), {beats} ground-truth "
               f"beats -> {data / 'meter' / (split + '.pkl')}")
-    if args.check and (data / "test" / "index.npy").exists():
+    if args.check and not args.gangqinpu_only and (data / "test" / "index.npy").exists():
         res = check(from_alignment(data / "test", vocab, "asap", args.workers), out.get("test", []))
         (data / "meter" / "check.json").write_text(json.dumps(res, indent=1))
         print(f"alignment ground truth vs ASAP annotations (test, {res['segments']} segments): beat F "

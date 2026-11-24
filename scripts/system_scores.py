@@ -20,7 +20,11 @@ of the MIDI rendered to audio (scripts/synth_beats.py made them with the cross-v
 that never heard the piece: outputs/system_eval/beats_synth.npz; tracked here if that is missing).
 --clean-beats audio gives v2 on clean MIDI the beats Beat This! tracked in the performance's real
 recording instead (the ASAP test performances with MAESTRO audio; the others are left out): what the
-rendered audio costs, measured on the same pieces.
+rendered audio costs, measured on the same pieces. --clean-beats pm2s gives it PM2S's beats of the
+MIDI's notes (src/pm2s_beats.py, no audio; system _pm), and --real-beats pm2s PM2S's beats of the
+real transcriptions instead of Beat This!'s of the recordings (_rpm): PM2S against Beat This!, on
+the same pieces and metrics. PM2S's released weights were trained on all of ASAP, these test
+performances included: optimistic until it is retrained without them.
 
 A piece whose score cannot be written keeps its tokens and the error (<slug>.tokens.txt,
 <slug>.error.txt next to where its score would be), so it can be reproduced; --only-missing runs
@@ -51,14 +55,20 @@ def parse_v2(spec: str) -> tuple[str, str]:
     return lab, met
 
 
+BEAT_SUFFIX = {"synth": "", "audio": "_ab", "pm2s": "_pm"}       # v2 on clean MIDI
+REAL_SUFFIX = {"audio": "", "pm2s": "_rpm"}                      # v2 on the real transcriptions
+
+
 def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, clean_beats: str = "synth",
-                delete_above: float = DELETE_ABOVE, tidy: bool = False) -> str:
+                delete_above: float = DELETE_ABOVE, tidy: bool = False, real_beats: str = "audio") -> str:
     """The folder (and table row) of a system under outputs/system_eval (v2 with another deletion
-    threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy)."""
+    threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy; with other beats:
+    _ab / _pm on clean MIDI, _rpm on the real transcriptions)."""
     if v2:
         lab, met = parse_v2(v2)
         d = "" if delete_above == DELETE_ABOVE else "_keepall" if delete_above >= 1 else f"_d{round(delete_above * 100)}"
-        return f"v2_{lab}_{met}" + d + ("_tidy" if tidy else "") + ("_ab" if clean_beats == "audio" else "")
+        return (f"v2_{lab}_{met}" + d + ("_tidy" if tidy else "") + BEAT_SUFFIX[clean_beats]
+                + REAL_SUFFIX[real_beats])
     return f"{run}_{mode}" + ("_sb" if midi_beats == "synth" else "")
 
 
@@ -72,9 +82,11 @@ def main(argv=None):
     ap.add_argument("--midi-beats", default="none", choices=["none", "synth"],
                     help="seq2seq beat models on clean MIDI: no beats (as the demo's MIDI input), or Beat This! "
                          "on the MIDI rendered to audio (v2 always gets those)")
-    ap.add_argument("--clean-beats", default="synth", choices=["synth", "audio"],
-                    help="v2 on clean MIDI: Beat This! on the MIDI rendered to audio, or on the performance's real "
-                         "recording (only the performances that have one)")
+    ap.add_argument("--clean-beats", default="synth", choices=list(BEAT_SUFFIX),
+                    help="v2 on clean MIDI: Beat This! on the MIDI rendered to audio, on the performance's real "
+                         "recording (only the performances that have one), or PM2S on the MIDI's notes")
+    ap.add_argument("--real-beats", default="audio", choices=list(REAL_SUFFIX),
+                    help="v2 on the real transcriptions: Beat This! on the recording, or PM2S on the transcription")
     ap.add_argument("--delete-above", type=float, default=DELETE_ABOVE,
                     help="v2: leave a note out only above this p(delete) (1 = keep every note); "
                          "a setting other than the default is its own system (_d<percent>, _keepall)")
@@ -94,6 +106,8 @@ def main(argv=None):
     ap.add_argument("--only-missing", action="store_true",
                     help="only the inputs this system has no score for yet (e.g. after an export fix)")
     args = ap.parse_args(argv)
+    if (args.clean_beats != "synth" or args.real_beats != "audio") and not args.v2:
+        raise SystemExit(f"--clean-beats {args.clean_beats} / --real-beats {args.real_beats} are for v2 (--v2)")
     entries = [e for e in json.loads(Path(args.manifest).read_text()) if e["condition"] in args.conditions.split(",")]
     runs = Path(args.runs_dir)
     if args.v2:
@@ -114,15 +128,13 @@ def main(argv=None):
             folds = load_folds(Path(args.folds))
             print(f"{args.synth_beats} missing: tracking the rendered MIDI here", flush=True)
     if args.clean_beats == "audio":
-        if not args.v2:
-            raise SystemExit("--clean-beats audio is for v2 (--v2)")
         n = len(entries)
         entries = [e for e in entries if e["condition"] != "clean" or e["performance"] in tracked]
         print(f"--clean-beats audio: {len(entries)} of {n} inputs (clean ones need a recording)", flush=True)
     if not args.v2 and (args.delete_above != DELETE_ABOVE or args.tidy):
         ap.error("--delete-above and --tidy are for v2 (--v2)")
     system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above,
-                         args.tidy)
+                         args.tidy, args.real_beats)
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before
@@ -135,7 +147,10 @@ def main(argv=None):
     for k, e in enumerate(entries):
         dst = out / e["condition"] / f"{e['slug']}.musicxml"
         beats, kw = None, {}
-        if e["condition"] == "real" or args.clean_beats == "audio":
+        pm2s = (args.real_beats if e["condition"] == "real" else args.clean_beats) == "pm2s"
+        if pm2s:  # tracked from the notes by the pipeline
+            kw = {"beat_source": "pm2s"}
+        elif e["condition"] == "real" or args.clean_beats == "audio":
             beats = tracked.get(e["performance"])
         elif wants_beats and midi_beats == "synth":
             beats = synth.get(e["performance"])
@@ -178,6 +193,7 @@ def main(argv=None):
                                                   "v2": args.v2, "mode": None if args.v2 else args.mode,
                                                   "midi_beats": midi_beats if wants_beats else None,
                                                   "clean_beats": args.clean_beats if args.v2 else None,
+                                                  "real_beats": args.real_beats if args.v2 else None,
                                                   "pieces": done}, indent=1))
     print(f"wrote {out}: {sum(d['musicxml'] is not None for d in done)}/{len(done)} scores")
 

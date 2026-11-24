@@ -169,11 +169,15 @@ class Result:
     errors: list = field(default_factory=list)
 
 
+BEAT_SOURCES = ("beat_this", "pm2s")
+
+
 class _FrontEnd:
-    """Audio -> performance MIDI (Transkun) and beats (Beat This!), loaded on first use. Needs
-    ``self.device``."""
+    """Audio -> performance MIDI (Transkun) and beats (Beat This!, or PM2S from the notes), loaded
+    on first use. Needs ``self.device``."""
     _transkun = None
     _tracker = None
+    _pm2s = None
 
     def transcribe(self, audio: Path, midi_out: Path) -> Path:
         if self._transkun is None:
@@ -196,6 +200,14 @@ class _FrontEnd:
             except ImportError:
                 self._tracker = False
         return self._tracker(audio, checkpoint) if self._tracker else None
+
+    def pm2s_beats(self, notes: np.ndarray):
+        """(times, down) from PM2S on the notes themselves (src/pm2s_beats.py; no audio needed):
+        for a MIDI input, the alternative to Beat This! on the MIDI rendered to audio."""
+        if self._pm2s is None:
+            from .pm2s_beats import PM2SBeats
+            self._pm2s = PM2SBeats(device="cuda" if self.device.type == "cuda" else "cpu")
+        return self._pm2s(notes)
 
     def track_midi_beats(self, notes: np.ndarray, checkpoint: str = "final0"):
         """Beats of a MIDI input: Beat This! on the notes rendered to audio (src/synth.py), or None
@@ -587,10 +599,13 @@ class V2Pipeline(_FrontEnd):
     # ------------------------------------------------------------------ steps
     def grid(self, notes: np.ndarray, beats: tuple) -> dict:
         """The meter model's grid of the whole performance on these beats, with its key signature."""
-        from .meter import cover_notes, predict_grid
+        from .meter import cover_notes, predict_grid, refine_grid, uses_aux
         from .notelabels import estimate_key
+        # a meter model trained with a second tracker (train_meter.py --aux pm2s) reads PM2S's beats of the notes too
+        aux = self.pm2s_beats(notes) if uses_aux(self.meter.cfg) else None
         g = predict_grid(self.meter, notes, np.asarray(beats[0], np.float64), np.asarray(beats[1], bool),
-                         self.device, self.decode_cfg)
+                         self.device, self.decode_cfg, aux=aux)
+        g = refine_grid(g, notes[:, ONSET], self.decode_cfg)  # beat times onto the notes (off unless decode.json says)
         g = cover_notes(g, float(notes[:, ONSET].min()))  # a pickup before the first tracked beat's bar
         g["key"] = estimate_key(notes)
         return g
@@ -682,10 +697,14 @@ class V2Pipeline(_FrontEnd):
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, progress: Progress = _noop, beats: tuple | None = None,
             beat_checkpoint: str = "final0", delete_above: float | None = None, tidy: bool | None = None,
-            **_) -> Result:
+            beat_source: str = "beat_this", **_) -> Result:
         """``beats``: (times, down) in the input's seconds, given instead of tracking them.
         ``beat_checkpoint``: the Beat This! model that tracks them (scripts/system_scores.py gives
-        each ASAP test piece the cross-validation model that never heard it)."""
+        each ASAP test piece the cross-validation model that never heard it). ``beat_source``:
+        beat_this (the recording; a MIDI input rendered to audio first) or pm2s (PM2S on the notes:
+        the MIDI, or the transcription of a recording)."""
+        if beat_source not in BEAT_SOURCES:
+            raise ValueError(f"beat_source must be one of {BEAT_SOURCES}, not {beat_source!r}")
         from collections import Counter
         src, out = Path(src), Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -708,6 +727,10 @@ class V2Pipeline(_FrontEnd):
         if beats is not None:
             beats = (np.asarray(beats[0], np.float64), np.asarray(beats[1], bool))
             beat_info = f"given: {len(beats[0])} beats, {int(beats[1].sum())} downbeats"
+        elif beat_source == "pm2s":
+            progress("beats", 0.0, "tracking beats from the notes with PM2S")
+            beats = self.pm2s_beats(notes)
+            beat_info = f"PM2S on the notes: {len(beats[0])} beats, {int(beats[1].sum())} downbeats"
         else:
             if ext in AUDIO_EXT:
                 progress("beats", 0.0, "tracking beats with Beat This!")

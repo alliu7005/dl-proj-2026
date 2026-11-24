@@ -499,6 +499,98 @@ scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_level.tgz .
 tar xzf v2_level.tgz
 ```
 
+## 4o. v2, sixth round: Gangqinpu, Beat This! vs PM2S vs both, beat times from the notes
+
+After 4n (docs/experiments.md, "Sixth round"). What it does, in short:
+- **Gangqinpu** (~18k web piano recordings of many genres, Transkun transcriptions aligned to scores)
+  becomes half of every meter-model training batch.
+- **Three meter models** alike but for the beat tracker(s) they read: `meter_v4_gq` (Beat This!),
+  `meter_v4_gq_pm` (PM2S, beats from the notes) and `meter_v4_gq_both` (Beat This! with PM2S's beats
+  as evidence). Each trains on its trackers' real beats in half of the draws that have them, and on
+  their simulated errors (fitted on real output, not guessed) in the rest.
+- **Beat times from the notes** (snap / fill after decoding) on the release's meter model.
+
+**Before you start** (once; on the login node, from `~/scratch/dl-proj-2026`):
+1. `git pull` (the `model` branch).
+2. Earlier rounds' outputs must be there: `outputs/runs/meter_v3/best.pt`, `outputs/runs/meter_v3_tp/decode.json`,
+   `outputs/system_eval/manifest.json` and Beyer & Dai's setup (`~/scratch/beyer_dai`, section 4h). The script
+   stops with a message if one is missing.
+3. Accept the dataset's licence at https://huggingface.co/datasets/Wayne42/gangqinpu (CC BY-NC-SA 4.0,
+   non-commercial; tick both boxes), with the Hugging Face account whose token you use below.
+4. Log in with the cache the jobs use (`hf` comes from the project environment; a token with read
+   access, from huggingface.co -> Settings -> Access Tokens):
+   ```bash
+   module load anaconda3; eval "$(conda shell.bash hook)"; conda activate dl-proj
+   HF_HOME=$HOME/scratch/.cache/huggingface hf auth login      # older huggingface_hub: huggingface-cli login
+   ```
+5. The recordings (not in the dataset; `scripts/fetch_gangqinpu_audio.py` fetches them from the URLs
+   it lists, on gangqinpu.com's file host) belong to that site and its uploaders: look at its terms
+   first. They are fetched at one request a second, for this project only, never redistributed.
+   `AUDIO_TRAIN=0` fetches no training recordings (validation and test only), `AUDIO_TRAIN=<n>` n.
+
+**Space and time.** About 13 GB on scratch (~660 MB of Parquet, ~12 GB of MP3s at the default
+`AUDIO_TRAIN=3000`, plus the built data). End to end about 1.5-2 days if jobs start promptly:
+`gqdata` 3-6 h (mostly the recordings), `gqtrack` 2-5 h, training 2 x 8 h, `gqeval` 5-7 h,
+`gqfinal` ~1 h; `gqrefine` runs alongside from the start and is back within ~8 h.
+
+```bash
+bash pace/v2_gangqinpu.sh                    # 8 jobs (PACE's limit per batch); SNAP=0.05 FILL=0.25
+AUDIO_TRAIN=0 bash pace/v2_gangqinpu.sh      # without training recordings (validation and test still)
+```
+
+| job | what | waits for |
+|---|---|---|
+| `gqtests` | the test suites (CPU) | - |
+| `gqdata` | Gangqinpu's Parquet downloaded (`scripts/fetch_gangqinpu.py`, ~660 MB, pinned revision), its meter data built (`build_meter_data.py --gangqinpu ... --gangqinpu-only`: `train/val/test_gangqinpu.pkl`, `gangqinpu_report.json` says what the filters dropped), PM2S's errors fitted on it (`scripts/fit_pm2s_noise.py` -> `configs/beat_noise_pm2s.json`), `meter_v3_tp` evaluated on its test set; then the recordings downloaded (`scripts/fetch_gangqinpu_audio.py`: every validation and test one and `AUDIO_TRAIN` = 3,000 training ones, ~12 GB, 1 request/s, a few hours; resumable, a failed file skipped) | `gqtests` (cancelled if they fail) |
+| `gqtrack` | Beat This! on the recordings and PM2S on the notes (Gangqinpu, and PM2S on PERiScoPe): their beats stored per performance for training and testing (`scripts/track_meter_data.py` -> `data/processed/meter/tracked_*.npz`); `tracked_report.json` compares the two trackers on the same recordings; Beat This!'s errors on Gangqinpu fitted from its real beats (`fit_pm2s_noise.py --from-stored beat_this` -> `configs/beat_noise_bt_gangqinpu.json`: its off-beat rate on this music, measured) | `gqdata` (cancelled if it fails) |
+| `gqrefine` | `meter_v3_tp_rf` (snap + fill), `meter_v3_tp_fill` (fill only), `meter_oracle_rf`: the grids' beat times taken from the notes (`v2_jobs.sh refine`), `nl_base_gn` on them, v2 on whole pieces with the two refined decoders (`:tidy,d95`); PM2S's beats against Beat This!'s (`scripts/compare_beats.py` -> `outputs/system_eval/beats_compare.md`), the release with PM2S's beats on clean MIDI and the transcriptions (`:tidy,d95,pm,rpm`) | `gqtests` (cancelled if they fail) |
+| `gqtrain`, `gqtrain2` | Three meter models alike but for the tracker(s) they read: `meter_v4_gq` (Beat This!), `meter_v4_gq_pm` (PM2S) and `meter_v4_gq_both` (Beat This!, with PM2S's beats as evidence: `--aux pm2s`). `meter_v3`'s recipe, Gangqinpu half of every batch; every one draws its tracker(s)' real beats in half of the draws that have them (`--tracked`, `--tracked-share 0.5`) and their fitted errors in the rest (Beat This!'s on Gangqinpu: `configs/beat_noise_bt_gangqinpu.json`; PM2S's: `configs/beat_noise_pm2s.json`). The second job resumes the first; then each is tuned with the tempo prior (`meter_v4_gq_pm` on PM2S's errors) and evaluated | `gqtrack` (cancelled if it fails); `gqtrain` (finished or not) |
+| `gqeval` | Each new meter model with its own tracker(s) (`v2_jobs.sh trackers`): `meter_v4_gq_pm` with PM2S's beats on every test set (`<condition>_pm2s`), the others with Beat This!'s real beats of Gangqinpu's test recordings (`gangqinpu_real`; `meter_v4_gq_both` with PM2S's as evidence), `meter_v3_tp` there too; `nl_base_gn` on the new grids; v2 on whole pieces with each (`:tidy,d95`; `:tidy,d95,pm,rpm` for PM2S). Beat This! against PM2S against both | `gqtrain2` (finished or not) |
+| `gqfinal` | `outputs/compare`, every system rated with Beyer & Dai's metrics, `outputs/system_eval/paired.md` | `gqrefine`, `gqeval` (finished or not) |
+
+**What to check as it runs** (`squeue -u $USER`; each job's log is `slurm-<job>-<id>.out`):
+- after `gqdata`: `data/processed/meter/gangqinpu_report.json` (how many recordings gave grids and
+  what the filters dropped: about 98% of the recordings, 81% of the beats on validation) and
+  `data/raw/gangqinpu/audio/fetch_summary.json` (fetched / failed; failures per file in
+  `download_log.jsonl`);
+- after `gqtrack`: `data/processed/meter/tracked_report.json` (how many performances each tracker
+  has beats for, and Beat This! against PM2S on the same recordings) and
+  `configs/beat_noise_bt_gangqinpu.json` (`p_offbeat`, `p_double`, `p_half`: Beat This!'s measured
+  errors on this music; missing if fewer than 30 recordings were tracked);
+- in each new run's `outputs/runs/<run>/config.json`: `tracked_by_source` / `tracked_aux_by_source`
+  (how many training performances have real beats; 0 = trained on the simulated tracker only).
+
+**If something goes wrong:**
+- *The recordings cannot be fetched* (all failed in `fetch_summary.json`): the batch goes on. The
+  Beat This! models train on its simulated errors only (a warning in their logs; Gangqinpu then
+  uses the ASAP-fitted profile), PM2S needs no audio, and `gangqinpu_real` is skipped at test.
+  `python scripts/fetch_gangqinpu_audio.py --release data/raw/gangqinpu --out data/raw/gangqinpu/audio`
+  resumes later (only what is missing).
+- *A job failed*: its log says why. `gqtests` failing cancels everything after it: fix, pull and
+  run the batch again (downloads and finished training runs are kept; the data build, tracking and
+  evaluations run again).
+- *Training not finished after `gqtrain2`* (`gqeval`'s log says "not done yet"): one more training
+  job (resuming), then the evaluation and the final scoring again:
+  ```bash
+  STAGE=train bash pace/v2_gangqinpu.sh      # gqtrain3 -> gqeval -> gqfinal
+  ```
+- *Only the evaluation again* (e.g. after a fix in it): `STAGE=eval bash pace/v2_gangqinpu.sh`.
+
+The refined grids need no training and come back first (a few hours). To bring everything back
+(PACE, then Windows):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_gq.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval/beats_compare.* data/processed/meter/gangqinpu_report.json outputs/runs/meter_v4_gq/*.json outputs/runs/meter_v4_gq/log.csv outputs/runs/meter_v4_gq_both/*.json outputs/runs/meter_v4_gq_both/log.csv configs/beat_noise_bt_gangqinpu.json outputs/runs/meter_v4_gq_pm/*.json outputs/runs/meter_v4_gq_pm/log.csv configs/beat_noise_pm2s.json data/processed/meter/tracked_report.json data/raw/gangqinpu/audio/fetch_summary.json outputs/runs/meter_v3_tp/eval_meter.json outputs/runs/*_rf/*.json outputs/runs/meter_v3_tp_fill/*.json outputs/runs/nl_base_gn/eval_pieces_best.json slurm-gq*.out slurm-met_meter_v*_gq*.log 2>/dev/null; ls -la v2_gq.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_gq.tgz .
+```
+
+```powershell
+tar xzf v2_gq.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

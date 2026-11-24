@@ -13,7 +13,8 @@ in `outputs/runs/` (`src/release.py default_path`; `--labeller`, `--meter`, `--c
 - **v2 (default):** Beat This! tracks the beats, the meter model decodes the bars and time
   signatures of the whole piece from them, and the note labeller places every note in them
   (`src/pipeline.py V2Pipeline`; `--labeller`, `--meter`). A MIDI upload is rendered to audio for
-  Beat This! (`src/synth.py`). The page shows the main time signature, the key signature and how
+  Beat This! (`src/synth.py`); `audio_to_score.py --v2 --beats pm2s` takes the beats from the notes
+  with PM2S instead (`src/pm2s_beats.py`; the web page still uses Beat This!). The page shows the main time signature, the key signature and how
   many notes it left out as transcription errors. A third or fourth staff is written only when at
   least 2% of the piece's notes are on it (`MIN_EXTRA_STAFF`; in the target scores such staves hold
   28-100% of a piece, or one short passage). Below that the staff is a stray prediction, and its

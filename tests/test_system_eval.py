@@ -179,6 +179,29 @@ def test_system_scores_v2_and_failures():
             pass
         else:
             raise AssertionError("--clean-beats audio is for v2 only")
+        # --clean-beats pm2s --real-beats pm2s: the beats from the notes on both (PM2S stood in for:
+        # tests/test_pm2s.py runs the model itself), system v2_nl_m_pm_rpm
+        real_pm2s = V2Pipeline.pm2s_beats
+        seen = []
+
+        def stand_in(self, notes):
+            seen.append(len(notes))
+            return 0.5 + 0.5 * np.arange(36), np.arange(36) % 3 == 0
+        V2Pipeline.pm2s_beats = stand_in
+        try:
+            system_scores.main(["--v2", "nl+m", "--clean-beats", "pm2s", "--real-beats", "pm2s"] + common)
+        finally:
+            V2Pipeline.pm2s_beats = real_pm2s
+        pm = json.loads((tmp / "out" / "v2_nl_m_pm_rpm" / "summary.json").read_text())
+        assert pm["clean_beats"] == "pm2s" and pm["real_beats"] == "pm2s" and len(seen) == 2
+        assert [p["beats"] for p in pm["pieces"]] == ["PM2S on the notes: 36 beats, 12 downbeats"] * 2, pm["pieces"]
+        try:
+            system_scores.main(["--run", "beat", "--clean-beats", "pm2s"] + common)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("--clean-beats pm2s is for v2 only")
+        (tmp / "out" / "v2_nl_m_pm_rpm" / "summary.json").unlink()
         (tmp / "out" / "v2_nl_m_ab" / "summary.json").unlink()
         assert beyer_dai.all_systems(tmp / "out") == ["beat_none_sb", "v2_nl_m"]
         (tmp / "out" / "beyer_dai").mkdir()

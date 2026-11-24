@@ -193,10 +193,54 @@ def stitch_notes(windows, dedupe_s: float = 0.002) -> np.ndarray:
 N_PHASE_BINS = 12
 AT_BEAT = 0.05      # seconds: a note "on" the beat
 N_BEAT_FEATURES = 27 + 12   # the first 27 (26 used) are the first meter model's, then the pitch classes
+# a second tracker's beats as evidence on the first one's (``aux``): has one, a beat of it at this
+# beat, how many of its beats in the beat's interval (log), their mean place in it, a downbeat of it
+# here. After the others, so a model without it (n_features = N_BEAT_FEATURES) reads none of them
+N_AUX_FEATURES = 5
+N_ALL_FEATURES = N_BEAT_FEATURES + N_AUX_FEATURES
 
 
-def beat_features(notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray) -> np.ndarray:
-    """[K, N_BEAT_FEATURES] for K tracked beats. ``notes``: [N, 4] pitch, onset, offset, velocity
+def uses_aux(cfg) -> bool:
+    """Whether a meter model (its config: dict or MeterConfig) reads a second tracker's beats."""
+    n = cfg["n_features"] if isinstance(cfg, dict) else cfg.n_features
+    return n > N_BEAT_FEATURES
+
+
+def aux_features(beat_t: np.ndarray, aux) -> np.ndarray:
+    """[K, N_AUX_FEATURES]: the second tracker's beats ``aux`` = (times, downbeat flags) seen
+    from each beat of the first one (its interval: up to the next beat): 1; one of them within
+    AT_BEAT (it agrees); how many start inside the interval past that (log2 1 + n: 1 when it beats
+    twice as fast); their mean place in it (0..1; 0.5 = on the off-beat: the first tracker off by
+    half a beat, or at half the speed); one of them within AT_BEAT marked a downbeat."""
+    k = len(beat_t)
+    f = np.zeros((k, N_AUX_FEATURES), np.float32)
+    if k == 0 or aux is None:
+        return f
+    t = np.asarray(beat_t, np.float64)
+    at, ad = np.asarray(aux[0], np.float64), np.asarray(aux[1], bool)
+    order = np.argsort(at, kind="stable")
+    at, ad = at[order], ad[order]
+    f[:, 0] = 1.0
+    if not len(at):
+        return f
+    ln = np.diff(t)
+    ln = np.concatenate([ln, ln[-1:]]) if k > 1 else np.array([0.5])
+    ln = np.clip(ln, 0.05, 5.0)
+    for j in range(k):
+        a0, a1 = np.searchsorted(at, t[j] - AT_BEAT), np.searchsorted(at, t[j] + AT_BEAT)
+        if a1 > a0:
+            f[j, 1] = 1.0
+            f[j, 4] = float(ad[a0:a1].any())
+        lo, hi = np.searchsorted(at, t[j] + AT_BEAT), np.searchsorted(at, t[j] + ln[j] - AT_BEAT)
+        if hi > lo:
+            f[j, 2] = math.log2(1 + hi - lo)
+            f[j, 3] = float(np.mean((at[lo:hi] - t[j]) / ln[j]))
+    return f
+
+
+def beat_features(notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, aux=None) -> np.ndarray:
+    """[K, N_ALL_FEATURES] for K tracked beats (the last N_AUX_FEATURES: ``aux_features`` of a
+    second tracker's beats ``aux``, zeros without one; a model reads the first n_features). ``notes``: [N, 4] pitch, onset, offset, velocity
     (load_performance's columns), ``beat_d``: the tracker's downbeat flags. Per beat (its interval
     = up to the next beat; the last one repeats the previous length):
       beat length (log2 s / 0.5), log ratio to the previous and next beat, tracker downbeat, 1
@@ -207,9 +251,10 @@ def beat_features(notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray) -> 
         the previous one), lowest pitch of the beat's notes
       the beat's pitch-class profile (12, weighted by duration up to 2 s, summing to 1)"""
     k = len(beat_t)
-    f = np.zeros((k, N_BEAT_FEATURES), np.float32)
+    f = np.zeros((k, N_ALL_FEATURES), np.float32)
     if k == 0:
         return f
+    f[:, N_BEAT_FEATURES:] = aux_features(beat_t, aux)
     t = np.asarray(beat_t, np.float64)
     ln = np.diff(t)
     ln = np.concatenate([ln, ln[-1:]]) if k > 1 else np.array([0.5])
@@ -342,6 +387,12 @@ class DecodeConfig:
     level_sigma: float = 0.51
     level_model_weight: float = 0.0
     level_stay: float = 0.0
+    # the grid's beat times moved onto the notes after decoding (refine_grid): an anchor (a tracked
+    # beat) onto the onset of a chord within snap_s seconds, and a notated beat no tracked beat
+    # times (a missed beat, a step of 2 quarters) added at a chord onset within fill_tol beats of
+    # where the anchors around it put it. 0 (the default): the grid as decoded.
+    snap_s: float = 0.0
+    fill_tol: float = 0.0
 
     def to_dict(self):
         return asdict(self)
@@ -508,9 +559,109 @@ def cover_notes(grid: dict, t_first: float, tol: float = 1 / 24) -> dict:
     return out
 
 
+CHORD_S = 0.035     # onsets this close together are one chord (refine_grid)
+
+
+def chord_onsets(onsets: np.ndarray, gap: float = CHORD_S) -> np.ndarray:
+    """One time per chord: the onsets grouped wherever consecutive ones are within ``gap``
+    seconds, each group's median (a played chord is spread over a few tens of ms)."""
+    on = np.sort(np.asarray(onsets, np.float64))
+    if not len(on):
+        return on
+    cut = np.nonzero(np.diff(on) > gap)[0] + 1
+    return np.array([float(np.median(g)) for g in np.split(on, cut)])
+
+
+def _notated_qs(grid: dict) -> np.ndarray:
+    """The quarter positions of every notated beat of the grid's bars (beat_layout of each bar's
+    time signature), within its anchors' range."""
+    q = np.asarray(grid["q"], np.float64)
+    bq = list(np.asarray(grid["bar_q"], np.float64)) + [np.inf]
+    out = []
+    for k, ts in enumerate(grid["bars"]):
+        n, qpb = beat_layout(ts)
+        for j in range(n):
+            x = bq[k] + j * qpb
+            if x < bq[k + 1] - 1e-9 and q[0] - 1e-9 <= x <= q[-1] + 1e-9:
+                out.append(x)
+    return np.array(out, np.float64)
+
+
+def refine_grid(grid: dict, onsets: np.ndarray, cfg: DecodeConfig) -> dict:
+    """The decoded grid with its beat times taken from the notes where they say more than the
+    tracker did (Transkun's onsets are within ~5 ms; a tracked beat jitters by ~18 ms, and 12% of
+    the beats are missed, the grid then interpolating over two beats under rubato):
+      snap   (cfg.snap_s > 0) every anchor (a tracked beat with its quarter position) onto the
+             nearest chord (chord_onsets) within snap_s seconds;
+      fill   (cfg.fill_tol > 0) every notated beat strictly between two anchors (a missed beat, a
+             step longer than a beat) gets an anchor at the nearest chord within fill_tol beats of
+             the time the anchors around it give it (nothing played there: no anchor).
+    Anchor times stay strictly increasing (a move or an addition that would break that is not
+    made); bar times are re-read from the anchors as grid_from_states does. Everything else (bars,
+    time signatures, quarter positions of the anchors, the level) is the grid's."""
+    t0, q0 = np.asarray(grid["t"], np.float64), np.asarray(grid["q"], np.float64)
+    if (cfg.snap_s <= 0 and cfg.fill_tol <= 0) or len(t0) < 2 or len(q0) != len(t0):
+        return grid
+    chords = chord_onsets(onsets)
+    if not len(chords):
+        return grid
+
+    def nearest(x: float) -> float:
+        j = int(np.searchsorted(chords, x))
+        cand = [chords[i] for i in (j - 1, j) if 0 <= i < len(chords)]
+        return min(cand, key=lambda c: abs(c - x))
+
+    t = t0.copy()
+    moved = 0
+    if cfg.snap_s > 0:
+        for i in range(len(t)):
+            c = nearest(t[i])
+            lo = t[i - 1] if i else -np.inf
+            hi = t0[i + 1] if i + 1 < len(t) else np.inf
+            if abs(c - t[i]) <= cfg.snap_s and lo < c < hi and c != t[i]:
+                t[i] = c
+                moved += 1
+    added_q, added_t = [], []
+    if cfg.fill_tol > 0:
+        nq = _notated_qs(grid)
+        for i in range(len(t) - 1):
+            inside = nq[(nq > q0[i] + 1e-6) & (nq < q0[i + 1] - 1e-6)]
+            if not len(inside):
+                continue
+            spq = (t[i + 1] - t[i]) / max(q0[i + 1] - q0[i], 1e-9)     # seconds per quarter here
+            prev = t[i]
+            for x in inside:
+                k = int(np.searchsorted(grid["bar_q"], x, side="right")) - 1
+                qpb = beat_layout(grid["bars"][max(k, 0)])[1]
+                guess = t[i] + (x - q0[i]) * spq
+                c = nearest(guess)
+                if abs(c - guess) <= cfg.fill_tol * qpb * spq and prev < c < t[i + 1]:
+                    added_q.append(x)
+                    added_t.append(c)
+                    prev = c
+    q = np.concatenate([q0, added_q])
+    t = np.concatenate([t, added_t])
+    order = np.argsort(q, kind="stable")
+    q, t = q[order], t[order]
+    out = dict(grid)
+    out["t"], out["q"] = t, q
+    bq = np.asarray(grid["bar_q"], np.float64)
+    bar_t = np.interp(bq, q, t)
+    s0 = (t[1] - t[0]) / max(q[1] - q[0], 1e-6)
+    out["bar_t"] = np.where(bq < q[0], t[0] + (bq - q[0]) * s0, bar_t)
+    out["refined"] = {"snapped": moved, "filled": len(added_q)}
+    return out
+
+
 # ---------------------------------------------------------------------------------------------
 # training samples, the model, its loss, prediction and the grid's scores
 # ---------------------------------------------------------------------------------------------
+
+def perf_key(perf: dict) -> str:
+    """A meter-model performance's key: the performance, #segment when it has several (the key of
+    its grids in scripts/eval_meter.py and of its tracked beats in meter/tracked_*.npz)."""
+    return perf["performance"] if perf.get("segments", 1) <= 1 else f"{perf['performance']}#{perf['segment']}"
+
 
 def is_clean(perf: dict) -> bool:
     """Clean performance MIDI (ASAP): its notes get the synthetic transcription noise. Real
@@ -543,17 +694,22 @@ class Augment:
             notes[:, 1:3] *= s
             notes[:, 3] = np.clip(np.round(notes[:, 3] * rng.uniform(*self.velocity)), 1, 127)
         out = dict(perf, notes=notes.astype(np.float32), gt=dict(perf["gt"], t=np.asarray(perf["gt"]["t"]) * s))
-        if perf.get("beats") is not None:
-            out["beats"] = (np.asarray(perf["beats"][0]) * s, perf["beats"][1])
+        for key in ("beats", "aux"):   # tracked beats stretch with the notes
+            if perf.get(key) is not None:
+                out[key] = (np.asarray(perf[key][0]) * s, perf[key][1])
         return out
 
 
-def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, note_noise=None, augment=None):
+def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, note_noise=None, augment=None,
+           aux_noise=None):
     """One training / validation sample of a performance: its tracked beats (the real tracker's if
     it has them, else the annotated beats corrupted by ``noise``, a src/beats.py BeatNoise; exact
     without), their features and targets, cut to a random ``chunk`` of beats (0 = all).
     ``note_noise``: a src/preprocessing/noise.py NoiseModel for the notes of a clean performance
-    (clean MIDI -> like a transcription; ``is_clean``); ``augment``: an ``Augment`` (training).
+    (clean MIDI -> like a transcription; ``is_clean``); ``augment``: an ``Augment`` (training);
+    ``aux_noise``: a second tracker (a BeatNoise) whose beats join as evidence (``aux_features``):
+    the performance's own ``aux`` beats if it has them (a real second tracker), else the
+    ground truth corrupted by it; None: no second tracker.
     Returns (features [K, F], targets {bar, step, ts}, beat times [K], note inputs: ``note_inputs``)."""
     if augment is not None:
         perf = augment(perf, rng)
@@ -565,6 +721,9 @@ def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, not
     else:
         bt, bd = gt["t"], gt["down"]
     bt, bd = np.asarray(bt, np.float64), np.asarray(bd, bool)
+    aux = None
+    if aux_noise is not None:
+        aux = perf["aux"] if perf.get("aux") is not None else aux_noise(gt["t"], gt["down"], rng)
     if note_noise is not None and len(notes) and is_clean(perf):
         store = np.stack([notes[:, 0], notes[:, 1], notes[:, 2] - notes[:, 1], notes[:, 3]], axis=1).astype(np.float32)
         noisy, _ = note_noise(store, np.zeros((0, 2), np.float32), rng)
@@ -572,7 +731,7 @@ def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, not
     if chunk and len(bt) > chunk:
         a = int(rng.integers(0, len(bt) - chunk + 1))
         bt, bd = bt[a:a + chunk], bd[a:a + chunk]
-    return beat_features(notes, bt, bd), targets(bt, gt), bt, note_inputs(notes, bt)
+    return beat_features(notes, bt, bd, aux), targets(bt, gt), bt, note_inputs(notes, bt)
 
 
 def collate(samples: list, device="cpu"):
@@ -726,12 +885,14 @@ def meter_loss(out: dict, tg: dict, tempo_weight: float = 1.0):
     return total, parts
 
 
-def predict_logp(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, device="cpu") -> dict | None:
+def predict_logp(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, device="cpu",
+                 aux=None) -> dict | None:
     """The model's per-beat log-probabilities {bar, step, ts} for a whole performance (None with
-    fewer than 2 beats)."""
+    fewer than 2 beats). ``aux``: a second tracker's (times, downbeats), for a model that reads
+    one (``uses_aux``)."""
     import torch
     beat_t = np.asarray(beat_t, np.float64)
-    feats = beat_features(notes, beat_t, beat_d)
+    feats = beat_features(notes, beat_t, beat_d, aux)
     if len(feats) < 2:
         return None
     model.eval()
@@ -896,10 +1057,10 @@ def choose_level(grid: dict, cfg: DecodeConfig, tempo=None) -> dict:
 
 
 def predict_grid(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, device="cpu",
-                 cfg: DecodeConfig = DecodeConfig()) -> dict:
+                 cfg: DecodeConfig = DecodeConfig(), aux=None) -> dict:
     """A whole performance: the model's per-beat log-probabilities, decoded into a consistent grid
     (``decode``, ``grid_from_states``)."""
-    return grid_from_logp(beat_t, predict_logp(model, notes, beat_t, beat_d, device), cfg)
+    return grid_from_logp(beat_t, predict_logp(model, notes, beat_t, beat_d, device, aux), cfg)
 
 
 def grid_beats(grid: dict) -> tuple[np.ndarray, np.ndarray]:

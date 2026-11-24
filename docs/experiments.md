@@ -1105,6 +1105,131 @@ works. The release keeps `meter_v3` with the tempo-prior decoder, without the le
 `choose_level`, the tempo head and `--level` stay in the code (off by default) for a meter model
 trained on more, and more varied, data (docs/handoff.md, options 8 and 9).
 
+### Sixth round: more varied meter data, beat times from the notes, beats for MIDI input
+
+Three threads, the first two in `pace/v2_gangqinpu.sh` (pace/README.md, 4o).
+
+**Gangqinpu as meter-model data.** Gangqinpu (Zeng, Mathur & Wang, Oct 2026; arXiv 2610.34694;
+Hugging Face `Wayne42/gangqinpu`, gated, CC BY-NC-SA 4.0) has 18,786 web piano recordings (pop
+8,353, classical 3,064, folk 748, jazz 321, ...; labels automatic), transcribed by Transkun V2 (ours)
+and aligned note by note to their scores, with the score's beats timed through the alignment. It
+is the "more, and more varied, data" the fifth round points to. `src/preprocessing/gangqinpu.py`
+turns each row into meter-model performances as PERiScoPe's are: the transcribed notes (the notes
+the release's refinement interpolated are dropped) and the grid of every run of trustworthy bars
+(`aligned_grids`). A bar is kept when all its beats are timed from matched notes or between them,
+with confidence >= 0.5, its time signature was written in the score (not inferred), the beats fit
+the time signature and run forward at a plausible tempo; pickups are dropped and a dropped bar
+splits the run. The release's own split keeps Beyer & Dai's ASAP test works in its test set.
+- `meter_v4_gq`: `meter_v3`'s recipe with Gangqinpu as half of every batch (`--gangqinpu-share
+  0.5`; the other sources keep their proportions in the rest); `meter_v3_gqft`: `meter_v3`
+  fine-tuned on the same mix. Both decoded like the release (tempo prior).
+- A fourth meter test set, `gangqinpu` (its test split: music outside the classical benchmark),
+  with `meter_v3_tp` scored there as the baseline.
+- **Checked locally on the real validation split** (499 rows, 2026-11-24): 487 recordings give
+  grids, 81% of the beats are kept, in 1,647 runs (median 39 beats; 65% of the beats in runs of 64
+  or more). 92.6% of the kept beats have a played note within 50 ms; the median written tempo is
+  96 quarters per minute (ASAP 116). Most drops are bars touching an alignment hole or an
+  extrapolated beat (18k of 138k beats), bars with an inferred time signature (2.8k), and bars with
+  more beats than their meter (1.0k: a 4/4 bar with a 5th beat). The release counts 6/4 (and 12/4,
+  15/16) in other beats than ASAP: its beats are mapped onto ours by their place in the bar.
+- **Risk:** 81% of its bars are 4/4 (ASAP is more varied); a tiny model trained on it alone guessed
+  4/4 nearly everywhere. Half of every batch keeps the classical data in; if the new models' time
+  signatures on ASAP get worse, lower `--gangqinpu-share`. The first job writes
+  `data/processed/meter/gangqinpu_report.json`: what each filter dropped on the full release.
+
+**Beat times from the notes** (`src/meter.py refine_grid`; `DecodeConfig.snap_s` / `fill_tol`, 0 =
+off, so every earlier decoder is unchanged). The oracle grid loses 0.16 onset F1 to the tracker's
+timing (0.857 -> 0.697). Beat This!'s beats that it finds are close (18 ms jitter, Transkun's
+onsets ~5 ms), but it misses 12% of them, and the grid then interpolates over two beats under
+rubato. After decoding, each anchor moves onto a chord onset within `snap_s` seconds, and each
+notated beat between two anchors gets one at a chord onset within `fill_tol` beats of where the
+anchors put it (none where nothing is played). Bars, time signatures and quarter positions are
+untouched. `meter_v3_tp_rf` (snap 0.05 s + fill 0.25), `meter_v3_tp_fill` (fill only) and
+`meter_oracle_rf` share `meter_v3`'s checkpoint (`pace/v2_jobs.sh refine`); the labeller on them
+and v2 on whole pieces say how much comes back. The settings are a first guess, not tuned.
+
+**Beats for MIDI input: PM2S (screen, local, 2026-11-24).** v2 on clean MIDI gets Beat This!'s
+beats of the MIDI rendered by `src/synth.py`, which cost it 2.8 MUSTER points against the real
+recordings' beats (fourth round). PM2S (Liu et al., ISMIR 2022; MIT; a CRNN beat tracker on the
+notes) on the ASAP test MIDI, scored like Beat This! (`src/beats.compare`):
+
+| beats, ASAP test MIDI (24 performances with recordings) | beat F | downbeat F | wrong tempo octave |
+|---|---|---|---|
+| Beat This! held-out folds on the rendered MIDI (fourth round) | 0.576 | 0.422 | |
+| Beat This! `final0` (trained on all of ASAP) on the rendered MIDI | 0.580 | 0.456 | 4 / 24 |
+| PM2S released weights (trained on all of ASAP) on the MIDI | **0.786** | **0.613** | 0 / 24 |
+| Beat This! held-out folds on the real recordings (fourth round) | 0.709 | 0.592 | |
+
+On all 59: PM2S 0.745 / 0.559, `final0` 0.545 / 0.396; PM2S is better on 58 of 59 performances
+(beats) and 57 (downbeats). Ondine stays hard for both (0.46 / 0.42). **Caveat:** PM2S's released
+weights were trained (`--full_train`) on every ASAP performance, ours among them, as Beat This!'s
+`final0` was; the leak barely helped Beat This! (0.580 against 0.576 held out), but PM2S saw these
+very MIDI files. Before quoting it: PM2S retrained without our test (and validation) pieces.
+
+PM2S is now a beat source of the pipeline (`src/pm2s_beats.py`: its model and post-processing,
+vendored under its MIT licence; checked identical to the original code on five test pieces, except
+that the last beat, which PM2S's gap filling drops, is kept). `V2Pipeline.run(beat_source="pm2s")`
+takes the beats from the notes, for MIDI and for a recording's transcription
+(`audio_to_score.py --beats pm2s`). `pace/v2_gangqinpu.sh` scores it against Beat This! on the
+whole-piece inputs (`scripts/compare_beats.py`: clean MIDI against the rendered audio and the
+recordings, the transcriptions against the recordings) and runs the release with it on whole
+pieces (`system_scores.py --clean-beats pm2s --real-beats pm2s`, system `..._pm_rpm`).
+
+**PM2S on music it never saw** (`scripts/fit_pm2s_noise.py`, locally on 200 performances of
+Gangqinpu's validation split, 2026-11-24; ground truth: the score's beats timed through the
+alignment): beat F 0.705, downbeat F 0.483, the wrong tempo octave on 39% of performances (17%
+double, 23% half), at the right tempo 23% of the beats missed and 21% spurious, 6 ms timing jitter.
+Beat This! on the ASAP recordings (held out): beat F 0.71-0.81, downbeat F 0.60-0.65, the wrong
+octave on 23-33%, 12% / 13%, 18 ms. The ASAP screen (0.786 / 0.613, no octave errors) owed much to
+the leak. Not like for like (Beat This! cannot be run on Gangqinpu without its audio, and part of
+the "half" errors may be the note-value ambiguity itself), but PM2S is no clear win.
+
+**Trained for PM2S or for Beat This!** A meter model learns the errors of the tracker it is trained
+with (`configs/beat_noise.json`: Beat This!'s, fitted on ASAP). `meter_v4_gq_pm` is `meter_v4_gq`
+trained on PM2S's fitted errors instead (`configs/beat_noise_pm2s.json`, from Gangqinpu's training
+split on PACE; `--real-beats simulated`: the real transcriptions get the simulated PM2S too, not
+Beat This!'s recorded beats), its decoder tuned on them (`eval_meter.py --tune-noise`). Both are
+tested with both trackers' beats, at the meter level (`eval_meter.py`, `--tracker pm2s`) and on
+whole pieces: the 2 x 2 of tracker in training and at test.
+
+**Beat This!, PM2S, or both** (what the sixth round's three meter runs compare). `meter_v4_gq`
+reads Beat This!'s beats, `meter_v4_gq_pm` PM2S's, `meter_v4_gq_both` Beat This!'s with PM2S's as
+evidence on them (`train_meter.py --aux pm2s`; `src/meter.py aux_features`, 5 features per beat
+after the 39 others, which a model without them does not read: does PM2S have a beat there, how
+many of its beats fall in the interval and where (2 at 0.5 = it beats twice as fast; its beats at
+0.5 and none on ours = ours are on the off-beats), does it mark a downbeat). Their failures differ
+(PM2S doubles the tempo, Beat This! now and then tracks the off-beats), so together they can show
+which one is wrong. Each is tested with its own tracker(s); the pipeline gives a model that reads
+PM2S its beats of the notes by itself.
+
+**How much tracker noise, measured.** Every simulated error rate is fitted on a tracker's real
+output, not set by hand. Beat This!'s profile (`configs/beat_noise.json`) was fitted on the ASAP
+recordings, where it never tracked the off-beats (`p_offbeat` 0), so a model trained on it has never
+seen that. On Gangqinpu its errors are fitted again from its real beats of the downloaded recordings
+(`fit_pm2s_noise.py --from-stored beat_this` -> `configs/beat_noise_bt_gangqinpu.json`; at least 30
+tracked performances, else none is written and Gangqinpu keeps the ASAP profile), and Gangqinpu's
+performances are simulated with it (`--beat-noise-gangqinpu`), the others with the ASAP one.
+
+**Real tracker output in training, mixed with the simulated one.** A fitted profile makes errors at
+fixed rates, wherever they fall; a real tracker goes wrong where the music makes it (syncopation,
+rubato, sparse passages), PM2S because of the very notes the meter model reads. So the trackers
+are also run on the data once (`scripts/track_meter_data.py`, deterministic: running them at every
+step would give the same beats): Beat This! on Gangqinpu's recordings (downloaded by
+`scripts/fetch_gangqinpu_audio.py` from the URLs the release lists: every validation and test one,
+3,000 training ones), PM2S on Gangqinpu's and PERiScoPe's notes; never ASAP, which both trained on.
+Each time a performance that has them is drawn in training, it gets its tracker's real beats with
+probability 0.5 (`--tracked`, `--tracked-share`), else a fresh simulated draw: the music-dependent
+errors and the variety. At test, `eval_meter.py --real-tracked` uses Beat This!'s real beats of the
+Gangqinpu test recordings (`gangqinpu_real`), `--tracker pm2s` PM2S's: the 2 x 2 with both real
+trackers on the same music, and `tracked_report.json` compares the two trackers' beats there like
+for like. The recordings belong to the source site and its uploaders (the dataset's licence covers
+its annotations): fetched at one request a second, for this research, not redistributed.
+
+The fit found a bug in the tracker simulation (`src/beats.py BeatNoise`): spurious beats were drawn
+as binomial(n, extra / (1 - extra)), which fails above extra = 0.5; 6 of PM2S's 120 profiles are
+there (up to 0.73), so its training would have stopped within a few steps. Above 0.5 the count is
+now Poisson with the same mean; up to 0.5 the draws are unchanged (Beat This!'s profiles reach 0.37).
+
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
 The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced

@@ -13,12 +13,38 @@ Training data (every source that data/processed/meter has):
   PERiScoPe      real Transkun transcriptions of 971 more works, the grid from their score
                  alignment (scripts/build_meter_data.py); the tracker simulated, the notes as they
                  are (--no-periscope leaves them out)
+  Gangqinpu      with --gangqinpu: ~18k web piano recordings of many genres (pop, jazz, folk,
+                 classical), Transkun transcriptions with the grid from their score alignment
+                 (build_meter_data.py --gangqinpu); the tracker simulated. --gangqinpu-share is the
+                 share of every batch drawn from it (the other sources keep their proportions in
+                 the rest), so its size does not drown the classical data; validated on a fixed
+                 draw of --val-gangqinpu of its validation performances
 Every step draws --batch performances (--balance piece: each piece in proportion to its length,
 however many performances it has; beats: each performance in proportion to its length), augments
 each (src/meter.py Augment: tempo stretch, transposition, velocity; --no-augment turns it off: on
 ASAP alone a model then memorises its 156 pieces within ~2k steps, validation time-signature
 accuracy falling while training goes on) and cuts a random stretch of --chunk-min .. --chunk beats
 from each. --workers processes make the samples.
+
+Another tracker: --beat-noise <its fitted errors> (scripts/fit_pm2s_noise.py ->
+configs/beat_noise_pm2s.json for PM2S) with --real-beats simulated, so the real transcriptions get
+the simulated tracker too, not Beat This!'s recorded beats: a model trained for that tracker only.
+
+Real tracker output in the mix: --tracked beat_this / pm2s attaches that tracker's own beats
+(scripts/track_meter_data.py: Beat This! on Gangqinpu's recordings, PM2S on Gangqinpu's and
+PERiScoPe's notes; never ASAP, which both trackers trained on) to the training performances that
+have them, and each time one of them is drawn it gets those beats with probability
+--tracked-share, else the simulated tracker: errors that come from the music itself (where the
+real tracker goes wrong), and the variety of fresh simulated draws.
+
+A second tracker as evidence: --aux pm2s gives every beat of the first tracker features of PM2S's
+beats around it (src/meter.py aux_features: does it agree, does it beat faster, on the off-beats),
+PM2S simulated with --aux-noise or, in --tracked-share of the draws that have them, its real beats
+(Gangqinpu, PERiScoPe). The model then reads both trackers (n_features = N_ALL_FEATURES).
+
+The tracker's errors per source: --beat-noise-gangqinpu <fitted on Gangqinpu> simulates the first
+tracker on Gangqinpu's performances with the errors it makes on that music (scripts/fit_pm2s_noise.py
+--from-stored beat_this: Beat This!'s real beats of its recordings), the others keep --beat-noise.
 
 Validation (every --eval-every steps), per source (ASAP val, real val, a fixed --val-periscope
 PERiScoPe val performances): the heads' accuracies and the DECODED grids scored against the
@@ -62,10 +88,10 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import lower_priority, pick_device  # noqa: E402
 from scripts.train_model import learning_rate  # noqa: E402
-from src.beats import BeatNoise, f_measure  # noqa: E402
-from src.meter import (N_BEAT_FEATURES, N_NOTE_FEATURES, Augment, DecodeConfig, MeterConfig,  # noqa: E402
+from src.beats import BeatNoise, f_measure, load_beats  # noqa: E402
+from src.meter import (N_ALL_FEATURES, N_BEAT_FEATURES, N_NOTE_FEATURES, Augment, DecodeConfig, MeterConfig,  # noqa: E402
                        build_meter_model, choose_level, collate, grid_from_logp, grid_scores, logp_of, meter_loss,
-                       sample)
+                       perf_key, sample)
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 
 FIRST_FEATURES = 27  # the first meter model's beat features (--beat-features first)
@@ -83,6 +109,29 @@ def load(data: Path, split: str) -> list:
     return perfs
 
 
+def mixed_weights(sources: dict, balance: str, shares: dict) -> np.ndarray:
+    """Sampling weights over the concatenated sources: each source named in ``shares`` gets that
+    share of the draws (``weights`` within it), the others share the rest in proportion to their
+    own ``weights`` together, as without it. Empty sources take no share."""
+    parts, fixed = [], {k: v for k, v in shares.items() if sources.get(k)}
+    rest = [k for k in sources if k not in fixed and sources[k]]
+    rest_total = 1.0 - sum(fixed.values()) if rest else 0.0
+    if not rest:
+        fixed = {k: v / sum(fixed.values()) for k, v in fixed.items()}
+    rest_w = weights([p for k in rest for p in sources[k]], balance) * rest_total if rest else np.zeros(0)
+    off = 0
+    for k, v in sources.items():
+        if not v:
+            continue
+        if k in fixed:
+            parts.append(weights(v, balance) * fixed[k])
+        else:
+            parts.append(rest_w[off:off + len(v)])
+            off += len(v)
+    w = np.concatenate(parts) if parts else np.zeros(0)
+    return w / w.sum()
+
+
 def weights(perfs: list, balance: str) -> np.ndarray:
     """Sampling weights: ``beats`` = each performance by its length; ``piece`` = each piece by its
     (mean performance) length, shared by its performances, so a piece played 20 times is not
@@ -94,12 +143,37 @@ def weights(perfs: list, balance: str) -> np.ndarray:
     return n / n.sum()
 
 
+def with_tracked(perf: dict, rng: np.random.Generator, share: float) -> dict:
+    """The performance with its real tracker's beats (``tracked``, attached by --tracked) with
+    probability ``share``, else as it is (the simulated tracker, or its recorded beats)."""
+    out = perf
+    if share > 0 and perf.get("tracked") is not None and rng.random() < share:
+        out = {**out, "beats": perf["tracked"]}
+    if share > 0 and perf.get("tracked_aux") is not None and rng.random() < share:   # the second tracker's (--aux)
+        out = {**out, "aux": perf["tracked_aux"]}
+    return out
+
+
+def attach_tracked(perfs: list, beats: dict, key: str = "tracked") -> int:
+    """Each performance's real tracked beats (keyed by src/meter.py perf_key) as ``key``
+    (tracked: the first tracker's, tracked_aux: the second's); how many got them."""
+    n = 0
+    for p in perfs:
+        b = beats.get(perf_key(p))
+        if b is not None and len(b[0]) >= 2:
+            p[key] = (np.asarray(b[0], np.float64), np.asarray(b[1], bool))
+            n += 1
+    return n
+
+
 class Stream(torch.utils.data.IterableDataset):
     """Endless training batches (collated on the CPU), each worker with its own random stream."""
 
-    def __init__(self, perfs, w, noise, note_noise, batch, chunk, chunk_min, seed, augment=None):
+    def __init__(self, perfs, w, noise, note_noise, batch, chunk, chunk_min, seed, augment=None, tracked_share=0.0,
+                 by_dataset=None, aux_noise=None):
         self.perfs, self.w, self.noise, self.note_noise, self.augment = perfs, w, noise, note_noise, augment
         self.batch, self.chunk, self.chunk_min, self.seed = batch, chunk, chunk_min, seed
+        self.tracked_share, self.by_dataset, self.aux_noise = tracked_share, by_dataset, aux_noise
 
     def __iter__(self):
         info = torch.utils.data.get_worker_info()
@@ -107,12 +181,19 @@ class Stream(torch.utils.data.IterableDataset):
         while True:
             length = int(rng.integers(self.chunk_min, self.chunk + 1))
             idx = rng.choice(len(self.perfs), self.batch, p=self.w)
-            yield collate([sample(self.perfs[i], rng, self.noise, length, self.note_noise, self.augment)
-                           for i in idx])
+            drawn = [with_tracked(self.perfs[i], rng, self.tracked_share) for i in idx]
+            yield collate([sample(p, rng, noise_for(p, self.noise, self.by_dataset), length, self.note_noise,
+                                  self.augment, self.aux_noise) for p in drawn])
+
+
+def noise_for(perf: dict, noise, by_dataset: dict | None):
+    """The simulated tracker for a performance: its dataset's own (--beat-noise-gangqinpu), else ``noise``."""
+    return (by_dataset or {}).get(perf.get("dataset"), noise)
 
 
 @torch.no_grad()
-def validate(model, groups: dict, device, noise, seed: int = 0, select: str = "meter") -> dict:
+def validate(model, groups: dict, device, noise, seed: int = 0, select: str = "meter", by_dataset=None,
+             aux_noise=None) -> dict:
     """Per validation source: head accuracies and decoded-grid scores (the tracker simulated with a
     fixed seed per performance; the real one where it exists), the share of performances at the
     right note-value level (level_ok), and with a tempo head the same once it chooses the level
@@ -126,7 +207,8 @@ def validate(model, groups: dict, device, noise, seed: int = 0, select: str = "m
     for gi, (name, perfs) in enumerate(groups.items()):
         scores, raw, chosen, err = [], [], [], []
         for k, perf in enumerate(perfs):
-            f, tg, bt, nin = sample(perf, np.random.default_rng((seed, gi, k)), noise)
+            f, tg, bt, nin = sample(perf, np.random.default_rng((seed, gi, k)), noise_for(perf, noise, by_dataset),
+                                    aux_noise=aux_noise)
             if len(f) < 2:
                 continue
             x, mask, notes, _ = collate([(f, None, bt, nin)], device)
@@ -144,7 +226,8 @@ def validate(model, groups: dict, device, noise, seed: int = 0, select: str = "m
                     err.append(abs(float(lp["tempo"][0]) - float(tg["tempo"][0])))
             gt = perf["gt"]
             rng2 = np.random.default_rng((seed, gi, k))  # the same tracked beats again, for the tracker's own scores
-            tb, tdn = perf["beats"] if perf.get("beats") is not None else noise(gt["t"], gt["down"], rng2)
+            tb, tdn = (perf["beats"] if perf.get("beats") is not None
+                       else noise_for(perf, noise, by_dataset)(gt["t"], gt["down"], rng2))
             raw.append({"beat_f": f_measure(gt["t"], tb), "downbeat_f": f_measure(gt["t"][gt["down"]], tb[tdn])})
         if not scores:
             continue
@@ -199,7 +282,26 @@ def main(argv=None):
     ap.add_argument("--periscope", action=argparse.BooleanOptionalAction, default=True,
                     help="train (and validate) on the PERiScoPe performances too, when built")
     ap.add_argument("--val-periscope", type=int, default=150, help="PERiScoPe validation performances (fixed draw)")
-    ap.add_argument("--beat-noise", default="configs/beat_noise.json")
+    ap.add_argument("--gangqinpu", action=argparse.BooleanOptionalAction, default=False,
+                    help="train (and validate) on the Gangqinpu performances too (build_meter_data.py --gangqinpu)")
+    ap.add_argument("--gangqinpu-share", type=float, default=0.5,
+                    help="share of every batch drawn from Gangqinpu (0 = in proportion to its size, like the others)")
+    ap.add_argument("--val-gangqinpu", type=int, default=150, help="Gangqinpu validation performances (fixed draw)")
+    ap.add_argument("--beat-noise", default="configs/beat_noise.json",
+                    help="the tracker's fitted errors the ground-truth beats get (configs/beat_noise_pm2s.json: PM2S)")
+    ap.add_argument("--real-beats", choices=("tracked", "simulated"), default="tracked",
+                    help="the real transcriptions: Beat This!'s recorded beats, or the simulated tracker "
+                         "(--beat-noise) as the other sources (training for another tracker)")
+    ap.add_argument("--tracked", choices=("none", "beat_this", "pm2s"), default="none",
+                    help="mix this tracker's real beats (meter/tracked_*.npz) into training: Gangqinpu, PERiScoPe")
+    ap.add_argument("--tracked-share", type=float, default=0.5,
+                    help="with --tracked / --aux: the chance a performance that has them is drawn with the real beats")
+    ap.add_argument("--aux", choices=("none", "pm2s"), default="none",
+                    help="a second tracker read as evidence on the first one's beats (src/meter.py aux_features)")
+    ap.add_argument("--aux-noise", default="configs/beat_noise_pm2s.json", help="the second tracker's fitted errors")
+    ap.add_argument("--beat-noise-gangqinpu", default=None,
+                    help="the first tracker's errors fitted on Gangqinpu (fit_pm2s_noise.py --from-stored), for its "
+                         "performances; the others keep --beat-noise")
     ap.add_argument("--note-noise", default="configs/noise_stats.json", help="'none' = clean notes")
     ap.add_argument("--eval-every", type=int, default=2000)
     ap.add_argument("--patience", type=int, default=5, help="evaluations without a better selection score (0 = off)")
@@ -229,19 +331,61 @@ def main(argv=None):
     run.mkdir(parents=True, exist_ok=True)
     sources = {"asap": load(data, "train"), "real": load(data, "train_transcribed"),
                "periscope": load(data, "train_periscope") if args.periscope else []}
+    if args.gangqinpu:
+        sources["gangqinpu"] = load(data, "train_gangqinpu")
+        if not sources["gangqinpu"]:
+            raise SystemExit(f"--gangqinpu: no {data / 'meter' / 'train_gangqinpu.pkl'} "
+                             "(scripts/build_meter_data.py --gangqinpu <release> --gangqinpu-only)")
+    if not 0.0 <= args.gangqinpu_share < 1.0:
+        raise SystemExit("--gangqinpu-share must be in [0, 1)")
+    tracked_counts, aux_counts = {}, {}
+    if args.aux != "none":
+        from scripts.track_meter_data import tracked_path
+        for name, split in (("gangqinpu", "train_gangqinpu"), ("periscope", "train_periscope")):
+            if sources.get(name):
+                aux_counts[name] = attach_tracked(sources[name], load_beats(tracked_path(data / "meter", split, args.aux)),
+                                                  key="tracked_aux")
+    if args.tracked != "none":
+        from scripts.track_meter_data import tracked_path
+        for name, split in (("gangqinpu", "train_gangqinpu"), ("periscope", "train_periscope")):
+            if sources.get(name):
+                tracked_counts[name] = attach_tracked(sources[name], load_beats(tracked_path(data / "meter", split,
+                                                                                            args.tracked)))
+        if not any(tracked_counts.values()):  # e.g. no recording could be downloaded: trains on, simulated only
+            print(f"WARNING --tracked {args.tracked}: no tracked beats in {data / 'meter'} "
+                  "(scripts/track_meter_data.py): the simulated tracker only (config.json: tracked_by_source)",
+                  flush=True)
     train = [p for v in sources.values() for p in v]
     groups = {"asap": load(data, "val"), "real": load(data, "val_transcribed")}
+
+    def fixed_draw(perfs, n):
+        if len(perfs) > n:
+            perfs = [perfs[i] for i in sorted(np.random.default_rng(0).choice(len(perfs), n, replace=False))]
+        return perfs
     if args.periscope:
-        pv = load(data, "val_periscope")
-        if len(pv) > args.val_periscope:
-            pv = [pv[i] for i in sorted(np.random.default_rng(0).choice(len(pv), args.val_periscope, replace=False))]
-        groups["periscope"] = pv
+        groups["periscope"] = fixed_draw(load(data, "val_periscope"), args.val_periscope)
+    if args.gangqinpu:
+        groups["gangqinpu"] = fixed_draw(load(data, "val_gangqinpu"), args.val_gangqinpu)
+    if args.real_beats == "simulated":  # their notes as they are, the tracker simulated on the true beats
+        def simulated(perfs):
+            return [{**p, "beats": None, "real_notes": True} for p in perfs]
+        sources["real"] = simulated(sources["real"])
+        groups["real"] = simulated(groups["real"])
+        train = [p for v in sources.values() for p in v]
     groups = {k: v for k, v in groups.items() if v}
     if not train or not groups:
         raise SystemExit(f"{data / 'meter'}: no train / val performances: run scripts/build_meter_data.py first")
     noise = BeatNoise.from_json(args.beat_noise)
+    by_dataset = {}
+    if args.beat_noise_gangqinpu:
+        if Path(args.beat_noise_gangqinpu).exists():
+            by_dataset["gangqinpu"] = BeatNoise.from_json(args.beat_noise_gangqinpu)
+        else:   # e.g. no recording could be downloaded to fit it on
+            print(f"WARNING {args.beat_noise_gangqinpu} missing: Gangqinpu gets --beat-noise too", flush=True)
+    aux_noise = BeatNoise.from_json(args.aux_noise) if args.aux != "none" else None
     note_noise = None if args.note_noise == "none" else NoiseModel.from_json(args.note_noise)
-    cfg = MeterConfig(n_features=N_BEAT_FEATURES if args.beat_features == "all" else FIRST_FEATURES,
+    cfg = MeterConfig(n_features=(N_ALL_FEATURES if args.aux != "none" else N_BEAT_FEATURES)
+                      if args.beat_features == "all" else FIRST_FEATURES,
                       d_model=args.d_model, layers=args.layers, dropout=args.dropout,
                       n_heads=max(4, args.d_model // 32), ff=4 * args.d_model,
                       n_note_features=N_NOTE_FEATURES if args.note_encoder else 0, d_note=args.d_note).to_dict()
@@ -284,6 +428,7 @@ def main(argv=None):
     json.dump({"args": vars(args), "arch": "meter", "model": cfg, "params": n_params,
                "data": {"train": len(train), "train_by_source": counts, "pieces_by_source": pieces,
                         "val_by_source": {k: len(v) for k, v in groups.items()},
+                        "tracked_by_source": tracked_counts, "tracked_aux_by_source": aux_counts,
                         "real_transcriptions": counts["real"]}},
               open(run / "config.json", "w"), indent=1)
     print(f"meter model: {n_params / 1e6:.2f}M parameters ({n_train / 1e6:.2f}M trained) on {device} (note encoder: "
@@ -301,9 +446,12 @@ def main(argv=None):
                                   "best": best, "best_step": best_step}))
         os.replace(st, run / "status.json")
 
-    stream = Stream(train, weights(train, args.balance), noise, note_noise, args.batch, args.chunk,
+    shares = {"gangqinpu": args.gangqinpu_share} if args.gangqinpu and args.gangqinpu_share > 0 else {}
+    stream = Stream(train, mixed_weights(sources, args.balance, shares), noise, note_noise, args.batch, args.chunk,
                     args.chunk_min or max(args.chunk // 4, 2), args.seed * 100003 + step,
-                    Augment() if args.augment else None)
+                    Augment() if args.augment else None,
+                    tracked_share=args.tracked_share if (args.tracked != "none" or args.aux != "none") else 0.0,
+                    by_dataset=by_dataset, aux_noise=aux_noise)
     loader = torch.utils.data.DataLoader(stream, batch_size=None, num_workers=args.workers,
                                          prefetch_factor=4 if args.workers else None,
                                          persistent_workers=bool(args.workers))
@@ -330,7 +478,7 @@ def main(argv=None):
                 print(f"step {step}/{args.steps} loss {run_loss / 100:.4f} ({time.time() - t0:.0f} s)", flush=True)
                 run_loss = 0.0
             if step % args.eval_every == 0 or step >= args.steps:
-                res = validate(model, groups, device, noise, args.seed, args.select)
+                res = validate(model, groups, device, noise, args.seed, args.select, by_dataset, aux_noise)
                 res.update(step=step, minutes=round((time.time() - t0) / 60, 1))
                 new = not log_path.exists()
                 with open(log_path, "a", newline="") as f:

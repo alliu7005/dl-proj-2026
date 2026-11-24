@@ -20,6 +20,8 @@ BATCH_VARS = (
     # pace/v2_round4.sh, pace/v2_release.sh, pace/v2_level.sh
     "NEW_LABS", "TEMPO_FROM", "TEMPO_RUN", "SYS_A", "SYS_B", "SYS_C", "ABLATION", "SYS", "EXPORT", "LABELLER",
     "LEVELEXP",
+    # pace/v2_gangqinpu.sh
+    "BASE", "SNAP", "FILL", "GQ", "PM_PAIR", "AUDIO_TRAIN", "PM2S_RUNS",
     # the tests' own stand-ins
     "SUBMITS", "CALLS", "DONE",
 )

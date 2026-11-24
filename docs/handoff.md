@@ -264,6 +264,22 @@ Each option has the evidence for it, what it could gain, and a rough cost:
 - **Leave the last 3-4 days** for the report and the demo.
 - **After the deadline:** 8 and 9 are the work that would make the system more general.
 
+## Sixth round (ready to run on PACE)
+
+`bash pace/v2_gangqinpu.sh` (pace/README.md, 4o: what to do first, what to check, what can go wrong).
+It acts on options 2, 8, 9 and 10 above at once:
+- **Gangqinpu** (Oct 2026: ~18k web piano recordings, pop / classical / jazz / folk, Transkun
+  transcriptions aligned to scores) as half of the meter model's training data, and its test split
+  as the out-of-domain test set (option 8).
+- **Beat This! vs PM2S vs both** as the meter model's beat tracker (`meter_v4_gq`, `_pm`, `_both`),
+  every model trained on its trackers' real beats mixed with their simulated, measured errors.
+  PM2S (beats from the notes) is also tried for MIDI input (option 2): on Gangqinpu it is no clear
+  win over Beat This! (39% wrong tempo octave on 200 recordings; its ASAP numbers owe much to it
+  having trained on ASAP).
+- **Beat times from the notes** after decoding (snap / fill), on the release's meter model.
+
+docs/experiments.md, "Sixth round", has the design and the local checks.
+
 ## Decisions for the team
 
 - **The main system:** which one the report and demo present as "the model" (option 2).

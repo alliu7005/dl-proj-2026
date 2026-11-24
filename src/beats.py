@@ -422,7 +422,11 @@ class BeatNoise:
                 times, down = times[keep], down[keep]
         if r["extra"] > 0 and len(times) >= 2:
             e = min(r["extra"], 0.9)
-            n = int(rng.binomial(len(times), e / (1 - e)))  # so that a share `extra` of the beats is spurious
+            ratio = e / (1 - e)  # spurious beats per kept one, so that a share `extra` of the beats is spurious
+            # above 1 (extra > 0.5: a tracker that adds more beats than it finds, as PM2S on some
+            # pieces) no binomial can draw it: a Poisson with the same mean. Up to 1 the binomial,
+            # so every draw of an earlier profile (Beat This!'s: extra <= 0.37) stays as it was
+            n = int(rng.binomial(len(times), ratio)) if ratio <= 1 else int(rng.poisson(len(times) * ratio))
             if n:
                 j = rng.integers(len(times) - 1, size=n)
                 if self.extra_phase:

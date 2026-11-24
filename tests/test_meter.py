@@ -177,7 +177,9 @@ def test_beat_features_and_key():
     t = 0.5 * np.arange(8)
     notes = np.array([[36, 0.0, 0.4, 100], [60, 0.0, 0.4, 70], [64, 0.25, 0.4, 50], [67, 1.0, 1.4, 90]], np.float32)
     f = beat_features(notes, t, np.arange(8) % 4 == 0)
-    assert f.shape == (8, N_BEAT_FEATURES) and np.isfinite(f).all()
+    from src.meter import N_ALL_FEATURES
+    assert f.shape == (8, N_ALL_FEATURES) and np.isfinite(f).all()
+    assert (f[:, N_BEAT_FEATURES:] == 0).all()                # no second tracker: its features all 0
     assert f[0, 3] == 1 and f[1, 3] == 0                      # the tracker's downbeat flag
     assert f[0, 5 + 6] > 0                                    # a note half way through beat 0
     assert (f[:, 26] == 0).all()                              # unused, as in the first meter model
@@ -676,6 +678,44 @@ def test_meter_batch():
         names = [cmd.split("-J ")[1].split()[0] for _, cmd in jobs]
         assert names == ["met_meter_v2", "metev_meter_base", "v2_nl_base@meter_v2", "v2_nl_base@meter_base"], names
         assert "--dependency" not in jobs[0][1]
+
+
+def test_refine_grid():
+    """Beat times onto the notes (refine_grid): a rubato 4/4 performance with a chord on every beat
+    and a single note between, tracked with 15 ms jitter and every fifth beat missed, decoded by
+    the oracle: snapping brings the anchors to the chords, filling adds the missed beats at theirs,
+    times stay increasing, the bars stay, and with both off the grid is untouched."""
+    from src.meter import DecodeConfig, chord_onsets, grid_beats, grid_from_logp, oracle_logp, refine_grid
+    rng = np.random.default_rng(0)
+    k = np.arange(64)
+    true_t = 1.0 + np.cumsum(np.r_[0, 0.5 + 0.08 * np.sin(k[1:] / 5.0)])         # rubato
+    chords = np.concatenate([true_t + d for d in (-0.008, 0.0, 0.012)])          # a spread chord per beat
+    offbeats = (true_t[:-1] + true_t[1:]) / 2 + 0.03
+    onsets = np.sort(np.concatenate([chords, offbeats]))
+    assert np.allclose(chord_onsets(onsets)[::2], true_t + 0.0, atol=0.005)       # one time per chord
+    gt = {"t": true_t, "q": k.astype(float), "down": k % 4 == 0, "ts": np.full(64, TS_CLASSES.index("4/4")),
+          "key": np.zeros(64, np.int64), "ts_names": ["4/4"] * 64}
+    keep = k % 5 != 2                                                             # every fifth beat missed
+    bt = true_t[keep] + rng.normal(0, 0.015, keep.sum())
+    grid = grid_from_logp(bt, oracle_logp(bt, gt), DecodeConfig())
+    assert refine_grid(grid, onsets, DecodeConfig()) is grid                      # off: untouched
+    cfg = DecodeConfig(snap_s=0.05, fill_tol=0.25)
+    ref = refine_grid(grid, onsets, cfg)
+    assert ref["refined"]["filled"] == int((~keep[1:-1]).sum()) and ref["refined"]["snapped"] > 40
+    assert np.all(np.diff(ref["t"]) > 0) and ref["bars"] == grid["bars"] and np.allclose(ref["bar_q"], grid["bar_q"])
+
+    def worst(g):  # the grid's notated beats against the true ones
+        t, _ = grid_beats(g)
+        return float(np.max(np.abs(t - np.interp(np.arange(len(t)), k, true_t))))
+    assert worst(ref) < 0.01 < worst(grid), (worst(ref), worst(grid))
+    # snapping alone moves anchors but adds none; filling alone adds the missed beats
+    assert refine_grid(grid, onsets, DecodeConfig(snap_s=0.05))["refined"]["filled"] == 0
+    assert refine_grid(grid, onsets, DecodeConfig(fill_tol=0.25))["refined"]["snapped"] == 0
+    # nothing played where a beat is missing: no anchor is made up
+    silent = onsets[np.abs(onsets[:, None] - true_t[~keep][None]).min(1) > 0.05]
+    assert refine_grid(grid, silent, DecodeConfig(fill_tol=0.25))["refined"]["filled"] == 0
+    # settings round-trip through decode.json
+    assert DecodeConfig.from_dict(cfg.to_dict()).snap_s == 0.05
 
 
 def main():
