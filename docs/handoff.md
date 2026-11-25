@@ -1,6 +1,6 @@
-# Handoff: where the project stands (2026-11-24)
+# Handoff: where the project stands (2026-11-25)
 
-The course deadline is **2026-12-04** (10 days). This page is for deciding what to do with them:
+The course deadline is **2026-12-04** (9 days). This page is for deciding what to do with them:
 - what exists;
 - how good it is, and how sure we are of that;
 - what is still wrong;
@@ -41,6 +41,11 @@ The details behind every number are in [experiments.md](experiments.md).
 
   v2 kept 4/4 for the whole piece. The window-by-window model guesses the meter for every window
   (the reason v2 was built), and a long, dense, out-of-domain piece shows that most.
+- **Sixth round (2026-11-25):**
+  - Gangqinpu makes the meter model far better on pop (time signature 0.54 -> 0.79).
+  - PM2S's beats bring v2 within chance of seq2seq and Beyer & Dai (11.12 real / 12.08 clean).
+    PM2S trained on our test pieces, so that has to be re-checked first
+    ([Sixth round](#sixth-round-results-2026-11-25)).
 - **Hands-on testing on downloaded songs:**
   - the playback sounds right;
   - the score is still hard to read: rhythm, extra voices;
@@ -187,6 +192,9 @@ Each option has the evidence for it, what it could gain, and a rough cost:
    - *Gain:* up to 2.8 on the clean benchmark and for MIDI uploads to the demo. Audio uploads
      already use the recording's beats.
    - *Cost:* 1-2 days, mostly CPU (Beat This! on the 59 renderings), plus one system evaluation.
+   - *Sixth round:* tracking from the notes (PM2S) gave -2.10 on clean and -0.74 on real (sure).
+     It is flattered by PM2S having trained on our test pieces. Retrain it without them (about
+     1-2 days with a GPU) before relying on it.
 2. **Decide which system to present as "the model."**
    - *For seq2seq:* it is better on the classical benchmark's headline metric, and on real audio
      it beats Beyer & Dai.
@@ -301,7 +309,7 @@ Each option has the evidence for it, what it could gain, and a rough cost:
     recordings become training data. Cheap data, but it reinforces the system's own mistakes,
     and the audio is copyrighted. A last resort.
 
-**A reasonable split for 10 days:**
+**A reasonable split for the 9 days left:**
 - **First:** option 2, a decision.
 - **Then, in parallel, one person each:**
   - option 1, better beats for MIDI input;
@@ -312,26 +320,47 @@ Each option has the evidence for it, what it could gain, and a rough cost:
 - **After the deadline:** the labeller on Gangqinpu (option 7), then 9 and 10: the work that would
   make the system general.
 
-## Sixth round (ready to run on PACE)
+## Sixth round: results (2026-11-25)
 
-`bash pace/v2_gangqinpu.sh` (pace/README.md, 4o: what to do first, what to check, what can go wrong).
-It acts on options 1, 7, 8 and 10 above at once:
-- **Gangqinpu** (Oct 2026: ~18k web piano recordings, pop / classical / jazz / folk, Transkun
-  transcriptions aligned to scores) as half of the meter model's training data (options 7 and
-  10), and its test split as the out-of-domain test set (option 8).
-- **Beat This! vs PM2S vs both** as the meter model's beat tracker (`meter_v4_gq`, `_pm`, `_both`),
-  every model trained on its trackers' real beats mixed with their simulated, measured errors.
-  PM2S (beats from the notes) is also tried for MIDI input (option 1): on Gangqinpu it is no clear
-  win over Beat This! (39% wrong tempo octave on 200 recordings; its ASAP numbers owe much to it
-  having trained on ASAP).
-- **Beat times from the notes** after decoding (snap / fill), on the release's meter model.
+`bash pace/v2_gangqinpu.sh` (pace/README.md, 4o) ran end to end. It acted on options 1, 7, 8 and
+10. The full tables are in docs/experiments.md, "Sixth round: results".
 
-docs/experiments.md, "Sixth round", has the design and the local checks.
+| system, MUSTER mean (lower is better) | real (24) | clean (59) |
+|---|---|---|
+| the release (`meter_v3_tp`, Beat This!) | 12.31 | 14.53 |
+| release + beat times from the notes (`_rf`) | 12.31 | 14.27 |
+| `meter_v4_gq` (Gangqinpu in training) | 12.70 | 15.18 |
+| the release with PM2S's beats | 11.56 | 12.43 |
+| **`meter_v4_gq_pm` with PM2S's beats** | **11.12** | **12.08** |
+| seq2seq / Beyer & Dai | 10.65 / 11.14 | 11.74 / 11.05 |
+
+- **Gangqinpu (options 7, 10): works for music outside classical piano.**
+  - On Gangqinpu's real recordings, `meter_v4_gq`'s time-signature accuracy is 0.79 against
+    the release's 0.54.
+  - On the classical meter scores it is equal.
+  - Its whole classical pieces are not better (+0.39 real, chance; +0.65 clean, sure).
+  - It trained to the step limit (best at 56,000 of 60,000), so it may want longer training.
+  - Its effect on whole pop scores is unmeasured until Gangqinpu's scores are references
+    (option 8).
+- **PM2S (option 1): the largest whole-piece gain so far, not yet quotable.**
+  - With a meter model trained for it, v2 is -1.19 (real) and -2.45 (clean) against the
+    release, both sure. That is within chance of seq2seq and Beyer & Dai on both conditions.
+  - But PM2S's released weights were trained on all of ASAP, our test pieces included.
+  - On unseen music (Gangqinpu) its beats are worse than Beat This!'s, while the meter model
+    trained for it ends level there.
+  - **Next:** retrain PM2S without our test and validation pieces (MIT, training code public),
+    then score again. If the gain holds, `meter_v4_gq_pm` + PM2S becomes the release.
+- **Beat times from the notes:** -0.26 on clean (sure), nothing on real.
+- **Both trackers together** (`meter_v4_gq_both`): worse than either.
 
 ## Decisions for the team
 
 - **The main system:** which one the report and demo present as "the model" (option 2).
-- **Next steps:** which of the options above fit the time left.
+- **Next steps:** which of the options above fit the time left. After the sixth round, the
+  first candidate is PM2S retrained without our test pieces (option 1). If its gain holds, the
+  release changes to `meter_v4_gq_pm` + PM2S.
+- **The demo's meter model for music outside classical piano:** `meter_v4_gq` is far better on
+  Gangqinpu's pop and slightly worse on whole classical pieces.
 - **Gangqinpu** (option 7): whether a model trained on it becomes the release. It is the best data
   source found. Its CC BY-NC-SA 4.0 license carries into the weights, as MAESTRO's already does.
   The sixth round also downloads 3,000+ of its recordings from the source site, which owns them

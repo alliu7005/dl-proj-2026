@@ -1230,6 +1230,91 @@ as binomial(n, extra / (1 - extra)), which fails above extra = 0.5; 6 of PM2S's 
 there (up to 0.73), so its training would have stopped within a few steps. Above 0.5 the count is
 now Poisson with the same mean; up to 0.5 the draws are unchanged (Beat This!'s profiles reach 0.37).
 
+### Sixth round: results (2026-11-25)
+
+`pace/v2_gangqinpu.sh` ran end to end (job ids 7295929-36).
+- **Data:** Gangqinpu gave 17,347 / 487 / 501 performances (train / val / test) with grids: 3.83M
+  training beats, against about 1,100 ASAP + PERiScoPe works before.
+- **Recordings:** 4,007 of 4,008 downloaded (all validation and test, 3,000 training). A few MP3s
+  were cut short and Beat This! skipped them.
+- **Training:**
+  - `meter_v4_gq` used all 60,000 steps, best at step 56,000, so it may not have finished
+    improving;
+  - `meter_v4_gq_both` stopped at 44,000 (best 28,000);
+  - `meter_v4_gq_pm` stopped at 30,000 (best 14,000).
+- **`meter_v3_gqft`** (above) was not in the batch's runs and was not trained.
+
+**The two trackers on the same unseen music** (Gangqinpu validation, 1,641 performances,
+`tracked_report.json`):
+
+| tracker | beat F | downbeat F | wrong tempo octave |
+|---|---|---|---|
+| Beat This! on the recordings | 0.713 | 0.661 | 34% |
+| PM2S on the transcriptions | 0.694 | 0.509 | 42% |
+
+**Meter models** (grid time-signature accuracy per bar / downbeat F; each with the tracker it was
+trained for; `clean`, `periscope` and `gangqinpu` with the simulated tracker, `real` and
+`gangqinpu_real` with Beat This!'s real beats of the recordings, `_pm2s` with PM2S's real beats):
+
+| meter model | clean | real (24) | PERiScoPe | Gangqinpu | Gangqinpu, real recordings |
+|---|---|---|---|---|---|
+| `meter_v3_tp` (the release) | 0.552 / 0.786 | 0.440 / 0.650 | 0.645 / 0.757 | 0.633 / 0.781 | 0.542 / 0.672 |
+| **`meter_v4_gq`** (Beat This!) | 0.572 / 0.797 | 0.450 / 0.657 | 0.644 / 0.756 | **0.834 / 0.852** | **0.794 / 0.714** |
+| `meter_v4_gq_both` (+ PM2S as evidence) | 0.554 / 0.780 | 0.375 / 0.694 | 0.609 / 0.753 | 0.810 / 0.826 | 0.761 / 0.705 |
+| `meter_v4_gq_pm`, PM2S's real beats | 0.502 / 0.592 | 0.500 / 0.658 | 0.478 / 0.558 | 0.804 / 0.719 | |
+| `meter_v3_tp_rf` (beat times from the notes) | 0.552 / 0.792 | 0.440 / 0.637 | 0.645 / 0.761 | 0.633 / 0.785 | |
+
+**Whole pieces** (MUSTER mean error, %, lower is better; paired differences against the release
+with a 95% bootstrap interval over pieces, bold where it excludes 0; `outputs/system_eval/paired.md`):
+
+| system | real (24) | clean (59) | vs the release, real | vs the release, clean |
+|---|---|---|---|---|
+| the release (`meter_v3_tp`, Beat This!) | 12.31 | 14.53 | | |
+| + beat times from the notes (`_rf`: snap + fill) | 12.31 | 14.27 | -0.00 [-0.21, +0.13] | **-0.26** [-0.37, -0.11] |
+| + missed beats filled only (`_fill`) | 12.28 | 14.35 | -0.03 [-0.14, +0.04] | **-0.18** [-0.26, -0.08] |
+| `meter_v4_gq` (Gangqinpu, Beat This!) | 12.70 | 15.18 | +0.39 [-0.09, +1.09] | **+0.65** [+0.16, +1.15] |
+| `meter_v4_gq_both` | 12.10 | 15.84 | -0.21 [-1.11, +0.61] | **+1.31** [+0.83, +1.89] |
+| the release with PM2S's beats (`_pm_rpm`) | 11.56 | 12.43 | **-0.74** [-1.49, -0.05] | **-2.10** [-3.08, -1.17] |
+| **`meter_v4_gq_pm` with PM2S's beats** | **11.12** | **12.08** | **-1.19** [-2.07, -0.40] | **-2.45** [-3.74, -1.18] |
+| seq2seq (`sf_base_reg_cab_c128`) | 10.65 | 11.74 | | |
+| Beyer & Dai | 11.14 | 11.05 | | |
+
+- **`meter_v4_gq_pm` + PM2S against the others:**
+  - against `meter_v3_tp` + PM2S: -0.45 [-0.83, -0.02] real, -0.35 [-0.91, +0.35] clean;
+  - seq2seq minus it: -0.47 [-1.33, +0.63] real, -0.33 [-1.30, +1.07] clean;
+  - Beyer & Dai minus it: +0.02 [-1.69, +2.24] real, -1.02 [-2.57, +1.69] clean.
+
+  For the first time, v2 is within chance of both on both conditions.
+- **What PM2S changes on whole pieces:** onsets and offsets, missing and extra notes all drop
+  (real: onset 13.82 -> 12.93, missing 8.90 -> 7.29, extra 11.80 -> 10.17).
+
+**What it means:**
+- **Gangqinpu teaches the meter model music outside classical piano, without unlearning the
+  classical.**
+  - On Gangqinpu's real recordings, time-signature accuracy goes from 0.54 to 0.79, and the
+    right note-value level from 0.65 to 0.75.
+  - On the classical sets, the meter scores are equal.
+  - On the classical benchmark's whole pieces it is not better: +0.39 real (chance), +0.65 clean
+    (sure).
+
+  How much it helps whole scores of pop is not measured: that needs Gangqinpu's scores as
+  references (option 7's labeller targets).
+- **Beat times from the notes:** a small, sure gain on clean MIDI (-0.26), none on real
+  recordings. The settings were a first guess.
+- **PM2S gives the largest whole-piece gain of any change so far, but not one we can quote yet.**
+  Its released weights were trained on all of ASAP, our 14 test pieces included. That flatters
+  it most on clean MIDI, which it saw as is, and also on real recordings: their transcriptions
+  are of performances whose MIDI it trained on.
+  - On music it never saw (Gangqinpu), its beats are worse than Beat This!'s on the recordings
+    (downbeat F 0.51 vs 0.66).
+  - Yet a meter model trained for it ends level there (0.804 vs 0.794 time signature).
+  - For MIDI input the alternative is Beat This! on a rendering, which costs 2.8 points (fourth
+    round), so part of the gain is likely real.
+  - Before it is quoted or released, retrain PM2S without our test and validation pieces (its
+    training code is public, MIT) and score again.
+- **The release stays `meter_v3_tp` + Beat This!** until that retraining. The next candidate is
+  `meter_v4_gq_pm` with PM2S's beats, and `meter_v4_gq` for music outside classical piano.
+
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
 The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced
