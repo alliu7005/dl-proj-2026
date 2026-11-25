@@ -39,6 +39,16 @@ PAIRS = [  # (A, B, what A changes)
     ("v2_nl_base_gn_meter_v3_ft_d95_tidy", RELEASE, "the release with meter_v3 fine-tuned with the tempo head"),
     (SEQ, RELEASE, "seq2seq (best) against the release"),
     ("beyer_dai", RELEASE, "Beyer & Dai against the release"),
+    # sixth round (pace/v2_gangqinpu.sh): each change against the release
+    ("v2_nl_base_gn_meter_v3_tp_rf_d95_tidy", RELEASE, "the release, beat times from the notes (snap + fill)"),
+    ("v2_nl_base_gn_meter_v3_tp_fill_d95_tidy", RELEASE, "the release, missed beats filled from the notes"),
+    (RELEASE + "_pm_rpm", RELEASE, "the release with PM2S's beats instead of Beat This!'s"),
+    ("v2_nl_base_gn_meter_v4_gq_d95_tidy", RELEASE, "meter model trained with Gangqinpu (Beat This!)"),
+    ("v2_nl_base_gn_meter_v4_gq_both_d95_tidy", RELEASE, "meter model trained with Gangqinpu (Beat This! + PM2S)"),
+    ("v2_nl_base_gn_meter_v4_gq_pm_d95_tidy_pm_rpm", RELEASE + "_pm_rpm", "meter model trained with Gangqinpu for PM2S, both on PM2S"),
+    ("v2_nl_base_gn_meter_v4_gq_both_d95_tidy", "v2_nl_base_gn_meter_v4_gq_d95_tidy", "PM2S as evidence on Beat This!'s beats"),
+    (SEQ, "v2_nl_base_gn_meter_v4_gq_d95_tidy", "seq2seq (best) against v2 with the Gangqinpu meter model"),
+    ("beyer_dai", "v2_nl_base_gn_meter_v4_gq_d95_tidy", "Beyer & Dai against v2 with the Gangqinpu meter model"),
 ]
 
 
