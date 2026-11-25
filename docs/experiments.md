@@ -1315,6 +1315,31 @@ with a 95% bootstrap interval over pieces, bold where it excludes 0; `outputs/sy
 - **The release stays `meter_v3_tp` + Beat This!** until that retraining. The next candidate is
   `meter_v4_gq_pm` with PM2S's beats, and `meter_v4_gq` for music outside classical piano.
 
+### Seventh round: PM2S retrained without our test pieces
+
+`pace/v2_pm2s.sh` (pace/README.md, 4p). The sixth round's largest gain came with PM2S's released
+weights, which were trained on all of ASAP, our 14 test pieces included. That gain can only be
+quoted from a PM2S that never saw them.
+
+- **The model:** `scripts/train_pm2s.py` trains PM2S's `RNNJointBeatModel` (27.5M parameters)
+  from scratch: `pm2s_ho`.
+  - Recipe: PM2S's own, read from its `dev/` code. Every note within 70 ms of a beat is a beat
+    target, and downbeats alike. The tempo head learns the inter-beat interval in 10 ms classes.
+    Training uses 500-note segments, 32 per batch, and AdamW (1e-3, betas 0.8 / 0.8) with the rate
+    x0.1 after 40k steps.
+  - Augmentation: tempo x U(0.8, 1.2), up to 12 semitones of transposition, and either octave
+    copies or dropped chord notes.
+- **The data, ours:** ASAP's training pieces (clean MIDI and Transkun transcriptions), PERiScoPe
+  and Gangqinpu, Gangqinpu half of every batch. That is more varied than PM2S's original A-MAPS,
+  CPM and ASAP.
+- **The selection:** on the post-processed beats (mean of beat F and downbeat F over the
+  validation splits). PM2S selects on per-note F.
+- **What is measured, all tagged `ho`:**
+  - its beats on the ASAP test inputs and on Gangqinpu, against the released PM2S and Beat This!;
+  - the release and `meter_v4_gq_pm` on whole pieces with its beats: the sixth round's gain
+    without the leak;
+  - `meter_v4_gq_pmho`, the meter model trained again for its beats.
+
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
 The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced

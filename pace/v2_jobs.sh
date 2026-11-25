@@ -56,7 +56,7 @@ NEW_NLS=${NEW_NLS-"nl_base_gn nl_base_gn_s1"}
 GRIDS_OLD=${GRIDS_OLD-"meter_v2_nonote"}
 GRIDS_REEVAL=${GRIDS_REEVAL-"meter_v2_nonote meter_v2 meter_v2_s1 meter_v2_asap meter_base"}
 MAX_HOURS=${MAX_HOURS:-7.5}
-PM2S_RUNS=${PM2S_RUNS-"meter_v4_gq_pm"}   # meter runs trained for PM2S's beats (the trackers task tests them with PM2S)
+PM2S_RUNS=${PM2S_RUNS-"meter_v4_gq_pm meter_v4_gq_pmho"}   # meter runs trained for PM2S's beats (the trackers task tests them with PM2S)
 SEQ_MODES=${SEQ_MODES:-"oracle,none,guarded,meter"}
 SEQ_CONDITIONS=${SEQ_CONDITIONS:-"clean,synthetic,real,periscope"}
 JOB=${SLURM_JOB_ID:-local}
@@ -80,6 +80,9 @@ meter_flags() {
     meter_v4_gq) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     meter_v4_gq_both) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --aux pm2s --aux-noise configs/beat_noise_pm2s.json" ;;
     meter_v4_gq_pm) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
+    # meter_v4_gq_pm for PM2S retrained without our test pieces (pace/v2_pm2s.sh: run with
+    # PM2S_WEIGHTS / PM2S_TAG=ho set, so --tracked pm2s reads that PM2S's stored beats)
+    meter_v4_gq_pmho) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_ho.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
     # (earlier: meter_v3 fine-tuned on the Gangqinpu mix)
     meter_v3_gqft) echo "--init outputs/runs/meter_v3/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 16000 --lr 1e-4 --warmup 500 --eval-every 2000 --patience 4 --tracked beat_this --tracked-share 0.5" ;;
     *) echo "unknown meter run $1 (add it to meter_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
@@ -93,6 +96,7 @@ meter_eval_flags() {  # how a finished meter run is tuned before its evaluation
     meter_v4_gq|meter_v4_gq_both|meter_v3_gqft) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
     # its decoder tuned for the tracker it was trained for (tested with it by the trackers task)
     meter_v4_gq_pm) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s.json" ;;
+    meter_v4_gq_pmho) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_ho.json" ;;
     *) echo "--tune" ;;
   esac
 }

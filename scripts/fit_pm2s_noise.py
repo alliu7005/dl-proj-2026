@@ -68,9 +68,10 @@ def main(argv=None):
     ap.add_argument("--min-performances", type=int, default=30,
                     help="--from-stored: fewer tracked performances than this -> no profile written")
     args = ap.parse_args(argv)
-    if args.out is None:
+    from src.pm2s_beats import tagged
+    if args.out is None:   # other PM2S weights ($PM2S_WEIGHTS): configs/beat_noise_pm2s_<tag>.json
         args.out = (f"configs/beat_noise_{'bt' if args.from_stored == 'beat_this' else args.from_stored}_gangqinpu.json"
-                    if args.from_stored else "configs/beat_noise_pm2s.json")
+                    if args.from_stored else f"configs/{tagged('beat_noise_pm2s')}.json")
     device = args.device
     if device == "auto":
         import torch
@@ -113,7 +114,7 @@ def main(argv=None):
         tracker = PM2SBeats(args.weights, device=device)
         cs = comparisons(tracker, fit_on)
         noise = fit_noise(cs, note=f"fitted by scripts/fit_pm2s_noise.py on {len(cs)} Gangqinpu training performances: "
-                                   "PM2S (released weights) on their notes vs the score's beats timed through the alignment")
+                                   f"PM2S ({tracker.weights}) on their notes vs the score's beats timed through the alignment")
         extra = {"tracker": "pm2s", "weights": tracker.weights, "fit_on": summary(cs)}
         report = draw("val", args.n_report)
         if report:

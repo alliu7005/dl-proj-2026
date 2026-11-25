@@ -156,7 +156,7 @@ def test_train_for_pm2s():
     from scripts.train_meter import main as train
     from tests.test_gangqinpu import beats_of, row_of, write_release
     tmp = Path(tempfile.mkdtemp())
-    old_env = os.environ.get("PM2S_WEIGHTS")
+    old_env = {k: os.environ.get(k) for k in ("PM2S_WEIGHTS", "PM2S_TAG")}
     try:
         write_release(tmp / "release", {
             "train": [row_of(f"tr{k}", beats_of(40, ts, sec_per_beat=0.4 + 0.05 * k))
@@ -192,19 +192,21 @@ def test_train_for_pm2s():
                "--beat-noise", str(tmp / "noise_pm2s.json"), "--real-beats", "simulated", *common])
         cfg = json.loads((runs / "pm" / "config.json").read_text())
         assert cfg["args"]["real_beats"] == "simulated" and cfg["args"]["beat_noise"].endswith("noise_pm2s.json")
-        os.environ["PM2S_WEIGHTS"] = str(random_weights(tmp / "pm2s.pth"))
+        os.environ["PM2S_WEIGHTS"] = str(random_weights(tmp / "pm2s.pth"))   # other weights: a tag (weights_tag)
+        os.environ["PM2S_TAG"] = "rand"
         evaluate(["--run", "pm", "--conditions", "gangqinpu", "--device", "cpu", "--tune", "--tune-max", "2",
                   "--tune-noise", str(tmp / "noise_pm2s.json"), *common])
         evaluate(["--run", "pm", "--conditions", "gangqinpu", "--device", "cpu", "--tracker", "pm2s", *common])
         res = json.loads((runs / "pm" / "eval_meter.json").read_text())
-        assert res["gangqinpu"]["tracker"] == "beat_this" and res["gangqinpu_pm2s"]["tracker"] == "pm2s"
-        assert res["gangqinpu_pm2s"]["pm2s_fallbacks"] >= 0
-        assert (runs / "pm" / "grids_gangqinpu.pkl").exists() and (runs / "pm" / "grids_gangqinpu_pm2s.pkl").exists()
+        assert res["gangqinpu"]["tracker"] == "beat_this" and res["gangqinpu_pm2s_rand"]["tracker"] == "pm2s"
+        assert res["gangqinpu_pm2s_rand"]["pm2s_fallbacks"] >= 0 and "gangqinpu_pm2s" not in res
+        assert (runs / "pm" / "grids_gangqinpu.pkl").exists() and (runs / "pm" / "grids_gangqinpu_pm2s_rand.pkl").exists()
     finally:
-        if old_env is None:
-            os.environ.pop("PM2S_WEIGHTS", None)
-        else:
-            os.environ["PM2S_WEIGHTS"] = old_env
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         shutil.rmtree(tmp, ignore_errors=True)
 
 

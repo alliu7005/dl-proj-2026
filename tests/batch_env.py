@@ -22,6 +22,8 @@ BATCH_VARS = (
     "LEVELEXP",
     # pace/v2_gangqinpu.sh
     "BASE", "SNAP", "FILL", "GQ", "PM_PAIR", "AUDIO_TRAIN", "PM2S_RUNS",
+    # pace/v2_pm2s.sh, and which PM2S weights the jobs run (src/pm2s_beats.py weights_tag)
+    "PM_RUN", "PM_TAG", "METER", "PM2S_WEIGHTS", "PM2S_TAG",
     # the tests' own stand-ins
     "SUBMITS", "CALLS", "DONE",
 )

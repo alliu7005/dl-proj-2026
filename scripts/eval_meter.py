@@ -317,6 +317,7 @@ def main(argv=None):
     if args.real_tracked and args.tracker != "beat_this":
         raise SystemExit("--real-tracked is Beat This!'s stored beats: not with --tracker pm2s (PM2S runs here)")
     pm2s = None
+    from src.pm2s_beats import tagged
     if args.tracker == "pm2s":
         from src.pm2s_beats import PM2SBeats
         pm2s = PM2SBeats(device=str(device) if str(device).startswith("cuda") else "cpu")
@@ -325,7 +326,8 @@ def main(argv=None):
         if not perfs:
             print(f"skip {cond_name}: no {CONDITIONS[cond_name]} performances (scripts/build_meter_data.py)")
             continue
-        cond = cond_name if pm2s is None else f"{cond_name}_pm2s"   # results / file names
+        # results / file names (other PM2S weights than the released: <condition>_pm2s_<tag>)
+        cond = cond_name if pm2s is None else tagged(f"{cond_name}_pm2s")
         real = None
         if args.real_tracked:
             from scripts.track_meter_data import tracked_path

@@ -591,6 +591,56 @@ scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_gq.tgz .
 tar xzf v2_gq.tgz
 ```
 
+## 4p. v2, seventh round: PM2S retrained without our test pieces
+
+After 4o (docs/experiments.md, "Seventh round"). With PM2S's beats, v2 gained the most of any change
+so far, but PM2S's released weights were trained on all of ASAP, our test pieces included.
+`scripts/train_pm2s.py` trains its model again from scratch, by its own recipe, on our training
+splits only: `pm2s_ho`. Every output made with it carries the tag `ho` (`PM2S_WEIGHTS` /
+`PM2S_TAG`, `src/pm2s_beats.py weights_tag`), so the released PM2S's results stay as they are.
+
+**Before you start:** `git pull`; the queue empty (8 jobs, PACE's limit); 4o's outputs there (the
+script stops with a message if one is missing).
+
+```bash
+bash pace/v2_pm2s.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `phtests` | the test suites (CPU) | - |
+| `phtrain` | `pm2s_ho` trained (`scripts/train_pm2s.py`: ASAP's training pieces, their transcriptions, PERiScoPe and Gangqinpu, validation on their val splits; up to 7.5 h, about 2 h expected); fails unless finished | `phtests` (cancelled if they fail) |
+| `phtrack` | its beats of Gangqinpu's and PERiScoPe's notes stored (`tracked_*_pm2s_ho.npz`, `tracked_report_ho.json`), its errors fitted (`configs/beat_noise_pm2s_ho.json`), its beats on the ASAP test inputs (`outputs/system_eval/beats_compare_ho.md`) | `phtrain` (cancelled if it fails) |
+| `phsys` | the release and `meter_v4_gq_pm` on whole pieces with its beats (`..._pm_rpm_ho`); `meter_v4_gq_pm` at the meter level with them (`<condition>_pm2s_ho`) | `phtrain` (cancelled if it fails) |
+| `phmeter`, `phmeter2` | `meter_v4_gq_pmho`: `meter_v4_gq_pm`'s recipe with `pm2s_ho`'s stored beats and fitted errors; tuned and evaluated; the second job resumes | `phtrack`; `phmeter` (finished or not) |
+| `pheval` | `meter_v4_gq_pmho` with `pm2s_ho`'s beats on every test set, `nl_base_gn` on its grids, whole pieces (`:tidy,d95,pm,rpm`) | `phmeter2` (finished or not) |
+| `phfinal` | `outputs/compare`, every system rated with Beyer & Dai's metrics, `outputs/system_eval/paired.md` | `phsys`, `pheval` (finished or not) |
+
+**What to check:** after `phtrain`, `outputs/runs/pm2s_ho/log.csv` (validation beat / downbeat F
+per source) and `status.json`; after `phtrack`, `outputs/system_eval/beats_compare_ho.md` next to
+`beats_compare.md` (the released PM2S, same inputs) and `data/processed/meter/tracked_report_ho.json`
+next to `tracked_report.json`.
+
+**If something goes wrong:**
+- *`phtrain` stopped before the end:* `bash pace/v2_pm2s.sh` again (it resumes from `last.pt`).
+- *`meter_v4_gq_pmho` not done after `phmeter2`* (`pheval`'s log says "not done yet"):
+  `STAGE=meter bash pace/v2_pm2s.sh`.
+- *Only the evaluation again:* `STAGE=eval bash pace/v2_pm2s.sh`.
+
+To bring the results back (PACE, then Windows, from the repo folder):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_pm2s.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/beats_compare_ho.* data/processed/meter/tracked_report_ho.json configs/beat_noise_pm2s_ho.json outputs/runs/pm2s_ho/*.json outputs/runs/pm2s_ho/log.csv outputs/runs/meter_v4_gq_pmho/*.json outputs/runs/meter_v4_gq_pmho/log.csv outputs/runs/meter_v4_gq_pm/eval_meter.json outputs/runs/nl_base_gn/eval_pieces_best.json slurm-ph*.out slurm-met_meter_v4_gq_pmho*.log 2>/dev/null; ls -la v2_pm2s.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_pm2s.tgz .
+```
+
+```powershell
+tar xzf v2_pm2s.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

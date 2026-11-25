@@ -58,6 +58,7 @@ scripts/build_meter_data.py      v2: whole performances with ground-truth grids:
 scripts/fetch_gangqinpu.py       v2: download the Gangqinpu release's Parquet (gated: accept its licence on Hugging Face first)
 scripts/compare_beats.py         PM2S against Beat This! on the whole-piece test inputs, scored against the ASAP beat annotations
 scripts/fit_pm2s_noise.py        PM2S's beat-tracking errors fitted on Gangqinpu -> configs/beat_noise_pm2s.json (training a meter model for PM2S)
+scripts/train_pm2s.py            PM2S's beat model retrained from scratch on our training splits only (pm2s_ho; PM2S_WEIGHTS / PM2S_TAG use it)
 scripts/fetch_gangqinpu_audio.py Gangqinpu's recordings from the URLs the release lists (politely, resumable; for Beat This! on real audio)
 scripts/track_meter_data.py      Beat This! on Gangqinpu's recordings, PM2S on the notes: real beats stored for training (--tracked) and testing
 scripts/train_meter.py           v2: train the meter model (ASAP + real + PERiScoPe, per-source validation)
@@ -78,6 +79,7 @@ pace/rebuild.sh                  data/processed rebuilt with the 2026-11-22 data
 pace/v2_release.sh               the release: its configuration scored on whole pieces, models/ built, paired comparisons
 pace/v2_level.sh                 v2 fifth round: the written-tempo head for the note-value level, trained, tuned, scored
 pace/v2_gangqinpu.sh             v2 sixth round: meter models trained with Gangqinpu; the grid's beat times taken from the notes
+pace/v2_pm2s.sh                  v2 seventh round: PM2S retrained without our test pieces, its beats on whole pieces, a meter model for it
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model
 tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
@@ -91,6 +93,7 @@ tests/test_notelabels.py         v2: labels, ties, rendering, grid features, Gri
 tests/test_meter.py              v2: meter targets, decoding (vs a plain Viterbi), oracle, note encoder, alignment ground truth, augmentation, time limit + resume, refined beat times, end to end, job graph
 tests/test_gangqinpu.py          v2: Gangqinpu notes, beat filters, grids, release reading, build / train / evaluate, batch shares, pace/v2_gangqinpu.sh
 tests/test_pm2s.py               PM2S: post-processing, the tracker on random weights, the weights' hash, beat_source, system names
+tests/test_pm2s_train.py         PM2S retrained: targets, augmentation, training and resuming, the weights' tag, pace/v2_pm2s.sh
 tests/test_tracked.py            real tracker output: the recordings' download, tracking the data, the real / simulated mix, real beats at test
 tests/test_v2_system.py          v2 system: onset-scale F1, rescoring, the export (per-bar fallbacks, overflow, spelling, playback tempo, grace notes, rests), the synthesizer, V2Pipeline (staves, grace notes, deletion threshold, length tidying), the demo, pace/v2.sh, v2_round4.sh and v2_jobs.sh
 tests/test_preprocessing.py      scores -> training data: chord ties, pickups, composition ids, time maps; plan.py leaves v2 runs alone

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import urllib.request
 from pathlib import Path
 
@@ -54,6 +55,30 @@ def default_weights_path() -> Path:
     return root / "pm2s" / "RNNJointBeatModel.pth"
 
 
+def weights_tag() -> str:
+    """The name outputs made with PM2S get for its weights: '' for the released ones; with another
+    checkpoint ($PM2S_WEIGHTS, e.g. scripts/train_pm2s.py's, trained without our test pieces),
+    $PM2S_TAG (letters and digits, e.g. ho). Systems (``_pm_rpm_<tag>``), stored tracked beats
+    (``tracked_<split>_pm2s_<tag>.npz``), meter results (``<condition>_pm2s_<tag>``), the fitted
+    errors (``configs/beat_noise_pm2s_<tag>.json``) and the beat comparison then keep their own
+    names, and never overwrite the released weights' ones."""
+    weights, tag = os.environ.get("PM2S_WEIGHTS", ""), os.environ.get("PM2S_TAG", "")
+    if tag and not re.fullmatch(r"[A-Za-z0-9]+", tag):
+        raise SystemExit(f"PM2S_TAG={tag!r}: letters and digits only")
+    if weights and not tag:
+        raise SystemExit("PM2S_WEIGHTS is set: set PM2S_TAG too (a short name for those weights, e.g. ho), "
+                         "so what is made with them is not taken for the released weights' results")
+    if tag and not weights:
+        raise SystemExit(f"PM2S_TAG={tag} without PM2S_WEIGHTS: which checkpoint is it?")
+    return tag
+
+
+def tagged(name: str) -> str:
+    """``name`` with the weights' tag: name_<tag>, or name for the released weights."""
+    tag = weights_tag()
+    return f"{name}_{tag}" if tag else name
+
+
 def fetch_weights(path: Path) -> Path:
     """The released weights at ``path``, downloaded and checked against their SHA-256 if missing."""
     path = Path(path)
@@ -68,6 +93,12 @@ def fetch_weights(path: Path) -> Path:
         raise RuntimeError(f"PM2S weights: SHA-256 {digest} is not the released file's {WEIGHTS_SHA256}")
     tmp.replace(path)
     return path
+
+
+def build_model():
+    """PM2S's RNNJointBeatModel, untrained (scripts/train_pm2s.py); its state dict is what
+    ``PM2SBeats`` loads."""
+    return _model()
 
 
 def _model():
@@ -137,6 +168,15 @@ def _model():
             xb = self.gru_beat(x)
             xd = self.gru_downbeat(xb)
             return self.out_beat(xb).squeeze(2), self.out_downbeat(xd).squeeze(2)
+
+        def forward_all(self, x):
+            """Training (scripts/train_pm2s.py): beat and downbeat probabilities and the log
+            probabilities of the inter-beat interval (PM2S's tempo head, trained with them)."""
+            x = self.convs(encode(x))
+            xb = self.gru_beat(x)
+            xd = self.gru_downbeat(xb)
+            xt = self.gru_tempo(xd)
+            return self.out_beat(xb).squeeze(2), self.out_downbeat(xd).squeeze(2), self.out_tempo(xt)
 
     return RNNJointBeatModel()
 
@@ -210,8 +250,13 @@ def complement(beats: np.ndarray, penalty: float = 1.0) -> np.ndarray:
 class PM2SBeats:
     """PM2S's beat tracker, loaded once: ``tracker(notes)`` -> (beat times, downbeat flags)."""
 
-    def __init__(self, weights: str | Path | None = None, device: str = "cpu"):
+    def __init__(self, weights: str | Path | None = None, device: str = "cpu", model=None):
+        """``model``: a model in memory instead of a checkpoint (scripts/train_pm2s.py validates
+        with it; left in the mode it is in)."""
         import torch
+        if model is not None:
+            self.model, self.device, self.weights = model, device, "(in memory)"
+            return
         path = fetch_weights(Path(weights) if weights else default_weights_path())
         self.model = _model()
         self.model.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))

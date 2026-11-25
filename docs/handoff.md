@@ -348,8 +348,9 @@ Each option has the evidence for it, what it could gain, and a rough cost:
   - But PM2S's released weights were trained on all of ASAP, our test pieces included.
   - On unseen music (Gangqinpu) its beats are worse than Beat This!'s, while the meter model
     trained for it ends level there.
-  - **Next:** retrain PM2S without our test and validation pieces (MIT, training code public),
-    then score again. If the gain holds, `meter_v4_gq_pm` + PM2S becomes the release.
+  - **Next:** retrain PM2S without our test and validation pieces, then score again. If the
+    gain holds, `meter_v4_gq_pm` + PM2S becomes the release. Built: `scripts/train_pm2s.py`
+    and `pace/v2_pm2s.sh` (the seventh round, pace/README.md 4p).
 - **Beat times from the notes:** -0.26 on clean (sure), nothing on real.
 - **Both trackers together** (`meter_v4_gq_both`): worse than either.
 

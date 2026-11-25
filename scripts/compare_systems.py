@@ -49,6 +49,15 @@ PAIRS = [  # (A, B, what A changes)
     ("v2_nl_base_gn_meter_v4_gq_both_d95_tidy", "v2_nl_base_gn_meter_v4_gq_d95_tidy", "PM2S as evidence on Beat This!'s beats"),
     (SEQ, "v2_nl_base_gn_meter_v4_gq_d95_tidy", "seq2seq (best) against v2 with the Gangqinpu meter model"),
     ("beyer_dai", "v2_nl_base_gn_meter_v4_gq_d95_tidy", "Beyer & Dai against v2 with the Gangqinpu meter model"),
+    # seventh round (pace/v2_pm2s.sh): PM2S retrained without our test pieces (tag ho)
+    (RELEASE + "_pm_rpm_ho", RELEASE, "the release with PM2S's beats, PM2S trained without our test pieces"),
+    (RELEASE + "_pm_rpm_ho", RELEASE + "_pm_rpm", "PM2S without our test pieces vs the released PM2S (the leak)"),
+    ("v2_nl_base_gn_meter_v4_gq_pm_d95_tidy_pm_rpm_ho", RELEASE, "meter_v4_gq_pm with the held-out PM2S's beats"),
+    ("v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", RELEASE, "meter model trained for the held-out PM2S, with it"),
+    ("v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", "v2_nl_base_gn_meter_v4_gq_pm_d95_tidy_pm_rpm_ho",
+     "meter model trained for the held-out PM2S vs for the released one"),
+    (SEQ, "v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", "seq2seq (best) against v2 with the held-out PM2S"),
+    ("beyer_dai", "v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", "Beyer & Dai against v2 with the held-out PM2S"),
 ]
 
 

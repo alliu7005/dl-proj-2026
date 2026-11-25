@@ -63,12 +63,17 @@ def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, cle
                 delete_above: float = DELETE_ABOVE, tidy: bool = False, real_beats: str = "audio") -> str:
     """The folder (and table row) of a system under outputs/system_eval (v2 with another deletion
     threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy; with other beats:
-    _ab / _pm on clean MIDI, _rpm on the real transcriptions)."""
+    _ab / _pm on clean MIDI, _rpm on the real transcriptions; with PM2S's beats from other weights
+    than the released ones, their tag last: src/pm2s_beats.py weights_tag)."""
     if v2:
         lab, met = parse_v2(v2)
         d = "" if delete_above == DELETE_ABOVE else "_keepall" if delete_above >= 1 else f"_d{round(delete_above * 100)}"
-        return (f"v2_{lab}_{met}" + d + ("_tidy" if tidy else "") + BEAT_SUFFIX[clean_beats]
+        name = (f"v2_{lab}_{met}" + d + ("_tidy" if tidy else "") + BEAT_SUFFIX[clean_beats]
                 + REAL_SUFFIX[real_beats])
+        if "pm2s" in (clean_beats, real_beats):   # other PM2S weights ($PM2S_WEIGHTS): their tag, _pm_rpm_<tag>
+            from src.pm2s_beats import tagged
+            name = tagged(name)
+        return name
     return f"{run}_{mode}" + ("_sb" if midi_beats == "synth" else "")
 
 
