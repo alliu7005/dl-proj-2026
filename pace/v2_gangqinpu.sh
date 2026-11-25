@@ -66,6 +66,10 @@
 # Again after a stop (finished runs and downloads are kept either way):
 #   STAGE=train bash pace/v2_gangqinpu.sh   # training not done after gqtrain2: gqtrain3 (resumes), gqeval, gqfinal
 #   STAGE=eval bash pace/v2_gangqinpu.sh    # only the evaluation and the final scoring again
+#
+# Data built elsewhere and copied in (Gangqinpu's meter data, both trackers' stored beats, their
+# fitted profiles: what gqdata + gqtrack make), so neither runs again and nothing is downloaded:
+#   STAGE=prebuilt bash pace/v2_gangqinpu.sh   # gqtests, gqrefine (+ BASE on Gangqinpu's test set), gqtrain, ...
 set -euo pipefail
 GPUS=${GPUS:-cuda13}  # any NVIDIA GPU with bf16 (pace/README.md, "Which GPU")
 G=(--gres=gpu:1 "--constraint=$GPUS")
@@ -79,7 +83,14 @@ GQ=${GQ:-data/raw/gangqinpu}
 AUDIO_TRAIN=${AUDIO_TRAIN:-3000}  # training recordings to download (with all ~1,000 validation and test ones)
 BD=${BD:-$HOME/scratch/beyer_dai}
 STAGE=${STAGE:-all}   # all; train: training resumed (one more job), then gqeval + gqfinal; eval: gqeval + gqfinal
-case "$STAGE" in all|train|eval) ;; *) echo "STAGE must be all, train or eval, not $STAGE"; exit 1 ;; esac
+case "$STAGE" in all|prebuilt|train|eval) ;; *) echo "STAGE must be all, prebuilt, train or eval, not $STAGE"; exit 1 ;; esac
+if [ "$STAGE" = prebuilt ]; then   # what gqdata + gqtrack would have made
+  for f in data/processed/meter/train_gangqinpu.pkl data/processed/meter/tracked_train_gangqinpu_beat_this.npz \
+           data/processed/meter/tracked_train_gangqinpu_pm2s.npz configs/beat_noise_pm2s.json \
+           configs/beat_noise_bt_gangqinpu.json; do
+    [ -f "$f" ] || { echo "STAGE=prebuilt: $f missing (copy the prebuilt data in, or use STAGE=all)"; exit 1; }
+  done
+fi
 BDENV="module load anaconda3; eval \"\$(conda shell.bash hook)\"; conda activate bd311; export PYTHONUNBUFFERED=1; cd \"\$SLURM_SUBMIT_DIR\""
 JOBS="source pace/common.sh; bash pace/v2_jobs.sh"
 REFINED="${BASE}_rf ${BASE}_fill meter_oracle_rf"
@@ -104,10 +115,16 @@ submit() {  # name, then sbatch options and --wrap: the job id in $ID, counted i
 
 refine=""
 train2=""
-if [ "$STAGE" = all ]; then
+if [ "$STAGE" = all ] || [ "$STAGE" = prebuilt ]; then
 submit gqtests -c 8 --mem=64G -t 2:00:00 --wrap="source pace/common.sh; python -m tests.test_gangqinpu && python -m tests.test_pm2s && python -m tests.test_tracked && python -m tests.test_beats && python -m tests.test_meter && python -m tests.test_pipeline && python -m tests.test_v2_system && python -m tests.test_system_eval"
 tests=$ID
 echo "tests: job $tests"
+gqbase=""
+if [ "$STAGE" = prebuilt ]; then
+track=$tests   # the data and the trackers' beats are there already: training waits only for the tests
+gqbase="$JOBS gqbase $BASE; "   # gqdata's baseline: the release's meter model on Gangqinpu's test set
+echo "prebuilt data: no gqdata / gqtrack jobs"
+else
 submit gqdata -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$tests" --wrap="source pace/common.sh; python scripts/fetch_gangqinpu.py --out $GQ && python scripts/build_meter_data.py --gangqinpu $GQ --gangqinpu-only && python scripts/fit_pm2s_noise.py && bash pace/v2_jobs.sh gqbase $BASE && \
 { python scripts/fetch_gangqinpu_audio.py --release $GQ --out $GQ/audio --train $AUDIO_TRAIN || \
   echo 'WARNING: the recordings could not all be fetched: the batch goes on (Beat This! simulated where missing)'; }"
@@ -116,7 +133,8 @@ echo "Gangqinpu download + meter data + PM2S's errors fitted + $BASE on its test
 submit gqtrack "${G[@]}" -c 8 --mem=64G -t 8:00:00 "--dependency=afterok:$data" --wrap="source pace/common.sh; python scripts/track_meter_data.py --release $GQ --audio $GQ/audio && python scripts/fit_pm2s_noise.py --from-stored beat_this"
 track=$ID
 echo "Beat This! on the recordings, PM2S on the notes, stored for training; Beat This!'s errors on them fitted: job $track"
-wrap="$JOBS refine $BASE ${BASE}_rf $SNAP $FILL; $JOBS refine $BASE ${BASE}_fill 0 $FILL; $JOBS refine oracle meter_oracle_rf $SNAP $FILL; METERS=\"$REFINED\" GRIDS_OLD=\"\" NEW_NLS=\"\" bash pace/v2_jobs.sh evals $LABELLER; $JOBS systems $LABELLER+${BASE}_rf:tidy,d95 $LABELLER+${BASE}_fill:tidy,d95; python scripts/compare_beats.py; $JOBS systems $LABELLER+$BASE:tidy,d95,pm,rpm"
+fi
+wrap="$gqbase$JOBS refine $BASE ${BASE}_rf $SNAP $FILL; $JOBS refine $BASE ${BASE}_fill 0 $FILL; $JOBS refine oracle meter_oracle_rf $SNAP $FILL; METERS=\"$REFINED\" GRIDS_OLD=\"\" NEW_NLS=\"\" bash pace/v2_jobs.sh evals $LABELLER; $JOBS systems $LABELLER+${BASE}_rf:tidy,d95 $LABELLER+${BASE}_fill:tidy,d95; python scripts/compare_beats.py; $JOBS systems $LABELLER+$BASE:tidy,d95,pm,rpm"
 submit gqrefine "${G[@]}" -c 8 --mem=48G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$wrap"
 refine=$ID
 echo "beat times from the notes (snap $SNAP s, fill $FILL beats): $REFINED, $LABELLER on them, whole pieces: job $refine"
