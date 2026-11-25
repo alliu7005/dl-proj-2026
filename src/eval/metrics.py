@@ -164,8 +164,9 @@ class Accumulator:
         out["duration_acc"] = c["dur_ok"] / c["dur_n"] if c["dur_n"] else float("nan")
         out["staff_acc"] = c["staff_ok"] / c["staff_n"] if c["staff_n"] else float("nan")
         out["bar_p"], out["bar_r"], out["bar_f1"] = self._prf(c["bar_tp"], c["bar_pr"], c["bar_gt"])
-        out["ts_acc"] = c["ts_ok"] / c["windows"]
-        out["key_acc"] = c["key_ok"] / c["windows"]
+        # nan without windows (a subset with none, e.g. real_unseen_audio of a --limit-perfs run), as above
+        out["ts_acc"] = c["ts_ok"] / c["windows"] if c["windows"] else float("nan")
+        out["key_acc"] = c["key_ok"] / c["windows"] if c["windows"] else float("nan")
         for k in ("grace", "tie", "arp", "ornament", "ped"):
             out[f"{k}_p"], out[f"{k}_r"], out[f"{k}_f1"] = self._prf(c[f"{k}_tp"], c[f"{k}_pr"], c[f"{k}_gt"])
         return out
