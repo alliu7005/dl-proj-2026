@@ -82,6 +82,7 @@ FILL=${FILL:-0.25}
 GQ=${GQ:-data/raw/gangqinpu}
 AUDIO_TRAIN=${AUDIO_TRAIN:-3000}  # training recordings to download (with all ~1,000 validation and test ones)
 BD=${BD:-$HOME/scratch/beyer_dai}
+TRAIN_CPUS=${TRAIN_CPUS:-16}   # gqtrain*: 3 meter runs side by side, 6 sample workers each (24 removes the CPU contention)
 STAGE=${STAGE:-all}   # all; train: training resumed (one more job), then gqeval + gqfinal; eval: gqeval + gqfinal
 case "$STAGE" in all|prebuilt|train|eval) ;; *) echo "STAGE must be all, prebuilt, train or eval, not $STAGE"; exit 1 ;; esac
 if [ "$STAGE" = prebuilt ]; then   # what gqdata + gqtrack would have made
@@ -138,13 +139,13 @@ wrap="$gqbase$JOBS refine $BASE ${BASE}_rf $SNAP $FILL; $JOBS refine $BASE ${BAS
 submit gqrefine "${G[@]}" -c 8 --mem=48G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$wrap"
 refine=$ID
 echo "beat times from the notes (snap $SNAP s, fill $FILL beats): $REFINED, $LABELLER on them, whole pieces: job $refine"
-submit gqtrain "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$track" --wrap="$JOBS meters $RUNS"
+submit gqtrain "${G[@]}" -c "$TRAIN_CPUS" --mem=96G -t 8:00:00 "--dependency=afterok:$track" --wrap="$JOBS meters $RUNS"
 train=$ID
-submit gqtrain2 "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterany:$train" --wrap="$JOBS meters $RUNS"
+submit gqtrain2 "${G[@]}" -c "$TRAIN_CPUS" --mem=96G -t 8:00:00 "--dependency=afterany:$train" --wrap="$JOBS meters $RUNS"
 train2=$ID
 echo "train + tune + evaluate $RUNS: jobs $train, then $train2 (resumes)"
 elif [ "$STAGE" = train ]; then   # training not finished after gqtrain2: one more job, resuming
-submit gqtrain3 "${G[@]}" -c 16 --mem=96G -t 8:00:00 --wrap="$JOBS meters $RUNS"
+submit gqtrain3 "${G[@]}" -c "$TRAIN_CPUS" --mem=96G -t 8:00:00 --wrap="$JOBS meters $RUNS"
 train2=$ID
 echo "train (resumed) + tune + evaluate $RUNS: job $train2"
 fi
