@@ -113,6 +113,17 @@ def test_grid_noise():
     frac = np.round(qq % 1.0, 9)
     assert len(tt) > len(t) and set(frac[frac > 0]) <= {round(x, 9) for x in EXTRA_SNAP}, set(frac)
     assert np.all(np.diff(tt) > 0.03) and np.all(np.diff(qq) > 0)
+    # more spurious beats than real ones (extra > 0.5, as some of PM2S's profiles): drawn, not a crash
+    many = BeatNoise(p_double=0.0, p_half=0.0, miss=0.0, extra=0.73, offset=0.0, jitter=0.0)
+    for seed in range(10):
+        tt, qq = GridNoise(many, 1.0)(t, q, np.random.default_rng(seed))
+        assert len(tt) > len(t) and np.all(np.diff(tt) > 0.03) and np.all(np.diff(qq) > 0), seed
+    pm2s = ROOT / "configs" / "beat_noise_pm2s.json"
+    if pm2s.exists():  # the fitted PM2S profiles (scripts/fit_pm2s_noise.py): every one draws
+        fitted_pm = GridNoise.from_json(pm2s, p=1.0)
+        for seed in range(200):
+            tt, qq = fitted_pm(t, q, np.random.default_rng(seed))
+            assert len(tt) >= 2 and np.all(np.diff(tt) > 0.03) and np.all(np.diff(qq) > 0), seed
 
 
 def test_targets_and_transfer():

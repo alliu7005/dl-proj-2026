@@ -452,7 +452,9 @@ class GridNoise:
             t, q = t[keep], q[keep]
         if r["extra"] > 0 and len(t) >= 2:
             e = min(r["extra"], 0.9)
-            n = int(rng.binomial(len(t), e / (1 - e)))
+            ratio = e / (1 - e)   # spurious beats per real one; above 1 (extra > 0.5: PM2S's profiles reach
+            # 0.73) no binomial can draw it: a Poisson with the same mean, as src/beats.py BeatNoise does
+            n = int(rng.binomial(len(t), ratio)) if ratio <= 1 else int(rng.poisson(len(t) * ratio))
             if n:
                 j = rng.integers(len(t) - 1, size=n)
                 if bn.extra_phase:
