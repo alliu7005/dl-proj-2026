@@ -30,10 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.compare_systems import load as load_systems, paired  # noqa: E402
 
 METERS = ("meter_v3_tp", "meter_v4_gq", "meter_v4_gq_posh", "meter_v4_gq_pm", "meter_v4_gq_both",
-          "meter_v4_gq_pm_s1", "meter_v4_gq_pm_g30", "meter_v3_tp_rf", "meter_v3_tp_fill")
+          "meter_v4_gq_pm_s1", "meter_v4_gq_pm_g30", "meter_v4_gq_pm_rf", "meter_v3_tp_rf", "meter_v3_tp_fill")
 LABELLERS = ("nl_base_gn", "nl_base_gn_pm")
 REL = "v2_nl_base_gn_meter_v3_tp_d95_tidy"          # the release (Beat This!'s beats)
 PM = "v2_nl_base_gn_meter_v4_gq_pm_d95_tidy_pm_rpm"  # round 6's best (PM2S's beats)
+SEQ = "sf_base_reg_cab_c128_meter_sb"                # the best seq2seq system (the release's seq2seq model)
 PAIRS = [  # (A, B, what A changes); negative A - B: A better
     (REL + "_pm_rpm", REL, "PM2S's beats instead of Beat This!'s (the release's models)"),
     (PM, REL + "_pm_rpm", "Gangqinpu-trained meter model for PM2S (meter_v4_gq_pm), same beats"),
@@ -49,6 +50,12 @@ PAIRS = [  # (A, B, what A changes); negative A - B: A better
     ("v2_nl_base_gn_meter_v3_tp_rf_d95_tidy", REL, "beat times from the notes (snap + fill)"),
     ("v2_nl_base_gn_meter_v3_tp_fill_d95_tidy", REL, "beat times from the notes (fill only)"),
     ("beyer_dai", REL, "Beyer & Dai against the release"),
+    # pace/v2_round7_extra.sh: round 6's best tuned, and seq2seq scored on this account
+    ("v2_nl_base_gn_meter_v4_gq_pm_d80_tidy_pm_rpm", PM, "round 6's best deleting above p 0.8 instead of 0.95"),
+    ("v2_nl_base_gn_meter_v4_gq_pm_rf_d95_tidy_pm_rpm", PM, "round 6's best with beat times from the notes"),
+    (SEQ, PM, "seq2seq (best) against round 6's best v2"),
+    (SEQ, REL, "seq2seq (best) against the v2 release"),
+    (SEQ, "beyer_dai", "seq2seq (best) against Beyer & Dai"),
 ]
 
 
