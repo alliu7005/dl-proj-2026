@@ -18,6 +18,25 @@ labeller's choice stays: the dotted rhythms it learned are untouched. A moved no
 when it was a triplet length, becomes the nearest sixteenth multiple. V2Pipeline (src/pipeline.py,
 ``timing_check=True``) runs it after labelling, before grace notes are attached and lengths tidied;
 the scoring script measures it as its own system (scripts/system_scores.py --timing-check, _tc).
+
+``check_beats`` (``timing_beats=True``, _tb) judges a whole beat instead of one note: the user's
+bars 64-71 repeat a syncopated figure played at 0, 0.5, 1, 1.5, 1.71, 2.24, 2.73, 3, 3.5 (the
+straight 16th syncopation 16th-8th-8th-16th over beats 2-3), which the labeller wrote at 1 2/3,
+2 1/3, 2 2/3. No one note there passes check_timing: 2.24 is 0.09 from 2 1/3 (under ``margin``),
+and 1.71 sits halfway between 1 2/3 and 1 3/4. The beat as a whole does: in each beat (of a
+quarter-beat bar) where the labeller wrote a triplet position or length, every note's played
+position is measured against the straight sixteenths (0, 1/4, 1/2, 3/4 of the beat) and against
+the eighth triplets (0, 1/3, 2/3; the sixths where the labeller wrote a sixth: a fast run in
+sextuplets, as in the song's bar 136, is judged against the grid it was written on), measured from where the beat itself was played (its notes
+written on the beat, their median, up to ``anchor`` early or late: in bars 67 and 69 the beat came
+0.05 early, and its notes at 1.42 and 1.69 on the grid were 0.47 and 0.74 of the beat as played).
+When the straight grid is the nearer on average (by ``edge``)
+and no note is further than ``beat_tol`` from a straight sixteenth, the beat is written straight:
+each triplet-written note at the sixteenth it was played nearest, each triplet length the nearest
+sixteenth multiple. Played triplets (0, 0.33, 0.67) are nearer the triplet grid and stay as written.
+A swung long-short (0, 0.67-0.73 of the beat as played) mostly goes to the dotted eighth and
+sixteenth: the bar the user said was written right (14) writes that figure straight, and bar 15
+had one chord played at 0.70 written half at 2 3/4 and half at 2 2/3.
 """
 from __future__ import annotations
 
@@ -27,6 +46,9 @@ import numpy as np
 
 TOL = 0.06       # of a beat: how close to a straight position the note was played
 MARGIN = 0.10    # of a beat: how far from the triplet position it was written on
+BEAT_TOL = 0.10  # check_beats: the furthest any note of a straightened beat was played from a sixteenth
+EDGE = 0.01      # check_beats: by how much the straight grid must be the nearer on average
+ANCHOR = 0.10    # check_beats: the most a beat's on-beat notes may shift its positions (played early / late)
 
 
 def quarter_beat(ts: str) -> bool:
@@ -77,3 +99,64 @@ def check_timing(placed: list, onsets: np.ndarray, grid: dict, bar_ts: list[str]
             p.total = max(Fraction(round(tot * 4), 4), Fraction(1, 4))
         moved += 1
     return moved
+
+
+def _straighten(p, s: Fraction, bar_ts: list[str]) -> bool:
+    """Write a note at straight position ``s`` of its bar (the next bar's downbeat when ``s`` is the
+    bar's length), its triplet length the nearest sixteenth multiple; False when there is no next bar."""
+    from .notelabels import bar_quarters
+    if s >= bar_quarters(bar_ts[p.bar]):
+        if p.bar + 1 >= len(bar_ts):
+            return False
+        p.bar, p.pos = p.bar + 1, Fraction(0)
+    else:
+        p.pos = s
+    tot = Fraction(p.total)
+    if tot.denominator % 3 == 0:
+        p.total = max(Fraction(round(tot * 4), 4), Fraction(1, 4))
+    return True
+
+
+def check_beats(placed: list, onsets: np.ndarray, grid: dict, bar_ts: list[str],
+                beat_tol: float = BEAT_TOL, edge: float = EDGE, anchor: float = ANCHOR) -> int:
+    """Write straight the beats whose timing fits straight sixteenths better than eighth triplets
+    (module docstring). Arguments as check_timing's. Changes ``placed`` in place; returns how many
+    notes changed (position or length)."""
+    from .notelabels import grid_position
+    t, q = np.asarray(grid.get("t", []), np.float64), np.asarray(grid.get("q", []), np.float64)
+    bar_q = np.asarray(grid.get("bar_q", []), np.float64)
+    if len(t) < 2 or not len(bar_q):
+        return 0
+    n_bars = min(len(bar_q), len(bar_ts))
+    use = [p for p in placed if not p.grace and getattr(p, "src", -1) >= 0 and p.bar < n_bars
+           and quarter_beat(bar_ts[p.bar])]
+    if not use:
+        return 0
+    played = grid_position(np.asarray([onsets[p.src] for p in use], np.float64), t, q)[0]
+    beats = {}
+    for p, qp in zip(use, played):
+        beats.setdefault((p.bar, int(Fraction(p.pos))), []).append((p, float(qp - bar_q[p.bar])))
+    straight = np.array([0, 0.25, 0.5, 0.75, 1.0])
+    thirds, sixths = np.array([0, 1 / 3, 2 / 3, 1.0]), np.arange(7) / 6
+    changed = 0
+    for (bar, beat), group in beats.items():
+        if not any(is_triplet(Fraction(p.pos) - beat) or Fraction(p.total).denominator % 3 == 0 for p, _ in group):
+            continue
+        x = np.clip(np.array([pp - beat for _, pp in group]), -0.5, 1.5)
+        on = [xi for (p, _), xi in zip(group, x) if Fraction(p.pos) == beat]
+        if on:                                              # the beat as played: its on-beat notes' median
+            x = x - float(np.clip(np.median(on), -anchor, anchor))
+        d_s = np.abs(x[:, None] - straight[None]).min(1)
+        sext = any(Fraction(p.pos - beat).denominator == 6 for p, _ in group)
+        d_t = np.abs(x[:, None] - (sixths if sext else thirds)[None]).min(1)
+        if d_s.max() > beat_tol or d_s.mean() + edge > d_t.mean():
+            continue
+        for (p, pp), xi in zip(group, x):
+            pos, tot = Fraction(p.pos), Fraction(p.total)
+            if is_triplet(pos - beat):
+                s = Fraction(beat) + Fraction(int(np.argmin(np.abs(straight - xi))), 4)
+                changed += _straighten(p, s, bar_ts)
+            elif tot.denominator % 3 == 0:
+                p.total = max(Fraction(round(tot * 4), 4), Fraction(1, 4))
+                changed += 1
+    return changed

@@ -47,6 +47,13 @@ TIDY = True
 GLISSANDO = True
 # a triplet the timing contradicts written as the straight eighth / sixteenth it was played on (src/timing.py)
 TIMING_CHECK = True
+# readability: short rests closed, small overlaps trimmed, stems by voice; bars the decoder stretched
+# with a jump shortened (src/readable.py)
+READABLE = True
+# whole beats written straight where the timing fits straight sixteenths better than the labeller's
+# triplets (src/timing.py check_beats)
+TIMING_BEATS = True
+FIX_JUMPS = True
 
 
 def default_path(name: str) -> str:

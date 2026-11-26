@@ -24,7 +24,9 @@
 #                          EVAL_CONDITIONS
 #   systems <spec>...      whole pieces (scripts/system_scores.py): <labeller>+<meter> = v2 (only
 #                          with both models finished and the meter model evaluated), with options
-#                          after a colon, comma-separated: tidy (--tidy), gl (--glissando), tc (--timing-check), d<percent> (--delete-above,
+#                          after a colon, comma-separated: tidy (--tidy), gl (--glissando), tc
+#                          (--timing-check), tb (--timing-beats), rd (--readable), jf (--fix-jumps),
+#                          d<percent> (--delete-above,
 #                          e.g. d95), keepall (--delete-above 1), missing (--only-missing: what an
 #                          earlier job wrote is kept), pm (PM2S's beats on clean MIDI: --clean-beats
 #                          pm2s), rpm (PM2S's beats on the real transcriptions: --real-beats pm2s), rsb (Beat This! on
@@ -158,13 +160,16 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
       tidy) out="$out --tidy" ;;
       gl) out="$out --glissando" ;;
       tc) out="$out --timing-check" ;;
+      tb) out="$out --timing-beats" ;;
+      rd) out="$out --readable" ;;
+      jf) out="$out --fix-jumps" ;;
       keepall) out="$out --delete-above 1" ;;
       missing) out="$out --only-missing" ;;
       pm) out="$out --clean-beats pm2s" ;;
       rpm) out="$out --real-beats pm2s" ;;
       rsb) out="$out --real-beats synth" ;;
       d[0-9]*) out="$out --delete-above 0.${o#d}" ;;
-      *) echo "unknown v2 option $o (tidy, gl, tc, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
+      *) echo "unknown v2 option $o (tidy, gl, tc, tb, rd, jf, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
     esac
   done
   echo "$out"

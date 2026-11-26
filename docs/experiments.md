@@ -1559,6 +1559,27 @@ seq2seq stays best on classical real audio (10.65).
     triplets against straight playing (the old labeller wrote 17% there).
   - On that song it moved 89 notes, all on clear evidence: played at 0.44-0.55 of the beat and
     written at 1/3 or 2/3, or played on a sixteenth at least 0.1 of a beat from the triplet spot.
+- **The beat-level timing check** (`src/timing.py` check_beats, `_tb`, in `pace/v2_readable.sh`):
+  - The per-note check left the song's bars 64-71 at 20% triplets: a syncopation played straight
+    (1.5, 1.71, 2.24, 2.73) passed no single note's test.
+  - Judging each beat as a whole fixed it: the straight 16ths against the eighth triplets (sixths
+    where the labeller wrote sixths), measured from where the beat was played. Bars 64-71 now have
+    no triplets, and the whole song went from 4.5% to 2.2%.
+  - Expected: positive on Gangqinpu (pop: syncopation), about neutral on ASAP, where played
+    triplets are nearer their own grid.
+- **The readability rules** (`src/readable.py`, `pace/v2_readable.sh`), each on the timing check
+  (`_tc`), on ASAP and Gangqinpu:
+  - `_jf` is the short-bar fix. The meter decoder's ts-change penalty makes it stretch a short bar
+    rather than change the time signature. In the user's song, bars 47 and 51 (0.46 s and 0.66 s)
+    were each written over a whole 4/4 bar. A step below half its neighbours' seconds per quarter
+    gets the beats its time holds, and its bar becomes 2/4 (two beats at least).
+  - `_rd` closes 16th rests, trims overlaps up to a 16th (only into a length one note can write,
+    never across the triplet and straight grids), and sets stems by voice and hides the lesser
+    voice's rests.
+  - `_tb_rd_jf` is the demo's default, against `_tc` and against the plain system.
+  - Expected: `_jf` small but positive where the decoder stretched bars. `_rd` may cost on duration
+    against ASAP's scores, which do write 16th rests (closing every rest under an eighth cost about
+    2 points before), and is kept for the demo whatever it scores, if it costs under a point.
 
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 

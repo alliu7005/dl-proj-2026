@@ -6,7 +6,9 @@ A steady grid (one quarter a beat, 0.5 s) and placed notes that record the perfo
 from: a triplet-written note played on a straight eighth moves there (its triplet length with it), a
 swung one (played between 2/3 and 3/4) stays, one played on the next bar's downbeat moves into that
 bar, a 6/8 bar and grace notes are left alone, a note played between the two stays; the pipeline's
-switch, the system name, the demo's and the CLI's switches.
+switch, the system name, the demo's and the CLI's switches. check_beats: the song's syncopated beat
+(1 2/3, 2 1/3, 2 2/3 written; played straight) written straight as a whole beat, the beat measured
+from where it was played, played triplets and a sextuplet run left, 6/8 left.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from src.notelabels import Placed  # noqa: E402
-from src.timing import check_timing, is_triplet, quarter_beat  # noqa: E402
+from src.timing import check_beats, check_timing, is_triplet, quarter_beat  # noqa: E402
 
 V = ROOT / "data" / "processed" / "vocab.json"
 
@@ -61,15 +63,64 @@ def test_check_timing():
     assert not is_triplet(Fraction(0))
 
 
+def test_check_beats():
+    bars = ["4/4", "4/4", "6/8", "4/4"]
+    grid = {"t": np.arange(0, 8.0, 0.5), "q": np.arange(0, 16.0), "bar_q": np.array([0.0, 4.0, 8.0, 11.0]),
+            "bars": bars}
+    sec = lambda q: q * 0.5                                                   # noqa: E731
+    on, placed = [], []
+
+    def note(bar, pos, total, played, pitch=60):
+        on.append(sec(played))
+        p = Placed(bar, Fraction(pos), pitch, Fraction(total), 0, src=len(on) - 1)
+        placed.append(p)
+        return p
+    # bar 1, beats 2-3 as in the song's bars 64-71: written 1 1/2 (a 1/6), 1 2/3, 2 1/3, 2 2/3
+    a = note(0, Fraction(3, 2), Fraction(1, 6), 1.49)
+    b = note(0, Fraction(5, 3), Fraction(1, 3), 1.71)                         # halfway: no one note decides
+    c0 = note(0, 2, 1, 1.98)
+    c = note(0, Fraction(7, 3), Fraction(1, 3), 2.24)                         # 0.09 from 2 1/3: under MARGIN
+    d = note(0, Fraction(8, 3), Fraction(1, 3), 2.73)
+    # bar 2, beat 1: played triplets -> stay; beat 3: the beat played 0.06 early, notes at 2.43 / 2.68
+    t1 = note(1, Fraction(1, 3), Fraction(1, 3), 4.34)
+    t2 = note(1, Fraction(2, 3), Fraction(1, 3), 4.66)
+    e0 = note(1, 2, Fraction(1, 2), 5.94)
+    e1 = note(1, Fraction(7, 3), Fraction(1, 3), 6.43)                        # 0.49 / 0.74 of the beat as played
+    e2 = note(1, Fraction(8, 3), Fraction(1, 3), 6.68)
+    # bar 2, beat 4: a sextuplet run played unevenly -> judged against sixths, left
+    r1 = note(1, Fraction(19, 6), Fraction(1, 6), 7.15)
+    r2 = note(1, Fraction(10, 3), Fraction(1, 6), 7.31)
+    r3 = note(1, Fraction(7, 2), Fraction(1, 6), 7.52)
+    # 6/8: never
+    s = note(2, Fraction(4, 3), Fraction(1, 3), 9.5)
+    assert check_timing(placed, np.array(on), grid, bars) == 0                # one note at a time: nothing is clear
+    changed = check_beats(placed, np.array(on), grid, bars)
+    assert (a.pos, a.total) == (Fraction(3, 2), Fraction(1, 4))
+    assert (b.pos, b.total) == (Fraction(7, 4), Fraction(1, 4))
+    assert (c.pos, d.pos) == (Fraction(9, 4), Fraction(11, 4)) and c0.pos == 2
+    assert (t1.pos, t2.pos) == (Fraction(1, 3), Fraction(2, 3))
+    assert (e1.pos, e2.pos) == (Fraction(5, 2), Fraction(11, 4)) and e0.pos == 2
+    assert (r1.pos, r2.pos, r3.pos) == (Fraction(19, 6), Fraction(10, 3), Fraction(7, 2))
+    assert s.pos == Fraction(4, 3)
+    assert changed == 6
+    # nothing to judge: no grid, no performed notes
+    assert check_beats(placed, np.array(on), {"t": [], "q": []}, bars) == 0
+    assert check_beats([Placed(0, Fraction(4, 3), 60, Fraction(1, 3), 0)], np.array(on), grid, bars) == 0
+
+
 def test_pipeline_and_switches():
     """V2Pipeline: off unless asked; on, its count in the stats; the scripts' switches."""
     from scripts.system_scores import system_name
-    from src.release import TIMING_CHECK
-    assert TIMING_CHECK is True
+    from src.release import TIMING_BEATS, TIMING_CHECK
+    assert TIMING_CHECK is True and TIMING_BEATS is True
     assert system_name(None, "", "", "nl+m", "synth", 0.95, True, "audio", timing_check=True) == "v2_nl_m_d95_tidy_tc"
+    assert system_name(None, "", "", "nl+m", "synth", 0.95, True, "audio", timing_check=True, timing_beats=True,
+                       readable=True) == "v2_nl_m_d95_tidy_tc_tb_rd"
     for f in ("demo/app.py", "scripts/audio_to_score.py"):
-        assert "--no-timing-check" in (ROOT / f).read_text(encoding="utf-8"), f
-    assert 'tc) out="$out --timing-check" ;;' in (ROOT / "pace" / "v2_jobs.sh").read_text()
+        x = (ROOT / f).read_text(encoding="utf-8")
+        assert "--no-timing-check" in x and "--no-timing-beats" in x, f
+    jobs = (ROOT / "pace" / "v2_jobs.sh").read_text()
+    assert 'tc) out="$out --timing-check" ;;' in jobs and 'tb) out="$out --timing-beats" ;;' in jobs
     if not V.exists():
         print("  (pipeline part skipped: no data/processed/vocab.json)")
         return
@@ -86,9 +137,11 @@ def test_pipeline_and_switches():
         times = np.arange(0.5, 10.5, 0.5)
         beats = (times, np.arange(len(times)) % 4 == 0)
         pipe = V2Pipeline(lab, met, vocab=V, device="cpu", window_notes=48)
-        assert not pipe.timing_check
+        assert not pipe.timing_check and not pipe.timing_beats
         off = pipe.run(midi, tmp / "off", beats=beats)
-        on = pipe.run(midi, tmp / "on", beats=beats, timing_check=True)
+        on = pipe.run(midi, tmp / "on", beats=beats, timing_check=True, timing_beats=True)
+        assert off.stats["timing_beats"] is False and off.stats["timing_beats_fixed"] == 0
+        assert on.stats["timing_beats"] is True and on.stats["timing_beats_fixed"] >= 0
         assert off.stats["timing_check"] is False and off.stats["timing_fixed"] == 0
         assert on.stats["timing_check"] is True and on.stats["timing_fixed"] >= 0
         assert on.stats["notes_kept"] == off.stats["notes_kept"]              # it moves notes, never drops them

@@ -790,6 +790,29 @@ To bring the results back:
 cd ~/scratch/dl-proj-2026 && tar czf v2_timing.tgz outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-tc*.out 2>/dev/null; ls -la v2_timing.tgz
 ```
 
+## 4t. The readability rules on whole pieces
+
+`src/readable.py` (the short-bar fix `jf`, the readability rules `rd`) and the beat-level timing
+check (`src/timing.py` check_beats, `tb`) are on in the demo. This measures each on top of the timing
+check. Submit it once the queue has room (4 jobs):
+
+```bash
+bash pace/v2_readable.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `rdtests` | the test suites (CPU) | - |
+| `rdasap` | `nl_gq` + `meter_v4_gq:tidy,d95,tc` with `tb`, `rd`, `jf`, all three (and `tc` alone if 4s did not run) on ASAP | `rdtests` |
+| `rdgq` | the same on Gangqinpu's whole pieces | `rdtests` |
+| `rdfinal` | Beyer & Dai's metrics for every system (ASAP, Gangqinpu), both `paired.md` | `rdasap`, `rdgq` (finished or not) |
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_readable.tgz outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-rd*.out 2>/dev/null; ls -la v2_readable.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

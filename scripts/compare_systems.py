@@ -89,6 +89,18 @@ PAIRS = [  # (A, B, what A changes)
     # the timing check (src/timing.py; pace/v2_pm2s2.sh p2sys, or pace/v2_timing.sh)
     (GQ_NL + "_meter_v4_gq_d95_tidy_tc", GQ_NL + "_meter_v4_gq_d95_tidy",
      "the timing check: triplets the timing contradicts written straight"),
+    # the beat-level timing check (src/timing.py check_beats), the readability rules and the short-bar
+    # fix (src/readable.py), each on the timing check (pace/v2_readable.sh)
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "the beat-level timing check: beats played straight written straight, not as the labeller's triplets"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_rd", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "the readability rules: 16th rests closed, small overlaps trimmed (stems, hidden rests)"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_jf", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "the short-bar fix: bars the meter decoder stretched with a jump shortened"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "all three (the demo's default) against the timing check alone"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf", GQ_NL + "_meter_v4_gq_d95_tidy",
+     "the demo's default against the plain system"),
 ]
 
 

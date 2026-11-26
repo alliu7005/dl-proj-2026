@@ -68,17 +68,20 @@ REAL_SUFFIX = {"audio": "", "pm2s": "_rpm", "synth": "_rsb"}     # v2 on the rea
 
 def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, clean_beats: str = "synth",
                 delete_above: float = DELETE_ABOVE, tidy: bool = False, real_beats: str = "audio",
-                glissando: bool = False, timing_check: bool = False) -> str:
+                glissando: bool = False, timing_check: bool = False, readable: bool = False,
+                fix_jumps: bool = False, timing_beats: bool = False) -> str:
     """The folder (and table row) of a system under outputs/system_eval (v2 with another deletion
     threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy; glissandos written
-    as glissandos: _gl; triplets the timing contradicts made straight: _tc; with other beats:
+    as glissandos: _gl; triplets the timing contradicts made straight: _tc; beats the timing says are straight: _tb;
+    the readability rules: _rd;
+    stretched bars shortened: _jf; with other beats:
     _ab / _pm on clean MIDI, _rpm on the real transcriptions; with PM2S's beats from other weights
     than the released ones, their tag last: src/pm2s_beats.py weights_tag)."""
     if v2:
         lab, met = parse_v2(v2)
         d = "" if delete_above == DELETE_ABOVE else "_keepall" if delete_above >= 1 else f"_d{round(delete_above * 100)}"
         name = (f"v2_{lab}_{met}" + d + ("_tidy" if tidy else "") + ("_gl" if glissando else "")
-                + ("_tc" if timing_check else "")
+                + ("_tc" if timing_check else "") + ("_tb" if timing_beats else "") + ("_rd" if readable else "") + ("_jf" if fix_jumps else "")
                 + BEAT_SUFFIX[clean_beats]
                 + REAL_SUFFIX[real_beats])
         if "pm2s" in (clean_beats, real_beats):   # other PM2S weights ($PM2S_WEIGHTS): their tag, _pm_rpm_<tag>
@@ -114,6 +117,15 @@ def main(argv=None):
     ap.add_argument("--timing-check", action="store_true",
                     help="v2: a note written on a triplet position but played on a straight eighth / sixteenth "
                          "moved there (src/timing.py, the demo's default); its own system (_tc)")
+    ap.add_argument("--timing-beats", action="store_true",
+                    help="v2: a beat whose timing fits straight sixteenths better than the labeller's triplets "
+                         "written straight (src/timing.py check_beats, the demo's default); its own system (_tb)")
+    ap.add_argument("--readable", action="store_true",
+                    help="v2: rests and overlaps of a 16th or less closed / trimmed, stems by voice (src/readable.py, "
+                         "the demo's default); its own system (_rd)")
+    ap.add_argument("--fix-jumps", action="store_true",
+                    help="v2: a bar the meter decoder stretched with a jump shortened instead (src/readable.py, the "
+                         "demo's default); its own system (_jf)")
     ap.add_argument("--tidy", action="store_true",
                     help="v2: written lengths stop at the next onset of their staff when they run just past it "
                          "(src/pipeline.py tidy_lengths); its own system (_tidy)")
@@ -138,7 +150,8 @@ def main(argv=None):
         lab, met = parse_v2(args.v2)
         pipe = V2Pipeline(runs / lab / args.ckpt, runs / met / args.ckpt, vocab=args.vocab, device=args.device,
                           delete_above=args.delete_above, tidy=args.tidy, glissando=args.glissando,
-                          timing_check=args.timing_check)
+                          timing_check=args.timing_check, readable=args.readable, fix_jumps=args.fix_jumps,
+                          timing_beats=args.timing_beats)
         wants_beats, midi_beats = True, "synth"
     else:
         pipe = ScorePipeline(runs / args.run / args.ckpt, vocab=args.vocab, device=args.device)
@@ -158,10 +171,13 @@ def main(argv=None):
         n = len(entries)
         entries = [e for e in entries if e["condition"] != "clean" or e["performance"] in tracked]
         print(f"--clean-beats audio: {len(entries)} of {n} inputs (clean ones need a recording)", flush=True)
-    if not args.v2 and (args.delete_above != DELETE_ABOVE or args.tidy or args.glissando or args.timing_check):
-        ap.error("--delete-above, --tidy, --glissando and --timing-check are for v2 (--v2)")
+    if not args.v2 and (args.delete_above != DELETE_ABOVE or args.tidy or args.glissando or args.timing_check
+                        or args.readable or args.fix_jumps or args.timing_beats):
+        ap.error("--delete-above, --tidy, --glissando, --timing-check, --timing-beats, --readable and --fix-jumps "
+                 "are for v2 (--v2)")
     system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above,
-                         args.tidy, args.real_beats, args.glissando, args.timing_check)
+                         args.tidy, args.real_beats, args.glissando, args.timing_check, args.readable, args.fix_jumps,
+                         args.timing_beats)
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before

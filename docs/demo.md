@@ -42,6 +42,44 @@ default in between jobs. When it is offline, it runs on what is there.
   - Swung notes (between 2/3 and 3/4 of the beat) stay as the labeller wrote them.
   - On the user's song it moved 89 notes. In bars 64-71, where a window had read straight eighths
     as triplets, triplets went from 40% to 20% and eighths from 7% to 23%.
+- **Whole beats checked** (`src/timing.py` check_beats, on by default, `--no-timing-beats` to turn
+  off): the timing check judges one note at a time, which missed the song's bars 64-71.
+  - Each bar there repeats a syncopation played at 1.5, 1.71, 2.24 and 2.73: the straight 16th
+    figure (16th, 8th, 8th, 16th), as bar 14 writes it. The labeller wrote it as triplets.
+  - No single note was clear enough: 2.24 is 0.09 from 2 1/3, and 1.71 is halfway between the two
+    grids.
+  - So each beat where the labeller wrote a triplet is judged as a whole: are the notes played in
+    it nearer the straight 16ths or the triplets (the sixths for a run written in sextuplets)?
+    - The beat is measured from where its on-beat notes were played (bars 67 and 69 came 0.05
+      early).
+    - When the straight grid is nearer and every note is within 0.1 beat of a 16th, the whole beat
+      is written straight.
+  - Bars 64-71 went from 20% triplets to none, and the whole song from 4.5% to 2.2%. Played
+    triplets and the sextuplet run in bar 136 stay.
+  - A swung long-short (0.67-0.73 of the beat) becomes a dotted eighth and a sixteenth, as in bar 14.
+- **Readable bars** (`src/readable.py`, on by default; `--no-fix-jumps` and `--no-readable` turn
+  each off):
+  - **Short bars:** a bar the meter model stretched is shortened instead.
+    - The meter model's decoder sometimes gives a bar's beats less than a beat's time, so a bar
+      that was played short (two beats) became a whole 4/4 bar of long notes and rests.
+    - The user's bars 47 and 51 were like this: 0.46 s and 0.66 s against 0.47 s beats.
+    - The rule: a beat step that packs its quarters into less than half the time its neighbours
+      take gets the beats its time holds. Its bar loses the rest and gets its own time signature,
+      keeping two beats at least, so both bars are now 2/4 and every note in them is written.
+    - A long gap at the usual tempo (beats the tracker missed) is not touched.
+  - **Lengths:** a rest of a 16th or less before the next note of the same staff, in the same bar,
+    is closed. A note running up to a 16th past the next one stops there.
+    - This happens only when the new length is one plain, dotted or triplet note, and the note
+      neither starts on a triplet and ends on a straight 16th nor the other way round.
+    - On the user's song: 188 rests closed and 24 overlaps trimmed.
+  - **Voices:** where a staff has two voices in a bar, the higher voice's stems go up and the
+    other's down. The rests that fill out the lesser voice are hidden.
+    - Before, both voices' stems pointed the same way and the viewer drew them over each other: in
+      bar 29, half-note chords under a melody looked like 32nd beams.
+    - 114 bars of the song had this.
+  - Closing rests had cost duration accuracy against ASAP's scores before (`tidy_lengths`), so the
+    benchmark measures both rules (`pace/v2_readable.sh`) before they count as more than a demo
+    default.
 - **Click to play from there:** a click anywhere on the score sends the player playing, else the
   one last used, else the score's, to that moment, and plays on. The bar jumps there at once.
   - The position comes from the line clicked and the cursor steps around the click.
