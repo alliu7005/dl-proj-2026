@@ -74,7 +74,7 @@ submit() {  # name, then sbatch options and --wrap: the job id in $ID, counted i
 
 train="" inputs="" meter="" dep_sys=() dep_sys2=()
 if [ "$STAGE" = all ]; then
-submit lbtests -c 8 --mem=64G -t 2:00:00 --wrap="source pace/common.sh; python -m tests.test_gangqinpu_scores && python -m tests.test_gangqinpu && python -m tests.test_notelabels && python -m tests.test_v2_system && python -m tests.test_system_eval && python -m tests.test_compare_runs && python -m tests.test_preprocessing"
+submit lbtests -c 8 --mem=64G -t 2:00:00 --wrap="source pace/common.sh; python -m tests.test_gangqinpu_scores && python -m tests.test_publish && python -m tests.test_gangqinpu && python -m tests.test_notelabels && python -m tests.test_v2_system && python -m tests.test_system_eval && python -m tests.test_compare_runs && python -m tests.test_preprocessing"
 tests=$ID
 echo "tests: job $tests"
 submit lbdata -c 16 --mem=96G -t 4:00:00 "--dependency=afterok:$tests" --wrap="source pace/common.sh; python scripts/build_gangqinpu_windows.py --release $GQ --workers 16 && python scripts/build_notelabels.py --splits train_gangqinpu,val_gangqinpu,test_gangqinpu --workers 16 && $JOBS tempo meter_v3_s1 meter_v3_s1_tp"

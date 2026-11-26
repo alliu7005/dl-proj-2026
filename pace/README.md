@@ -450,6 +450,17 @@ release's name (`v2-round4`), so `download_models.py --revision v2-round4` alway
 version. `HF_REPO` in `src/release.py` names this repo, so anyone gets the models with
 `python scripts/download_models.py`.
 
+**Publishing as training finishes (since 2026-11-26).** The `hf auth login` above, once, is all
+it needs. Every run a job of `pace/v2_jobs.sh` finishes (meter models once evaluated, labellers,
+seq2seq) goes to the repo through `scripts/publish_model.py`: kept under `runs/<run>/`, and made
+the default of its folder when it scores at least as well as the one there on their shared test
+sets. The demo then pulls it. A failed upload never fails a job. `PUBLISH=0 bash pace/<batch>.sh`
+publishes nothing. By hand, for a run finished before:
+
+```bash
+cd ~/scratch/dl-proj-2026 && module load anaconda3 && conda activate dl-proj && python scripts/publish_model.py --run outputs/runs/meter_v4_gq
+```
+
 To bring the results back (PACE, then Windows):
 
 ```bash

@@ -383,8 +383,18 @@ Each option has the evidence for it, what it could gain, and a rough cost:
 
 ## Models
 
-On Hugging Face: **[dat-dev/scoreformer](https://huggingface.co/dat-dev/scoreformer)**, tag
-`v2-round4` ([model_card.md](model_card.md) is its page):
+On Hugging Face: **[dat-dev/scoreformer](https://huggingface.co/dat-dev/scoreformer)**
+([model_card.md](model_card.md) is its page). Release `v2-round4` (tagged) is below. Since
+2026-11-26 the default meter model is `meter_v4_gq`, trained with Gangqinpu, which is more general
+(model card, "Evaluation"). The repo now updates itself:
+- **Every run a PACE job finishes is published** (`pace/v2_jobs.sh` calls
+  `scripts/publish_model.py`): kept under `runs/<run>/`, and made its folder's default when it scores
+  at least as well on the test sets both have. `PUBLISH=0` turns this off. It needs `hf auth login`
+  once on PACE; without it, a job says "not published" and goes on.
+- **The demo pulls the current default** when it starts and every hour (`--update-every`;
+  `--no-update` turns it off), and swaps the new models in between jobs.
+
+Release `v2-round4`:
 
 | folder | trained run | why this one |
 |---|---|---|
@@ -401,7 +411,9 @@ On Hugging Face: **[dat-dev/scoreformer](https://huggingface.co/dat-dev/scorefor
 ```bash
 python scripts/download_models.py                          # -> models/, from dat-dev/scoreformer
 python scripts/download_models.py --revision v2-round4     # exactly this release
-python demo/app.py                                         # the demo picks up models/ on its own
+python scripts/download_models.py --run meter_v4_gql       # one published run -> models/runs/meter_v4_gql/
+python scripts/publish_model.py --run outputs/runs/<run>   # publish a run by hand (--dry-run, --force)
+python demo/app.py                                         # pulls the current default, then models/
 ```
 Without `models/`, the demo and `scripts/audio_to_score.py` use the training runs in
 `outputs/runs/` (on PACE). A new release: run `pace/v2_release.sh` (it scores the configuration

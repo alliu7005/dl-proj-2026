@@ -29,7 +29,8 @@ src/pipeline.py                  audio / MIDI -> MusicXML: ScorePipeline (seq2se
 src/synth.py                     MIDI -> audio (additive piano), so Beat This! can track a MIDI input
 src/release.py                   the released models (models/), their settings, where the demo and the CLI find them
 scripts/export_models.py         the release from the training runs: no optimizer state, the right vocabulary, manifest + sha256, load check
-scripts/download_models.py       the release from the Hugging Face model repo -> models/, checked against its manifest
+scripts/download_models.py       the release from the Hugging Face model repo -> models/, checked against its manifest; update(): the demo's pull of a newer default
+scripts/publish_model.py         a finished run -> the Hugging Face repo (runs/<run>/; its folder's default when it scores at least as well); pace/v2_jobs.sh calls it
 demo/app.py, demo/static/        web demo (FastAPI + one HTML page); scripts/audio_to_score.py: CLI
 scripts/train_model.py           train either model; scripts/evaluate_pieces.py: oracle/chained/none
 src/eval/plan.py                 evaluation options and mode names; what a run's results still lack
@@ -97,6 +98,7 @@ tests/test_meter.py              v2: meter targets, decoding (vs a plain Viterbi
 tests/test_gangqinpu.py          v2: Gangqinpu notes, beat filters, grids, release reading, build / train / evaluate, batch shares, pace/v2_gangqinpu.sh
 tests/test_gangqinpu_scores.py   v2: Gangqinpu's written scores (ties, graces, pickups, parts), windows and labels, extra-notes-only noise, build + train + evaluate, whole-piece inputs, pace/v2_gqlabel.sh
 tests/test_pm2s.py               PM2S: post-processing, the tracker on random weights, the weights' hash, beat_source, system names
+tests/test_publish.py            publishing: archive, the gate, --force, refusals, the demo's update + swap, the batch jobs' hook
 tests/test_pm2s_train.py         PM2S retrained: targets, augmentation, training and resuming, the weights' tag, pace/v2_pm2s.sh
 tests/test_tracked.py            real tracker output: the recordings' download, tracking the data, the real / simulated mix, real beats at test
 tests/test_v2_system.py          v2 system: onset-scale F1, rescoring, the export (per-bar fallbacks, overflow, spelling, playback tempo, grace notes, rests), the synthesizer, V2Pipeline (staves, grace notes, deletion threshold, length tidying), the demo, pace/v2.sh, v2_round4.sh and v2_jobs.sh

@@ -1,6 +1,11 @@
 #!/bin/bash
 # The work of pace/v2.sh's jobs (each job: source pace/common.sh; bash pace/v2_jobs.sh <task> ...).
-# Several models share one GPU job, so the batch stays under PACE's per-user job limit:
+# Several models share one GPU job, so the batch stays under PACE's per-user job limit.
+# Every run a task finishes training (or, for a meter model, evaluates) in that job is published to
+# the Hugging Face model repo (a run finished before: python scripts/publish_model.py --run <it>)
+# (scripts/publish_model.py: archived under runs/<run>/, made the demo's default when it is at least
+# as good as the one there): meters, labellers, evals (a labeller it trained) and seq2seq. A failed
+# upload (not logged in: `hf auth login` once on PACE) never fails the job. PUBLISH=0: none.
 #
 #   meters <run>...        train these meter models side by side (each its own log), up to
 #                          --max-hours, resuming from last.pt; then tune + evaluate every finished
@@ -119,6 +124,11 @@ nl_flags() {
   esac
 }
 done_run() { grep -q '"phase": "done"' "outputs/runs/$1/status.json" 2>/dev/null; }
+PUBLISH=${PUBLISH:-1}
+publish() {  # a finished, evaluated run -> the Hugging Face repo (never fails the job)
+  [ "$PUBLISH" = 0 ] && return 0
+  python scripts/publish_model.py --run "outputs/runs/$1" || echo "$1: not published (see above; the job goes on)"
+}
 resume() { [ -f "outputs/runs/$1/last.pt" ] && echo --resume; }
 in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
@@ -173,24 +183,27 @@ case "$task" in
       if ! done_run "$m"; then echo "$m: not done yet (the next job resumes it)"; ok=1; continue; fi
       if [ ! "outputs/runs/$m/eval_meter.json" -nt "outputs/runs/$m/best.pt" ]; then
         # shellcheck disable=SC2046
-        python scripts/eval_meter.py --run "$m" $(meter_eval_flags "$m") || ok=1
+        python scripts/eval_meter.py --run "$m" $(meter_eval_flags "$m") && publish "$m" || ok=1
       fi
       [ -f "outputs/runs/$m/eval_meter.json" ] || ok=1
     done
     exit $ok ;;
   labellers)
     pids=()
+    fresh=""
     for nl in "$@"; do
       if done_run "$nl"; then echo "$nl: trained already"; continue; fi
       echo "$nl: training ($(nl_flags "$nl")), log slurm-labeller_$nl-$JOB.log"
       train_labeller "$nl" &
       pids+=("$!")
+      fresh="$fresh $nl"
     done
     for p in ${pids[@]+"${pids[@]}"}; do wait "$p"; done
     ok=0
     for nl in "$@"; do
       if ! done_run "$nl"; then echo "$nl: not done (its evals job resumes it)"; ok=1; continue; fi
-      python scripts/eval_labeller.py --run "$nl" --normal-priority || ok=1
+      python scripts/eval_labeller.py --run "$nl" --normal-priority || { ok=1; continue; }
+      in_list "$nl" "$fresh" && publish "$nl"   # finished in this job: published
     done
     exit $ok ;;
   grids)
@@ -208,7 +221,7 @@ case "$task" in
       if in_list "$nl" "$NEW_NLS" && ! done_run "$nl"; then
         echo "$nl: not trained yet, resuming"
         train_labeller "$nl" || { echo "$nl: training failed"; ok=1; continue; }
-        python scripts/eval_labeller.py --run "$nl" --normal-priority || ok=1
+        python scripts/eval_labeller.py --run "$nl" --normal-priority && publish "$nl" || ok=1
       elif ! in_list "$nl" "$NEW_NLS"; then
         echo "== $nl on the true grid"
         python scripts/eval_labeller.py --run "$nl" --normal-priority || ok=1
@@ -246,14 +259,17 @@ case "$task" in
   seq2seq)
     r=${1:?seq2seq <run> <train_model.py args>}
     shift
+    trained=0
     if ! done_run "$r"; then
       # shellcheck disable=SC2046
       python scripts/train_model.py --name "$r" --normal-priority --workers 7 $(resume "$r") "$@"
+      trained=1
     fi
     done_run "$r" || { echo "$r: not done yet (the next job resumes it)"; exit 1; }
     python scripts/evaluate_pieces.py --run "$r" --normal-priority --musicxml 5 --only-missing \
-      --modes "$SEQ_MODES" --conditions "$SEQ_CONDITIONS"
-    exit $? ;;
+      --modes "$SEQ_MODES" --conditions "$SEQ_CONDITIONS" || exit 1
+    [ "$trained" = 1 ] && publish "$r"   # finished in this job: published
+    exit 0 ;;
   ablation)
     spec=${1:?ablation <labeller>+<meter>}
     sys="v2_${spec%%+*}_${spec##*+}"

@@ -10,6 +10,9 @@ else the training run it came from (outputs/runs/, what a training machine has).
       seq2seq/      model.pt  config.json  vocab.json  feature_stats.json
 
 scripts/export_models.py makes it from the training runs; scripts/download_models.py fetches it.
+scripts/publish_model.py puts one finished run in its slot on the Hugging Face repo when it beats the
+model there (pace/v2_jobs.sh calls it after every training run), and keeps every run under runs/;
+the demo pulls the repo's current default when it starts and every hour (download_models.update).
 """
 from __future__ import annotations
 
@@ -23,12 +26,14 @@ HF_REPO = "dat-dev/scoreformer"
 
 # name -> its file in models/, and the training run's checkpoint used when models/ does not have it.
 # The release's sources (export_models.py defaults) are the round-4 winners (docs/experiments.md,
-# "Fourth round: results"); the local fallbacks are what a training machine has.
+# "Fourth round: results"), with the meter model trained with Gangqinpu since 2026-11-26 (sixth
+# round: Gangqinpu's real recordings' time signatures right 0.79 of the time against 0.54, classical
+# meter scores equal); the local fallbacks are what a training machine has.
 RELEASE = {
     "v2_labeller": {"file": "v2_labeller/model.pt", "run": "outputs/runs/nl_base_gn/best.pt",
                     "what": "v2 note labeller (nl_base_gn)"},
-    "v2_meter": {"file": "v2_meter/model.pt", "run": "outputs/runs/meter_v3/best.pt",
-                 "what": "v2 meter model (meter_v3, the tempo-prior decoder of meter_v3_tp)"},
+    "v2_meter": {"file": "v2_meter/model.pt", "run": "outputs/runs/meter_v4_gq/best.pt",
+                 "what": "v2 meter model (meter_v4_gq: trained with Gangqinpu, its tempo-prior decoder)"},
     "seq2seq": {"file": "seq2seq/model.pt", "run": "outputs/runs/sf_base_reg_cab/best.pt",
                 "what": "seq2seq score model (sf_base_reg_cab_c128)"},
 }

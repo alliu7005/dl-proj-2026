@@ -8,7 +8,10 @@ A small web app runs the whole system on one recording. Transkun V2 transcribes 
 score system writes the score, and the page shows the engraved score with playback and downloads.
 Two systems, chosen per upload on the page (each is loaded when its checkpoints exist). The
 checkpoints: `models/` (the release, `python scripts/download_models.py`), else the training runs
-in `outputs/runs/` (`src/release.py default_path`; `--labeller`, `--meter`, `--ckpt` override):
+in `outputs/runs/` (`src/release.py default_path`; `--labeller`, `--meter`, `--ckpt` override).
+At start the demo brings `models/` to the Hugging Face repo's current default. It checks again
+every hour while running (`--update-every <minutes>`; `--no-update` never checks) and swaps a new
+default in between jobs. When it is offline, it runs on what is there.
 
 - **v2 (default):** Beat This! tracks the beats, the meter model decodes the bars and time
   signatures of the whole piece from them, and the note labeller places every note in them

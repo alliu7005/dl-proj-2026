@@ -2,10 +2,15 @@
 
     python demo/app.py                                    # then open http://127.0.0.1:7860
     python demo/app.py --device cpu --port 8000
-    python demo/app.py --labeller outputs/runs/nl_base_gn/best.pt --meter outputs/runs/meter_v3/best.pt                        --ckpt outputs/runs/sf_base_reg_cab/best.pt
+    python demo/app.py --labeller outputs/runs/nl_base_gn/best.pt --meter outputs/runs/meter_v4_gq/best.pt
+    python demo/app.py --no-update                        # models/ as it is (no Hugging Face check)
 
-The models: models/ (python scripts/download_models.py), else the training runs in outputs/runs/
-(src/release.py default_path).
+The models: models/, else the training runs in outputs/runs/ (src/release.py default_path). At
+start the demo brings models/ to the Hugging Face repo's current default (src/release.py HF_REPO,
+scripts/download_models.py update: only when the repo's manifest differs), and checks again every
+--update-every minutes while it runs: a newer default (scripts/publish_model.py promotes a better
+run when its training finishes) is downloaded and swapped in between jobs. Offline, it runs on what
+is there. --no-update: never check. Models given with --labeller / --meter / --ckpt stay as given.
 
 Two systems, chosen per upload on the page (each loaded if its checkpoints exist):
   v2       (default) the meter model's grid of the whole piece from Beat This!'s beats, then the
@@ -162,11 +167,53 @@ def create_app(pipes: dict, out_root: Path, default: str | None = None) -> FastA
     return app
 
 
-def main():
+def load_pipes(paths: dict, vocab, device, tidy: bool, log=print) -> dict:
+    """{"v2": V2Pipeline, "seq2seq": ScorePipeline} for the checkpoints that exist."""
+    pipes = {}
+    if Path(paths["labeller"]).exists() and Path(paths["meter"]).exists():
+        log(f"loading v2: {paths['labeller']} + {paths['meter']} ...")
+        pipes["v2"] = V2Pipeline(paths["labeller"], paths["meter"], vocab, device, tidy=tidy)
+    else:
+        log(f"no v2 ({paths['labeller']} / {paths['meter']} missing)")
+    if Path(paths["ckpt"]).exists():
+        log(f"loading seq2seq: {paths['ckpt']} ...")
+        pipes["seq2seq"] = ScorePipeline(paths["ckpt"], vocab, device)
+    else:
+        log(f"no seq2seq ({paths['ckpt']} missing)")
+    return pipes
+
+
+def default_paths() -> dict:
+    return {"labeller": default_path("v2_labeller"), "meter": default_path("v2_meter"), "ckpt": default_path("seq2seq")}
+
+
+def keep_updated(pipes: dict, minutes: float, reload, check=None, sleep=time.sleep, log=print) -> None:
+    """Every ``minutes``: bring models/ to the repo's default (``check``: download_models.update) and,
+    when it changed, load the new models (``reload``) and swap them into ``pipes`` (a job running
+    keeps the models it started with; the next one gets the new ones). Runs forever (a thread)."""
+    if check is None:
+        from scripts.download_models import update as check
+    while True:
+        sleep(minutes * 60)
+        try:
+            if check(log=log):
+                new = reload()
+                if new:
+                    pipes.update(new)
+                    log("models: now serving " + ", ".join(f"{k}: {p.info.get('meter', p.info.get('ckpt', ''))}"
+                                                           for k, p in new.items()))
+        except Exception as e:  # noqa: BLE001  (a failed update leaves the models being served)
+            log(f"models: update failed ({type(e).__name__}: {e}); keeping the current ones")
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ckpt", default=default_path("seq2seq"), help="the seq2seq model")
-    ap.add_argument("--labeller", default=default_path("v2_labeller"), help="v2: the note labeller")
-    ap.add_argument("--meter", default=default_path("v2_meter"), help="v2: the meter model")
+    ap.add_argument("--ckpt", default=None, help="the seq2seq model (default: the release's)")
+    ap.add_argument("--labeller", default=None, help="v2: the note labeller (default: the release's)")
+    ap.add_argument("--meter", default=None, help="v2: the meter model (default: the release's)")
+    ap.add_argument("--update-every", type=float, default=60,
+                    help="minutes between checks for a newer default on Hugging Face (0 = only at start)")
+    ap.add_argument("--no-update", action="store_true", help="never check Hugging Face: models/ as it is")
     ap.add_argument("--no-tidy", action="store_true",
                     help="v2: keep written lengths that run just past the next onset (default: trim them)")
     ap.add_argument("--system", default="v2", choices=list(SYSTEMS), help="the page's default system")
@@ -175,25 +222,32 @@ def main():
     ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to allow other machines on the network")
     ap.add_argument("--port", type=int, default=7860)
     ap.add_argument("--out", default="outputs/demo")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     import os
     os.chdir(ROOT)  # data/processed and outputs/ are relative to the repo
-    pipes = {}
-    if Path(args.labeller).exists() and Path(args.meter).exists():
-        print(f"loading v2: {args.labeller} + {args.meter} ...", flush=True)
-        pipes["v2"] = V2Pipeline(args.labeller, args.meter, args.vocab, args.device, tidy=TIDY and not args.no_tidy)
-    else:
-        print(f"no v2 ({args.labeller} / {args.meter} missing)", flush=True)
-    if Path(args.ckpt).exists():
-        print(f"loading seq2seq: {args.ckpt} ...", flush=True)
-        pipes["seq2seq"] = ScorePipeline(args.ckpt, args.vocab, args.device)
-    else:
-        print(f"no seq2seq ({args.ckpt} missing)", flush=True)
+
+    def log(msg):
+        print(msg, flush=True)
+    if not args.no_update:
+        from scripts.download_models import update
+        update(log=log)
+    given = {k: getattr(args, k) for k in ("labeller", "meter", "ckpt") if getattr(args, k)}
+    tidy = TIDY and not args.no_tidy
+
+    def paths():
+        return {**default_paths(), **given}
+    pipes = load_pipes(paths(), args.vocab, args.device, tidy, log)
     if not pipes:
         raise SystemExit("no checkpoints found: give --labeller and --meter (v2) and/or --ckpt (seq2seq)")
     for k, p in pipes.items():
         print(f"{k}: {p.info}", flush=True)
     app = create_app(pipes, Path(args.out), args.system)
+    if not args.no_update and args.update_every > 0 and len(given) < 3:
+        def reload():   # only the models not given on the command line come from the release
+            return load_pipes(paths(), args.vocab, args.device, tidy, log)
+        threading.Thread(target=keep_updated, args=(pipes, args.update_every, reload), kwargs={"log": log},
+                         daemon=True).start()
+        log(f"checking for a newer release every {args.update_every:g} min (--update-every, --no-update)")
     print(f"open http://{'127.0.0.1' if args.host == '0.0.0.0' else args.host}:{args.port}", flush=True)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

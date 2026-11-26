@@ -97,8 +97,9 @@ def test_export_and_download():
 
         fetched = []
 
-        def snapshot_download(repo_id, revision, local_dir, repo_type):   # stand-in for the Hub
+        def snapshot_download(repo_id, revision, local_dir, repo_type, allow_patterns=None):   # stand-in for the Hub
             fetched.append((repo_id, revision, repo_type))
+            assert "runs/*" not in (allow_patterns or []) and "manifest.json" in allow_patterns   # not the archive
             shutil.copytree(out, local_dir, dirs_exist_ok=True)
         hub = types.ModuleType("huggingface_hub")
         hub.snapshot_download = snapshot_download
