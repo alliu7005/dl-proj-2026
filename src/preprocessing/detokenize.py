@@ -401,8 +401,12 @@ def _fix_measure(meas: m21.stream.Measure):
                 v.remove(r)
 
 
-def write_musicxml(score: m21.stream.Score, path: str) -> str:
-    """Write MusicXML; repair measures with durations MusicXML can't express and retry once."""
+def write_musicxml(score: m21.stream.Score, path: str, decorate=None) -> str:
+    """Write MusicXML; repair measures with durations MusicXML can't express and retry once.
+    ``decorate(score)``: called on the score first (e.g. src/glissando.py decorate: lines the
+    tokens cannot say)."""
+    if decorate is not None:
+        decorate(score)
     try:
         return score.write("musicxml", fp=str(path))
     except m21.musicxml.xmlObjects.MusicXMLExportException:
@@ -452,7 +456,8 @@ def _fix_bars(bars: list[_Bar], fallback_grid: int) -> tuple[list[_Bar], dict]:
     return out, fixed
 
 
-def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, report: dict | None = None) -> str:
+def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, report: dict | None = None,
+                       decorate=None) -> str:
     """Tokens -> MusicXML file, as exact as the notation allows. Exact rendering first. If that
     fails (mixed tuplet grids making some duration inexpressible, a zero-length note, overfull
     model output), only the bars that fail on their own are snapped to 1/``fallback_grid``
@@ -462,18 +467,21 @@ def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, re
     exported even on their own (clipped and snapped) are emptied, so the rest of the score is
     still written. ``report`` (a dict) gets "attempt" (0: exact; 1: per bar, "fixed_bars" saying
     which bars and how; 2-4: the whole score snapped / clipped / both; 5: bars emptied) and
-    "emptied_bars" (their indices)."""
+    "emptied_bars" (their indices). ``decorate``: see write_musicxml (applied to every attempt's score)."""
     report = {} if report is None else report
     report["emptied_bars"] = []
+
+    def write(score):   # write_musicxml looked up at call time (tests stand in for it); decorate only if given
+        return write_musicxml(score, path) if decorate is None else write_musicxml(score, path, decorate)
     try:
-        out = write_musicxml(tokens_to_score(tokens), path)
+        out = write(tokens_to_score(tokens))
         report["attempt"] = 0
         return out
     except Exception as e:  # noqa: BLE001
         last = e
     fixed_bars, fixed = _fix_bars(parse_tokens(tokens), fallback_grid)
     try:
-        out = write_musicxml(bars_to_score(fixed_bars), path)
+        out = write(bars_to_score(fixed_bars))
         report.update(attempt=1, fixed_bars={int(k): v for k, v in fixed.items()},
                       emptied_bars=sorted(k for k, v in fixed.items() if v == "empty"))
         return out
@@ -482,7 +490,7 @@ def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, re
     attempts = [{"grid": fallback_grid}, {"clip": True}, {"clip": True, "grid": fallback_grid}]
     for k, kw in enumerate(attempts, start=2):
         try:
-            out = write_musicxml(tokens_to_score(tokens, **kw), path)
+            out = write(tokens_to_score(tokens, **kw))
             report["attempt"] = k
             return out
         except Exception as e:  # noqa: BLE001
@@ -508,7 +516,7 @@ def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, re
         bars[j].notes, bars[j].pedal = [], []
         bad.append(j)
     try:
-        out = write_musicxml(bars_to_score(bars, **kw), path)
+        out = write(bars_to_score(bars, **kw))
     except Exception:  # noqa: BLE001
         raise last
     report.update(attempt=5, emptied_bars=sorted(bad))

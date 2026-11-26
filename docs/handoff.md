@@ -222,6 +222,12 @@ Each option has the evidence for it, what it could gain, and a rough cost:
 5. **Readability fixes in the export.**
    - *What:* detect glissandi (a fast run of adjacent notes in one hand) and write them as a
      glissando; group voices and beams more cleanly.
+   - *Glissandos: built (2026-11-26),* `src/glissando.py`, on in the demo and the CLI. The rule finds
+     both glissandos in the user's song (60-110 notes/s, white keys). On 300 ASAP performances it
+     fires almost only on real sweeps (Mephisto Waltz, Prokofiev's Toccata, Islamey). The score
+     writes each as its first and last note with a "gliss." line, and its MIDI plays the sweep. The
+     scoring script has it off (ASAP's scores mark no glissando); `--glissando` measures it as its
+     own system (`_gl`). The voices and beams are still to do.
    - *Why:* the hands-on testing; MUSTER barely sees these.
    - *Cost:* 1-3 days each, CPU only, in `src/preprocessing/detokenize.py` / `src/pipeline.py`.
 6. **Report the noise.**

@@ -234,10 +234,10 @@ def test_export_last_resort():
                                                    for b in range(3) for k in range(4)])
     real_write = dt.write_musicxml
 
-    def picky(score, path):  # an exporter that cannot write pitch 61 (bar 1)
+    def picky(score, path, decorate=None):  # an exporter that cannot write pitch 61 (bar 1)
         if any(getattr(n, "pitch", None) is not None and n.pitch.midi == 61 for n in score.recurse().notes):
             raise ValueError("cannot export pitch 61")
-        return real_write(score, path)
+        return real_write(score, path, decorate)
     with tempfile.TemporaryDirectory() as t:
         rep = {}
         dt.tokens_to_musicxml(good, str(Path(t) / "a.musicxml"), report=rep)

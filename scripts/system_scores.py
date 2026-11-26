@@ -67,15 +67,18 @@ REAL_SUFFIX = {"audio": "", "pm2s": "_rpm"}                      # v2 on the rea
 
 
 def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, clean_beats: str = "synth",
-                delete_above: float = DELETE_ABOVE, tidy: bool = False, real_beats: str = "audio") -> str:
+                delete_above: float = DELETE_ABOVE, tidy: bool = False, real_beats: str = "audio",
+                glissando: bool = False) -> str:
     """The folder (and table row) of a system under outputs/system_eval (v2 with another deletion
-    threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy; with other beats:
+    threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy; glissandos written
+    as glissandos: _gl; with other beats:
     _ab / _pm on clean MIDI, _rpm on the real transcriptions; with PM2S's beats from other weights
     than the released ones, their tag last: src/pm2s_beats.py weights_tag)."""
     if v2:
         lab, met = parse_v2(v2)
         d = "" if delete_above == DELETE_ABOVE else "_keepall" if delete_above >= 1 else f"_d{round(delete_above * 100)}"
-        name = (f"v2_{lab}_{met}" + d + ("_tidy" if tidy else "") + BEAT_SUFFIX[clean_beats]
+        name = (f"v2_{lab}_{met}" + d + ("_tidy" if tidy else "") + ("_gl" if glissando else "")
+                + BEAT_SUFFIX[clean_beats]
                 + REAL_SUFFIX[real_beats])
         if "pm2s" in (clean_beats, real_beats):   # other PM2S weights ($PM2S_WEIGHTS): their tag, _pm_rpm_<tag>
             from src.pm2s_beats import tagged
@@ -102,6 +105,9 @@ def main(argv=None):
     ap.add_argument("--delete-above", type=float, default=DELETE_ABOVE,
                     help="v2: leave a note out only above this p(delete) (1 = keep every note); "
                          "a setting other than the default is its own system (_d<percent>, _keepall)")
+    ap.add_argument("--glissando", action="store_true",
+                    help="v2: glissandos written as their first and last note joined by a gliss. line "
+                         "(src/glissando.py, the demo's default); its own system (_gl)")
     ap.add_argument("--tidy", action="store_true",
                     help="v2: written lengths stop at the next onset of their staff when they run just past it "
                          "(src/pipeline.py tidy_lengths); its own system (_tidy)")
@@ -125,7 +131,7 @@ def main(argv=None):
     if args.v2:
         lab, met = parse_v2(args.v2)
         pipe = V2Pipeline(runs / lab / args.ckpt, runs / met / args.ckpt, vocab=args.vocab, device=args.device,
-                          delete_above=args.delete_above, tidy=args.tidy)
+                          delete_above=args.delete_above, tidy=args.tidy, glissando=args.glissando)
         wants_beats, midi_beats = True, "synth"
     else:
         pipe = ScorePipeline(runs / args.run / args.ckpt, vocab=args.vocab, device=args.device)
@@ -145,10 +151,10 @@ def main(argv=None):
         n = len(entries)
         entries = [e for e in entries if e["condition"] != "clean" or e["performance"] in tracked]
         print(f"--clean-beats audio: {len(entries)} of {n} inputs (clean ones need a recording)", flush=True)
-    if not args.v2 and (args.delete_above != DELETE_ABOVE or args.tidy):
-        ap.error("--delete-above and --tidy are for v2 (--v2)")
+    if not args.v2 and (args.delete_above != DELETE_ABOVE or args.tidy or args.glissando):
+        ap.error("--delete-above, --tidy and --glissando are for v2 (--v2)")
     system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above,
-                         args.tidy, args.real_beats)
+                         args.tidy, args.real_beats, args.glissando)
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before

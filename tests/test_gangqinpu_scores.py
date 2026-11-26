@@ -393,6 +393,8 @@ def test_batch_and_jobs():
         assert f"afterok:{tests}" in by["lbinputs"][1] and "gangqinpu_inputs.py --release data/raw/gangqinpu --n 60" in by["lbinputs"][1]
         tr = by["lbtrain"][1]
         assert f"afterok:{by['lbdata'][0]}" in tr and "labellers nl_gq" in tr and "evals nl_gq nl_base_gn" in tr
+        # the current default scored on Gangqinpu before nl_gq is published against it
+        assert tr.index("eval_labeller.py --run nl_base_gn --conditions gangqinpu") < tr.index("labellers nl_gq")
         assert 'METERS="meter_v3_tp meter_v4_gq"' in tr
         assert f"afterok:{tests}" in by["lbmeter"][1] and "meters meter_v4_gql" in by["lbmeter"][1]
         s1 = by["lbsys"][1]

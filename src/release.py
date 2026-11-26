@@ -39,10 +39,12 @@ RELEASE = {
 }
 
 # The settings the release is meant to run with (the demo's and audio_to_score.py's defaults): keep a
-# note unless the labeller is at least this sure it is not in the score, and trim written lengths
-# that run just past the next onset (src/pipeline.py tidy_lengths).
+# note unless the labeller is at least this sure it is not in the score, trim written lengths
+# that run just past the next onset (src/pipeline.py tidy_lengths), write glissandos as glissandos.
 DELETE_ABOVE = 0.95
 TIDY = True
+# glissandos written as a "gliss." line between their first and last note (src/glissando.py)
+GLISSANDO = True
 
 
 def default_path(name: str) -> str:

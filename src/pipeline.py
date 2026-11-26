@@ -128,21 +128,33 @@ def playback_qpm(score, seconds: float | None) -> float | None:
     return float(np.clip(60.0 * (last - first) / seconds, 20.0, 300.0))
 
 
-def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None = None) -> dict:
+def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None = None,
+            glissandi: list | None = None) -> dict:
     """Tokens -> ``out``/score.musicxml and score.mid (``res.files``; failures in ``res.errors``).
     ``seconds``: the performance's length, which sets the score MIDI's tempo (``playback_qpm``; the
     MusicXML carries no tempo, as the scores the comparison rates). Returns how the export went
     (src/preprocessing/detokenize.py tokens_to_musicxml: the fallback that worked, the bars it had
-    to empty) and "playback_qpm"."""
+    to empty) and "playback_qpm". ``glissandi`` (src/glissando.py attach): a "gliss." line each in
+    the MusicXML, the swept notes in the score MIDI ("glissandi_drawn": how many lines)."""
     import music21 as m21
     from .preprocessing.detokenize import tokens_to_musicxml, tokens_to_score
     report = {}
+    deco = None
+    if glissandi:
+        from .glissando import decorate
+
+        def deco(score):
+            report["glissandi_drawn"] = decorate(score, glissandi)
     try:
-        res.files["musicxml"] = Path(tokens_to_musicxml(tokens, str(out / "score.musicxml"), report=report))
+        res.files["musicxml"] = Path(tokens_to_musicxml(tokens, str(out / "score.musicxml"), report=report,
+                                                        decorate=deco))
         for clip in (False, True):  # clip notes to their bars if the plain export fails
             try:
                 score = tokens_to_score(tokens, clip=clip)
                 qpm = playback_qpm(score, seconds)
+                if glissandi:
+                    from .glissando import decorate
+                    decorate(score, glissandi, playback=True)
                 report["playback_qpm"] = None if qpm is None else round(qpm, 1)
                 if qpm:
                     first = score.parts[0].getElementsByClass(m21.stream.Measure).first()
@@ -560,7 +572,10 @@ class V2Pipeline(_FrontEnd):
 
     def __init__(self, labeller_ckpt: str | Path, meter_ckpt: str | Path, vocab: str | Path | None = None,
                  device: str = "auto", window_notes: int = 128, delete_above: float = DELETE_ABOVE,
-                 tidy: bool = False):
+                 tidy: bool = False, glissando: bool = False):
+        """``glissando``: find glissandos in the notes (src/glissando.py) and write each as its first
+        and last note joined by a "gliss." line, not as the run of notes (off by default: the scoring
+        script measures it as its own system)."""
         from .labeller import load_labeller
         from .meter import DecodeConfig, build_meter_model
         from .notelabels import LabelSpace
@@ -592,6 +607,7 @@ class V2Pipeline(_FrontEnd):
         n_met = sum(p.numel() for p in self.meter.parameters())
         self.delete_above = float(delete_above)
         self.tidy = bool(tidy)
+        self.glissando = bool(glissando)
         self.info = {"system": "v2", "labeller": str(labeller_ckpt), "meter": str(meter_ckpt),
                      "params_M": round((n_lab + n_met) / 1e6, 1), "device": str(self.device),
                      "decode": self.decode_cfg.to_dict()}
@@ -641,11 +657,13 @@ class V2Pipeline(_FrontEnd):
 
     def label(self, notes: np.ndarray, pedal: np.ndarray, grid: dict,
               progress: Progress = _noop, delete_above: float | None = None,
-              tidy: bool | None = None) -> tuple[list[str], dict]:
+              tidy: bool | None = None, glissandi: list | None = None) -> tuple[list[str], dict]:
         """Every note labelled in its window, all rendered in the grid's bars as one score.
         ``delete_above``: leave a note out only above this p(delete); ``tidy``: written lengths stop
         at the next onset of their staff when they run just past it (tidy_lengths). Defaults: the
-        pipeline's."""
+        pipeline's. ``glissandi`` (src/glissando.py find_glissandi, of the full performance; ``notes``
+        keep only their first and last notes): those two found among the labelled notes, the first
+        written to reach the last ("glissandi" in the result, for the export's line)."""
         delete_above = self.delete_above if delete_above is None else float(delete_above)
         tidy = self.tidy if tidy is None else bool(tidy)
         import sys
@@ -685,24 +703,28 @@ class V2Pipeline(_FrontEnd):
             last = int(np.searchsorted(np.asarray(grid["bar_q"], np.float64), q1 - 1e-6, side="right")) - 1
             last = max([last] + [p.bar for p in notes_out])
             bars = bars[: max(last, 0) + 1]
+        gl = []
+        if glissandi:
+            from .glissando import attach
+            gl = attach(glissandi, notes_out, grid, [ts for ts, _ in bars])
         piece = Window(bars=bars, opens_with_bar=opens, start_pos=Fraction(0) if opens else None)
         tokens = render(piece, notes_out)
         own = int(sum(int((it["roles"] == 0).sum()) for it in items))
         return tokens, {"windows": len(windows), "notes_kept": len(notes_out), "notes_deleted": own - len(notes_out),
                         "bar_ts": [ts for ts, _ in bars], "staves": max([2] + [p.staff + 1 for p in notes_out]),
                         "staff_folded": int(folded), "graces_attached": graces, "delete_above": delete_above,
-                        "tidy": tidy, "lengths_tidied": tidied,
+                        "tidy": tidy, "lengths_tidied": tidied, "glissandi": gl,
                         "follow": follow_map(grid, notes_out)}
 
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, progress: Progress = _noop, beats: tuple | None = None,
             beat_checkpoint: str = "final0", delete_above: float | None = None, tidy: bool | None = None,
-            beat_source: str = "beat_this", **_) -> Result:
+            beat_source: str = "beat_this", glissando: bool | None = None, **_) -> Result:
         """``beats``: (times, down) in the input's seconds, given instead of tracking them.
         ``beat_checkpoint``: the Beat This! model that tracks them (scripts/system_scores.py gives
         each ASAP test piece the cross-validation model that never heard it). ``beat_source``:
         beat_this (the recording; a MIDI input rendered to audio first) or pm2s (PM2S on the notes:
-        the MIDI, or the transcription of a recording)."""
+        the MIDI, or the transcription of a recording). ``glissando``: the pipeline's setting if None."""
         if beat_source not in BEAT_SOURCES:
             raise ValueError(f"beat_source must be one of {BEAT_SOURCES}, not {beat_source!r}")
         from collections import Counter
@@ -759,13 +781,20 @@ class V2Pipeline(_FrontEnd):
         grid = self.grid(notes, beats)
         timing["grid_s"] = round(time.perf_counter() - t, 1)
         t = time.perf_counter()
-        tokens, counts = self.label(notes, pedal, grid, progress, delete_above=delete_above, tidy=tidy)
+        found = []
+        if self.glissando if glissando is None else glissando:
+            from .glissando import find_glissandi, inner_mask
+            found = find_glissandi(notes)
+        lab_notes = notes[inner_mask(len(notes), found)] if found else notes
+        tokens, counts = self.label(lab_notes, pedal, grid, progress, delete_above=delete_above, tidy=tidy,
+                                    glissandi=found)
+        gl = counts.pop("glissandi")
         timing["score_s"] = round(time.perf_counter() - t, 1)
         res.tokens = tokens
         (out / "tokens.txt").write_text(" ".join(tokens))
         files["tokens"] = out / "tokens.txt"
         progress("engrave", 0.0, "writing MusicXML")
-        export = engrave(tokens, out, res, float(notes[:, OFFSET].max() - notes[:, ONSET].min()))
+        export = engrave(tokens, out, res, float(notes[:, OFFSET].max() - notes[:, ONSET].min()), glissandi=gl)
         written = counts.pop("bar_ts")  # the score's bars (the grid's, up to the bar the music ends in)
         ts = Counter(written)
         dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())
@@ -776,6 +805,10 @@ class V2Pipeline(_FrontEnd):
                      "time_signature": ts.most_common(1)[0][0] if ts else None,
                      "time_signatures": dict(ts.most_common()), "key_signature": int(grid.get("key", 0)),
                      **counts, "tokens": len(tokens), "export": export,
+                     "glissando": bool(self.glissando if glissando is None else glissando),
+                     "glissandi_found": len(found),
+                     "glissandi": [{k: v for k, v in g.items() if k not in ("start", "end", "inner")}
+                                   | {"bar": int(g["start"][0]) + 1} for g in gl],
                      "playback_qpm": export.get("playback_qpm"), **timing}
         (out / "result.json").write_text(json.dumps({"stats": res.stats, "errors": res.errors,
                                                      "files": {k: str(v) for k, v in files.items()}}, indent=1))

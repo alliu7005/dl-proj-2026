@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.pipeline import BEAT_SOURCES, GUARD_MARGIN, MODES, ScorePipeline, V2Pipeline  # noqa: E402
-from src.release import DELETE_ABOVE, TIDY, default_path  # noqa: E402
+from src.release import DELETE_ABOVE, GLISSANDO, TIDY, default_path  # noqa: E402
 
 
 def main():
@@ -46,11 +46,13 @@ def main():
                          "or PM2S on the notes (src/pm2s_beats.py)")
     ap.add_argument("--no-tidy", action="store_true",
                     help="v2: keep written lengths that run just past the next onset (default: trim them)")
+    ap.add_argument("--no-glissando", action="store_true", help="v2: write each note of a glissando, not its first and last joined by a gliss. line")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
     if args.v2:
-        pipe = V2Pipeline(args.labeller, args.meter, args.vocab, args.device, tidy=TIDY and not args.no_tidy)
+        pipe = V2Pipeline(args.labeller, args.meter, args.vocab, args.device, tidy=TIDY and not args.no_tidy,
+                          glissando=GLISSANDO and not args.no_glissando)
     else:
         pipe = ScorePipeline(args.ckpt, args.vocab, args.device)
     print(f"model: {pipe.info}", flush=True)

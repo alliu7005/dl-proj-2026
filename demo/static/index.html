@@ -323,6 +323,11 @@ function showResult(id, job) {
       const how = s.delete_above >= 1 ? ' (keeping every note)' : s.delete_above != null ? ` (p > ${s.delete_above})` : '';
       items.push([n, `${word(n, 'note', 'notes')} left out as transcription errors${how}`]);
     }
+    if (s.glissando && (s.glissandi || []).length) {
+      const g = s.glissandi;
+      const bars = g.map((x) => x.bar).join(', ');
+      items.push([g.length, `${word(g.length, 'glissando', 'glissandos')} written as gliss. (${word(g.length, 'bar', 'bars')} ${bars})`]);
+    }
   } else {
     items.push([fmtTime(s.score_s || 0), 'score model']);
   }
@@ -365,6 +370,42 @@ function showResult(id, job) {
   renderScore(base + 'musicxml', has('musicxml'), s);
 }
 
+// OpenSheetMusicDisplay 1.9 draws no <glissando> (it draws a <slide>, and only within a staff): the
+// viewer's copy of the score gets a "gliss." label over each glissando's first note, which it always
+// shows, and the line as a <slide>. The MusicXML download keeps the <glissando> (MuseScore draws it).
+function forViewer(xml) {
+  if (!xml.includes('<glissando')) return xml;
+  try {
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    if (doc.getElementsByTagName('parsererror').length) return xml;
+    for (const g of Array.from(doc.getElementsByTagName('glissando'))) {
+      const slide = doc.createElement('slide');
+      for (const a of Array.from(g.attributes)) slide.setAttribute(a.name, a.value);
+      slide.textContent = g.textContent;
+      g.parentNode.replaceChild(slide, g);
+      if (g.getAttribute('type') !== 'start') continue;
+      let note = slide.parentNode;
+      while (note && note.nodeName !== 'note') note = note.parentNode;
+      if (!note) continue;
+      const dir = doc.createElement('direction');
+      dir.setAttribute('placement', 'above');
+      const type = doc.createElement('direction-type');
+      const words = doc.createElement('words');
+      words.setAttribute('font-style', 'italic');
+      words.textContent = 'gliss.';
+      type.appendChild(words);
+      dir.appendChild(type);
+      const staff = note.getElementsByTagName('staff')[0];   // a part with staves: the note's own
+      if (staff) { const s = doc.createElement('staff'); s.textContent = staff.textContent; dir.appendChild(s); }
+      note.parentNode.insertBefore(dir, note);
+    }
+    return new XMLSerializer().serializeToString(doc);
+  } catch (err) {
+    console.warn('glissando labels skipped', err);
+    return xml;
+  }
+}
+
 async function renderScore(url, ok, stats) {
   const box = $('#osmd');
   if (follow) follow.stop();
@@ -374,7 +415,7 @@ async function renderScore(url, ok, stats) {
   if (!window.opensheetmusicdisplay) { box.innerHTML = '<div class="placeholder">The score viewer could not load (offline?). Download the MusicXML instead.</div>'; return; }
   box.innerHTML = '';
   try {
-    const xml = await (await fetch(url)).text();
+    const xml = forViewer(await (await fetch(url)).text());
     osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, {
       autoResize: false, backend: 'svg', drawTitle: false, drawPartNames: false,
       drawingParameters: 'compacttight',

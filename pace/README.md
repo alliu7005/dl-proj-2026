@@ -676,7 +676,7 @@ bash pace/v2_gqlabel.sh
 | `lbtests` | the test suites (CPU) | - |
 | `lbdata` | Gangqinpu's scores as windows (`scripts/build_gangqinpu_windows.py` -> `data/processed/{train,val,test}_gangqinpu`, each with a `report.json`) and their labels (CPU); `meter_v3_s1` with the tempo-prior decoder (`meter_v3_s1_tp`) | `lbtests` |
 | `lbinputs` | 60 whole test pieces, one per score (`scripts/gangqinpu_inputs.py`): the written score as reference, the aligned notes (`gangqinpu`), Transkun on the recording (`gangqinpu_real`), Beat This!'s beats of the recording | `lbtests` |
-| `lbtrain` | `nl_gq` trained (`nl_base_gn`'s recipe, Gangqinpu half of the windows) and evaluated on the true grid; `nl_gq` and `nl_base_gn` on `meter_v3_tp`'s and `meter_v4_gq`'s grids, Gangqinpu's windows included | `lbdata` (cancelled if it fails) |
+| `lbtrain` | `nl_base_gn` scored on Gangqinpu's windows first, so the gate that publishes `nl_gq` compares them on pop too; `nl_gq` trained (`nl_base_gn`'s recipe, Gangqinpu half of the windows) and evaluated on the true grid; `nl_gq` and `nl_base_gn` on `meter_v3_tp`'s and `meter_v4_gq`'s grids, Gangqinpu's windows included | `lbdata` (cancelled if it fails) |
 | `lbmeter` | `meter_v4_gql` (`meter_v4_gq` with 100k steps) trained, tuned and evaluated | `lbtests` |
 | `lbsys` | whole pieces: `nl_gq` with `meter_v3_tp` and `meter_v4_gq` (ASAP and Gangqinpu), `nl_base_gn` with `meter_v3_s1_tp` (ASAP) | `lbtrain`, `lbinputs` (finished or not) |
 | `lbsys2` | whole pieces on Gangqinpu: the release, `meter_v4_gq`, `meter_v4_gq_pm` with PM2S, seq2seq; Beyer & Dai's predictions there | `lbinputs` (cancelled if it fails) |

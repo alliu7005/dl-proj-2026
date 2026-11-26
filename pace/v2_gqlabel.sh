@@ -25,7 +25,8 @@
 #              their labels (CPU); meter_v3_s1_tp tuned and evaluated
 #   lbinputs   Gangqinpu's whole test pieces (60, one per score): references, the     lbtests (ok)
 #              aligned notes, Transkun on the recordings, Beat This!'s beats
-#   lbtrain    nl_gq trained and evaluated (true grid); nl_gq and nl_base_gn on the    lbdata (ok)
+#   lbtrain    nl_base_gn on Gangqinpu's windows first (so publishing nl_gq compares   lbdata (ok)
+#              them on pop too); nl_gq trained and evaluated (true grid); nl_gq and nl_base_gn on the
 #              meter models' grids, Gangqinpu's windows included
 #   lbmeter    meter_v4_gql trained, tuned and evaluated                              lbtests (ok)
 #   lbsys      whole pieces: nl_gq (ASAP, Gangqinpu), the second seed (ASAP)          lbtrain, lbinputs (any)
@@ -83,7 +84,7 @@ echo "Gangqinpu's scores as windows + labels (data/processed/*_gangqinpu), meter
 submit lbinputs "${G[@]}" -c 8 --mem=48G -t 3:00:00 "--dependency=afterok:$tests" --wrap="source pace/common.sh; python scripts/gangqinpu_inputs.py --release $GQ --n $N_PIECES"
 inputs=$ID
 echo "Gangqinpu's whole test pieces ($GQOUT/manifest.json): job $inputs"
-submit lbtrain "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$data" --wrap="source pace/common.sh; $JOBS labellers $NL; METERS=\"meter_v3_tp meter_v4_gq\" GRIDS_OLD=\"\" NEW_NLS=\"$NL\" $JOBS evals $NL $BASE_NL"
+submit lbtrain "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$data" --wrap="source pace/common.sh; python scripts/eval_labeller.py --run $BASE_NL --conditions gangqinpu --normal-priority; $JOBS labellers $NL; METERS=\"meter_v3_tp meter_v4_gq\" GRIDS_OLD=\"\" NEW_NLS=\"$NL\" $JOBS evals $NL $BASE_NL"
 train=$ID
 echo "$NL trained and evaluated, $NL and $BASE_NL on the meter models' grids: job $train"
 submit lbmeter "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$tests" --wrap="source pace/common.sh; $JOBS meters $LONG"
