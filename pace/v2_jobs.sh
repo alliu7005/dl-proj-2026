@@ -80,6 +80,11 @@ meter_flags() {
     meter_v4_gq) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     meter_v4_gq_both) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --aux pm2s --aux-noise configs/beat_noise_pm2s.json" ;;
     meter_v4_gq_pm) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
+    # round 7 (pace/v2_round7.sh): meter_v4_gq_pm, the best v2 meter model on whole pieces, again with
+    # another seed (is its gain more than chance?) and with less Gangqinpu (its 81% 4/4 pulled the
+    # classical time signatures towards 4/4)
+    meter_v4_gq_pm_s1) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s.json --real-beats simulated --tracked pm2s --tracked-share 0.5 --seed 1" ;;
+    meter_v4_gq_pm_g30) echo "--gangqinpu --gangqinpu-share 0.3 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
     #   meter_v4_gq_posh  meter_v4_gq + a position-in-bar head (which eighth of the bar each beat is on),
     #                     scored by the decoder; opt in: RUNS="... meter_v4_gq_posh" bash pace/v2_gangqinpu.sh
     meter_v4_gq_posh) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --pos-head" ;;
@@ -95,7 +100,7 @@ meter_eval_flags() {  # how a finished meter run is tuned before its evaluation
     meter_v3_ft) echo "--tune --tempo-prior --level" ;;
     meter_v4_gq|meter_v4_gq_both|meter_v4_gq_posh|meter_v3_gqft) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
     # its decoder tuned for the tracker it was trained for (tested with it by the trackers task)
-    meter_v4_gq_pm) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s.json" ;;
+    meter_v4_gq_pm|meter_v4_gq_pm_s1|meter_v4_gq_pm_g30) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s.json" ;;
     *) echo "--tune" ;;
   esac
 }
@@ -105,6 +110,9 @@ nl_flags() {
     nl_base_gn_s1) echo "--size base --grid-noise 0.8 --seed 1" ;;
     nl_base_gn_f1) echo "--size base --grid-noise 0.8 --select onset_f1" ;;
     nl_base_gn1_f1) echo "--size base --grid-noise 1.0 --select onset_f1" ;;
+    # round 7: nl_base_gn with PM2S's timing errors instead of Beat This!'s (the best v2 system reads
+    # PM2S's beats; matching the labeller's grid noise to the tracker was round 3's largest gain)
+    nl_base_gn_pm) echo "--size base --grid-noise 0.8 --beat-noise configs/beat_noise_pm2s.json" ;;
     *) echo "unknown labeller run $1 (add it to nl_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
   esac
 }
