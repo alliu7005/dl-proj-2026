@@ -26,6 +26,7 @@ src/decoding.py                  chained / guarded / meter decoding of whole pie
 src/metrical.py                  per-note downbeat / beat-phase labels (alignment) and the aux loss
 scripts/build_metrical.py        precompute the metrical labels of every split (once per data build)
 src/pipeline.py                  audio / MIDI -> MusicXML: ScorePipeline (seq2seq, window by window), V2Pipeline (grid + labeller)
+src/playback.py                  the score MIDI plays grace notes (just before their beat) and rolled chords (spread upwards) as written: music21's MIDI export does not
 src/glissando.py                 glissandos: found in the notes (fast one-way runs on one key colour), their two ends in the score, the gliss. line, the swept notes in the score MIDI
 src/synth.py                     MIDI -> audio (additive piano), so Beat This! can track a MIDI input
 src/release.py                   the released models (models/), their settings, where the demo and the CLI find them
@@ -100,6 +101,7 @@ tests/test_gangqinpu.py          v2: Gangqinpu notes, beat filters, grids, relea
 tests/test_gangqinpu_scores.py   v2: Gangqinpu's written scores (ties, graces, pickups, parts), windows and labels, extra-notes-only noise, build + train + evaluate, whole-piece inputs, pace/v2_gqlabel.sh
 tests/test_pm2s.py               PM2S: post-processing, the tracker on random weights, the weights' hash, beat_source, system names
 tests/test_publish.py            publishing: archive, the gate, --force, refusals, the demo's update + swap, the batch jobs' hook
+tests/test_playback.py           grace notes and rolled chords in the score MIDI: timing, rolls across staves, tied chords, nothing held on
 tests/test_glissando.py          glissandos: the detector (and what it must not take), the ends, the line and the MIDI, V2Pipeline on / off, the switches
 tests/test_pm2s_train.py         PM2S retrained: targets, augmentation, training and resuming, the weights' tag, pace/v2_pm2s.sh
 tests/test_tracked.py            real tracker output: the recordings' download, tracking the data, the real / simulated mix, real beats at test

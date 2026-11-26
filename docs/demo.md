@@ -28,6 +28,10 @@ default in between jobs. When it is offline, it runs on what is there.
   "gliss." line. The MusicXML has a `<glissando>`, which MuseScore draws. The page's viewer
   (OpenSheetMusicDisplay 1.9) draws none, so the page labels it "gliss." and draws a line when both
   ends are on one staff. The score's MIDI plays the sweep.
+- **The score, played back** (`score.mid`, `src/playback.py`): grace notes sound 70 ms each just
+  before their main note, and a rolled chord spreads upwards, 35 ms a note, across both staves
+  when the roll runs through both. music21's MIDI export alone had left some grace notes out, and
+  struck others with their main note and held them for seconds; it played rolled chords as blocks.
 - **Leaving notes out.** The labeller's keep head marks notes as transcription errors, but its
   "delete" label means the alignment paired no score note with the note. That also covers notes
   really played: extra trill notes, and notes the alignment missed. On clean MIDI, where every

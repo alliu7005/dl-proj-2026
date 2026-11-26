@@ -135,7 +135,9 @@ def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None =
     MusicXML carries no tempo, as the scores the comparison rates). Returns how the export went
     (src/preprocessing/detokenize.py tokens_to_musicxml: the fallback that worked, the bars it had
     to empty) and "playback_qpm". ``glissandi`` (src/glissando.py attach): a "gliss." line each in
-    the MusicXML, the swept notes in the score MIDI ("glissandi_drawn": how many lines)."""
+    the MusicXML, the swept notes in the score MIDI ("glissandi_drawn": how many lines). The score
+    MIDI plays grace notes and rolled chords as written (src/playback.py: "graces_played",
+    "rolled_chords_played"), which music21's MIDI export alone does not."""
     import music21 as m21
     from .preprocessing.detokenize import tokens_to_musicxml, tokens_to_score
     report = {}
@@ -152,6 +154,8 @@ def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None =
             try:
                 score = tokens_to_score(tokens, clip=clip)
                 qpm = playback_qpm(score, seconds)
+                from .playback import realize   # grace notes and rolled chords as written (src/playback.py)
+                report.update(realize(score, qpm))
                 if glissandi:
                     from .glissando import decorate
                     decorate(score, glissandi, playback=True)
