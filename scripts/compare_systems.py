@@ -86,6 +86,9 @@ PAIRS = [  # (A, B, what A changes)
     (PMHS, GQ_NL + "_meter_v4_gq_d95_tidy_rsb", "MIDI input: PM2S + its meter model vs Beat This! on the rendered MIDI"),
     (SEQ, PMHS, "seq2seq (best) against v2 with the stable PM2S"),
     ("beyer_dai", PMHS, "Beyer & Dai against v2 with the stable PM2S"),
+    # the timing check (src/timing.py; pace/v2_pm2s2.sh p2sys, or pace/v2_timing.sh)
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc", GQ_NL + "_meter_v4_gq_d95_tidy",
+     "the timing check: triplets the timing contradicts written straight"),
 ]
 
 

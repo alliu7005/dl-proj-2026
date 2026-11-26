@@ -738,7 +738,7 @@ bash pace/v2_pm2s2.sh
 | `p2tests` | the test suites (CPU) | - |
 | `p2train_a`, `p2train_b` | `pm2s_ho2` (lr 3e-4) and `pm2s_ho3` (lr 1e-4): AdamW betas 0.9 / 0.999, eps 1e-8, clipping 1.0, warmup 1000, cosine; up to 7.5 h each (about 3 h expected) | `p2tests` |
 | `p2track` | the better one picked (`scripts/pick_run.py` -> `outputs/runs/pm2s_hos`, `chosen.json`); its beats stored (`tracked_*_pm2s_hos.npz`), its errors fitted (`configs/beat_noise_pm2s_hos.json`), its beats on the ASAP test inputs (`beats_compare_hos.md`) | both trainings (finished or not) |
-| `p2sys` | the release with its beats (`_pm_rpm_hos`); `meter_v4_gq_pm` at the meter level with them; on Gangqinpu, `nl_gq` + `meter_v4_gq` with Beat This! on the rendered MIDI (`_rsb`) | `p2track` |
+| `p2sys` | the release with its beats (`_pm_rpm_hos`); `meter_v4_gq_pm` at the meter level with them; on Gangqinpu, `nl_gq` + `meter_v4_gq` with Beat This! on the rendered MIDI (`_rsb`); `nl_gq` + `meter_v4_gq` with the timing check (`_tc`, `src/timing.py`) on ASAP and Gangqinpu | `p2track` |
 | `p2meter` | `meter_v4_gq_pmhs` trained, tuned and evaluated | `p2track` |
 | `p2eval` | `meter_v4_gq_pmhs` with its beats on every test set, `nl_gq` on its grids, whole pieces (`nl_gq+meter_v4_gq_pmhs:tidy,d95,pm,rpm`) on ASAP and Gangqinpu | `p2meter` (finished or not) |
 | `p2final` | `outputs/compare`, Beyer & Dai's metrics for every system on both test sets, both `paired.md` | `p2sys`, `p2eval` (finished or not) |
@@ -766,6 +766,28 @@ scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_pm2s2.tgz .
 
 ```powershell
 tar xzf v2_pm2s2.tgz
+```
+
+## 4s. The timing check on whole pieces (if 4r was submitted before it)
+
+`pace/v2_pm2s2.sh` measures the timing check in its `p2sys` job. If that batch was submitted before
+the timing check existed, `pace/v2_timing.sh` does the same in 3 jobs. Submit it once the queue has
+room, since PACE allows about 8 jobs:
+
+```bash
+bash pace/v2_timing.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `tctests` | the test suites (CPU) | - |
+| `tcsys` | `nl_gq` + `meter_v4_gq:tidy,d95,tc` on ASAP and Gangqinpu's whole pieces | `tctests` |
+| `tcfinal` | Beyer & Dai's metrics for every system (ASAP, Gangqinpu), both `paired.md` | `tcsys` (finished or not) |
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_timing.tgz outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-tc*.out 2>/dev/null; ls -la v2_timing.tgz
 ```
 
 ## 5. Compare the runs and bring results back

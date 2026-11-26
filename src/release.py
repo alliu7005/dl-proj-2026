@@ -45,6 +45,8 @@ DELETE_ABOVE = 0.95
 TIDY = True
 # glissandos written as a "gliss." line between their first and last note (src/glissando.py)
 GLISSANDO = True
+# a triplet the timing contradicts written as the straight eighth / sixteenth it was played on (src/timing.py)
+TIMING_CHECK = True
 
 
 def default_path(name: str) -> str:

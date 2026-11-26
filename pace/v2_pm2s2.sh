@@ -24,7 +24,8 @@
 #               and testing, its errors fitted (configs/beat_noise_pm2s_hos.json),
 #               its beats on the ASAP test inputs (beats_compare_hos.md)
 #   p2sys       the release with its beats (_pm_rpm_hos), meter_v4_gq_pm with      p2track (ok)
-#               them; on Gangqinpu, nl_gq + meter_v4_gq on the rendered MIDI (_rsb)
+#               them; on Gangqinpu, nl_gq + meter_v4_gq on the rendered MIDI (_rsb);
+#               nl_gq + meter_v4_gq with the timing check (_tc, src/timing.py), ASAP + Gangqinpu
 #   p2meter     meter_v4_gq_pmhs trained, tuned and evaluated                      p2track (ok)
 #   p2eval      meter_v4_gq_pmhs with its beats on every test set, nl_gq on its    p2meter (any)
 #               grids, whole pieces (nl_gq + meter_v4_gq_pmhs:tidy,d95,pm,rpm),
@@ -77,7 +78,7 @@ submit() {  # name, then sbatch options and --wrap: the job id in $ID, counted i
 sys=""
 meter2=""
 if [ "$STAGE" = all ]; then
-submit p2tests -c 8 --mem=64G -t 2:00:00 --wrap="source pace/common.sh; python -m tests.test_pm2s_train && python -m tests.test_pm2s && python -m tests.test_tracked && python -m tests.test_meter && python -m tests.test_v2_system && python -m tests.test_system_eval && python -m tests.test_compare_runs && python -m tests.test_glissando"
+submit p2tests -c 8 --mem=64G -t 2:00:00 --wrap="source pace/common.sh; python -m tests.test_pm2s_train && python -m tests.test_pm2s && python -m tests.test_tracked && python -m tests.test_meter && python -m tests.test_v2_system && python -m tests.test_system_eval && python -m tests.test_compare_runs && python -m tests.test_glissando && python -m tests.test_timing"
 tests=$ID
 echo "tests: job $tests"
 trains=""
@@ -92,7 +93,7 @@ done
 submit p2track "${G[@]}" -c 8 --mem=64G -t 8:00:00 "--dependency=afterany$trains" --wrap="$PMENV; python scripts/pick_run.py --runs pm2s_ho2 pm2s_ho3 --as $PM_RUN && python scripts/track_meter_data.py --release $GQ --trackers pm2s && python scripts/fit_pm2s_noise.py && python scripts/compare_beats.py"
 track=$ID
 echo "the better one picked as $PM_RUN (tag $PM_TAG), its beats stored, its errors fitted, its beats on the ASAP test inputs: job $track"
-submit p2sys "${G[@]}" -c 8 --mem=48G -t 8:00:00 "--dependency=afterok:$track" --wrap="$PMENV; $JOBS systems $BASE_NL+meter_v3_tp:tidy,d95,pm,rpm; PM2S_RUNS=\"meter_v4_gq_pm\" $JOBS trackers meter_v4_gq_pm; $GQSYS $JOBS systems $NL+meter_v4_gq:tidy,d95,rsb"
+submit p2sys "${G[@]}" -c 8 --mem=48G -t 8:00:00 "--dependency=afterok:$track" --wrap="$PMENV; $JOBS systems $BASE_NL+meter_v3_tp:tidy,d95,pm,rpm; PM2S_RUNS=\"meter_v4_gq_pm\" $JOBS trackers meter_v4_gq_pm; $GQSYS $JOBS systems $NL+meter_v4_gq:tidy,d95,rsb; $JOBS systems $NL+meter_v4_gq:tidy,d95,tc; $GQSYS $JOBS systems $NL+meter_v4_gq:tidy,d95,tc"
 sys=$ID
 echo "the release with its beats, meter_v4_gq_pm with them, the default on Gangqinpu's rendered MIDI: job $sys"
 submit p2meter "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$track" --wrap="$PMENV; $JOBS meters $METER"

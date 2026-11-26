@@ -34,6 +34,19 @@ default in between jobs. When it is offline, it runs on what is there.
   its line across the staves. The MusicXML has a `<glissando>`, which MuseScore draws.
   The page's viewer (OpenSheetMusicDisplay 1.9) draws none, so the page labels it "gliss." and draws
   a line when both ends are on one staff. The score's MIDI plays the sweep.
+- **The timing check** (`src/timing.py`, on by default, `--no-timing-check` to turn off): a note
+  the labeller wrote on a triplet position but played on a straight eighth or sixteenth is written
+  there.
+  - It applies only in meters whose beat is a quarter, and only when the timing is clear: within
+    0.06 of a beat of the straight position, at least 0.1 of a beat from the triplet one.
+  - Swung notes (between 2/3 and 3/4 of the beat) stay as the labeller wrote them.
+  - On the user's song it moved 89 notes. In bars 64-71, where a window had read straight eighths
+    as triplets, triplets went from 40% to 20% and eighths from 7% to 23%.
+- **Click to play from there:** a click anywhere on the score sends the player playing, else the
+  one last used, else the score's, to that moment, and plays on. The bar jumps there at once.
+  - The position comes from the line clicked and the cursor steps around the click.
+  - The recording and the transcription go there through the beat grid.
+  - A MIDI player takes a new time only when stopped, so it is stopped, moved and started again.
 - **The score, played back** (`score.mid`, `src/playback.py`): grace notes sound 70 ms each just
   before their main note, and a rolled chord spreads upwards, 35 ms a note, across both staves
   when the roll runs through both. music21's MIDI export alone had left some grace notes out, and

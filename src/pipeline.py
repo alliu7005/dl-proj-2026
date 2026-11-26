@@ -584,10 +584,11 @@ class V2Pipeline(_FrontEnd):
 
     def __init__(self, labeller_ckpt: str | Path, meter_ckpt: str | Path, vocab: str | Path | None = None,
                  device: str = "auto", window_notes: int = 128, delete_above: float = DELETE_ABOVE,
-                 tidy: bool = False, glissando: bool = False):
+                 tidy: bool = False, glissando: bool = False, timing_check: bool = False):
         """``glissando``: find glissandos in the notes (src/glissando.py) and write each as its first
-        and last note joined by a "gliss." line, not as the run of notes (off by default: the scoring
-        script measures it as its own system)."""
+        and last note joined by a "gliss." line, not as the run of notes. ``timing_check``: a note
+        written on a triplet position but played on a straight eighth or sixteenth is moved there
+        (src/timing.py). Both off by default: the scoring script measures each as its own system."""
         from .labeller import load_labeller
         from .meter import DecodeConfig, build_meter_model
         from .notelabels import LabelSpace
@@ -620,6 +621,7 @@ class V2Pipeline(_FrontEnd):
         self.delete_above = float(delete_above)
         self.tidy = bool(tidy)
         self.glissando = bool(glissando)
+        self.timing_check = bool(timing_check)
         self.info = {"system": "v2", "labeller": str(labeller_ckpt), "meter": str(meter_ckpt),
                      "params_M": round((n_lab + n_met) / 1e6, 1), "device": str(self.device),
                      "decode": self.decode_cfg.to_dict()}
@@ -674,7 +676,7 @@ class V2Pipeline(_FrontEnd):
     def label(self, notes: np.ndarray, pedal: np.ndarray, grid: dict,
               progress: Progress = _noop, delete_above: float | None = None,
               tidy: bool | None = None, glissandi: list | None = None,
-              drop: np.ndarray | None = None) -> tuple[list[str], dict]:
+              drop: np.ndarray | None = None, timing_check: bool | None = None) -> tuple[list[str], dict]:
         """Every note labelled in its window, all rendered in the grid's bars as one score.
         ``delete_above``: leave a note out only above this p(delete); ``tidy``: written lengths stop
         at the next onset of their staff when they run just past it (tidy_lengths). Defaults: the
@@ -713,6 +715,11 @@ class V2Pipeline(_FrontEnd):
 
                     continue
                 notes_out.append(p)
+        timing = self.timing_check if timing_check is None else bool(timing_check)
+        fixed = 0
+        if timing:   # triplets the timing contradicts, before graces join their notes and lengths are tidied
+            from .timing import check_timing
+            fixed = check_timing(notes_out, notes[:, ONSET], grid, list(grid["bars"]))
         graces = attach_graces(notes_out, list(grid["bars"]))
         tidied = tidy_lengths(notes_out, list(grid["bars"])) if tidy else 0
         key = int(grid.get("key", 0))
@@ -739,17 +746,20 @@ class V2Pipeline(_FrontEnd):
                         "bar_ts": [ts for ts, _ in bars], "staves": max([2] + [p.staff + 1 for p in notes_out]),
                         "staff_folded": int(folded), "graces_attached": graces, "delete_above": delete_above,
                         "tidy": tidy, "lengths_tidied": tidied, "glissandi": gl,
+                        "timing_check": timing, "timing_fixed": fixed,
                         "follow": follow_map(grid, notes_out)}
 
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, progress: Progress = _noop, beats: tuple | None = None,
             beat_checkpoint: str = "final0", delete_above: float | None = None, tidy: bool | None = None,
-            beat_source: str = "beat_this", glissando: bool | None = None, **_) -> Result:
+            beat_source: str = "beat_this", glissando: bool | None = None, timing_check: bool | None = None,
+            **_) -> Result:
         """``beats``: (times, down) in the input's seconds, given instead of tracking them.
         ``beat_checkpoint``: the Beat This! model that tracks them (scripts/system_scores.py gives
         each ASAP test piece the cross-validation model that never heard it). ``beat_source``:
         beat_this (the recording; a MIDI input rendered to audio first) or pm2s (PM2S on the notes:
-        the MIDI, or the transcription of a recording). ``glissando``: the pipeline's setting if None."""
+        the MIDI, or the transcription of a recording). ``glissando``, ``timing_check``: the pipeline's
+        settings if None."""
         if beat_source not in BEAT_SOURCES:
             raise ValueError(f"beat_source must be one of {BEAT_SOURCES}, not {beat_source!r}")
         from collections import Counter
@@ -812,7 +822,7 @@ class V2Pipeline(_FrontEnd):
             found = find_glissandi(notes)
         drop = ~inner_mask(len(notes), found) if found else None
         tokens, counts = self.label(notes, pedal, grid, progress, delete_above=delete_above, tidy=tidy,
-                                    glissandi=found, drop=drop)
+                                    glissandi=found, drop=drop, timing_check=timing_check)
         gl = counts.pop("glissandi")
         timing["score_s"] = round(time.perf_counter() - t, 1)
         res.tokens = tokens

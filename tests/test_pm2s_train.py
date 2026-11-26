@@ -377,6 +377,7 @@ def test_batch_script2():
         sysj = by["p2sys"][1]
         assert f"afterok:{by['p2track'][0]}" in sysj and "systems nl_base_gn+meter_v3_tp:tidy,d95,pm,rpm" in sysj
         assert "systems nl_gq+meter_v4_gq:tidy,d95,rsb" in sysj and "--manifest outputs/system_eval_gangqinpu/manifest.json" in sysj
+        assert sysj.count("systems nl_gq+meter_v4_gq:tidy,d95,tc") == 2                       # the timing check, both sets
         assert f"afterok:{by['p2track'][0]}" in by["p2meter"][1] and "meters meter_v4_gq_pmhs" in by["p2meter"][1]
         ev = by["p2eval"][1]
         assert f"afterany:{by['p2meter'][0]}" in ev and ev.count("systems nl_gq+meter_v4_gq_pmhs:tidy,d95,pm,rpm") == 2

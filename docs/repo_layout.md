@@ -26,6 +26,7 @@ src/decoding.py                  chained / guarded / meter decoding of whole pie
 src/metrical.py                  per-note downbeat / beat-phase labels (alignment) and the aux loss
 scripts/build_metrical.py        precompute the metrical labels of every split (once per data build)
 src/pipeline.py                  audio / MIDI -> MusicXML: ScorePipeline (seq2seq, window by window), V2Pipeline (grid + labeller)
+src/timing.py                    the timing check: a triplet-written note played on a straight eighth / sixteenth written there (quarter-beat meters, clear timing only)
 src/playback.py                  the score MIDI plays grace notes (just before their beat) and rolled chords (spread upwards) as written: music21's MIDI export does not
 src/glissando.py                 glissandos: found in the notes (fast one-way runs on one key colour), their two ends in the score, the gliss. line, the swept notes in the score MIDI
 src/synth.py                     MIDI -> audio (additive piano), so Beat This! can track a MIDI input
@@ -86,6 +87,7 @@ pace/v2_release.sh               the release: its configuration scored on whole 
 pace/v2_level.sh                 v2 fifth round: the written-tempo head for the note-value level, trained, tuned, scored
 pace/v2_gangqinpu.sh             v2 sixth round: meter models trained with Gangqinpu; the grid's beat times taken from the notes
 pace/v2_pm2s.sh                  v2 seventh round: PM2S retrained without our test pieces, its beats on whole pieces, a meter model for it
+pace/v2_timing.sh                the timing check on whole pieces, ASAP and Gangqinpu (3 jobs; pace/v2_pm2s2.sh measures it too)
 pace/v2_pm2s2.sh                 v2 ninth round: PM2S retrained with stable optimisation (two learning rates, the better picked), its meter model, MIDI input on ASAP and Gangqinpu
 pace/v2_gqlabel.sh               v2 eighth round: the labeller trained with Gangqinpu's scores, whole pieces on Gangqinpu's test split, meter_v4_gq longer, the meter model's second seed
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
@@ -103,6 +105,7 @@ tests/test_gangqinpu.py          v2: Gangqinpu notes, beat filters, grids, relea
 tests/test_gangqinpu_scores.py   v2: Gangqinpu's written scores (ties, graces, pickups, parts), windows and labels, extra-notes-only noise, build + train + evaluate, whole-piece inputs, pace/v2_gqlabel.sh
 tests/test_pm2s.py               PM2S: post-processing, the tracker on random weights, the weights' hash, beat_source, system names
 tests/test_publish.py            publishing: archive, the gate, --force, refusals, the demo's update + swap, the batch jobs' hook
+tests/test_timing.py             the timing check: moved / kept notes, meters, lengths, the pipeline's switch, pace/v2_timing.sh
 tests/test_playback.py           grace notes and rolled chords in the score MIDI: timing, rolls across staves, tied chords, nothing held on
 tests/test_glissando.py          glissandos: the detector (and what it must not take), the ends, the line and the MIDI, V2Pipeline on / off, the switches
 tests/test_pm2s_train.py         PM2S retrained: targets, augmentation, training and resuming, the stable settings, the weights' tag, pick_run.py, pace/v2_pm2s.sh and v2_pm2s2.sh, --real-beats synth

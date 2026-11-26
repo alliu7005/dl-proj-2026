@@ -42,7 +42,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 
 from src.pipeline import AUDIO_EXT, MIDI_EXT, MODES, ScorePipeline, V2Pipeline  # noqa: E402
-from src.release import GLISSANDO, TIDY, default_path  # noqa: E402
+from src.release import GLISSANDO, TIDY, TIMING_CHECK, default_path  # noqa: E402
 
 MAX_MB = 100
 STAGES = {"transcribe": (0.0, 0.45), "beats": (0.45, 0.5), "grid": (0.5, 0.55), "score": (0.55, 0.95),
@@ -167,12 +167,14 @@ def create_app(pipes: dict, out_root: Path, default: str | None = None) -> FastA
     return app
 
 
-def load_pipes(paths: dict, vocab, device, tidy: bool, log=print, glissando: bool = GLISSANDO) -> dict:
+def load_pipes(paths: dict, vocab, device, tidy: bool, log=print, glissando: bool = GLISSANDO,
+               timing_check: bool = TIMING_CHECK) -> dict:
     """{"v2": V2Pipeline, "seq2seq": ScorePipeline} for the checkpoints that exist."""
     pipes = {}
     if Path(paths["labeller"]).exists() and Path(paths["meter"]).exists():
         log(f"loading v2: {paths['labeller']} + {paths['meter']} ...")
-        pipes["v2"] = V2Pipeline(paths["labeller"], paths["meter"], vocab, device, tidy=tidy, glissando=glissando)
+        pipes["v2"] = V2Pipeline(paths["labeller"], paths["meter"], vocab, device, tidy=tidy, glissando=glissando,
+                                 timing_check=timing_check)
     else:
         log(f"no v2 ({paths['labeller']} / {paths['meter']} missing)")
     if Path(paths["ckpt"]).exists():
@@ -217,6 +219,7 @@ def main(argv=None):
     ap.add_argument("--no-tidy", action="store_true",
                     help="v2: keep written lengths that run just past the next onset (default: trim them)")
     ap.add_argument("--no-glissando", action="store_true", help="v2: write each note of a glissando, not its first and last joined by a gliss. line")
+    ap.add_argument("--no-timing-check", action="store_true", help="v2: keep the labeller's triplets even where the timing says straight eighths (src/timing.py)")
     ap.add_argument("--system", default="v2", choices=list(SYSTEMS), help="the page's default system")
     ap.add_argument("--vocab", default=None, help="default: next to the checkpoint, else data/processed")
     ap.add_argument("--device", default="auto")
@@ -235,10 +238,11 @@ def main(argv=None):
     given = {k: getattr(args, k) for k in ("labeller", "meter", "ckpt") if getattr(args, k)}
     tidy = TIDY and not args.no_tidy
     gliss = GLISSANDO and not args.no_glissando
+    tcheck = TIMING_CHECK and not args.no_timing_check
 
     def paths():
         return {**default_paths(), **given}
-    pipes = load_pipes(paths(), args.vocab, args.device, tidy, log, gliss)
+    pipes = load_pipes(paths(), args.vocab, args.device, tidy, log, gliss, tcheck)
     if not pipes:
         raise SystemExit("no checkpoints found: give --labeller and --meter (v2) and/or --ckpt (seq2seq)")
     for k, p in pipes.items():
@@ -246,7 +250,7 @@ def main(argv=None):
     app = create_app(pipes, Path(args.out), args.system)
     if not args.no_update and args.update_every > 0 and len(given) < 3:
         def reload():   # only the models not given on the command line come from the release
-            return load_pipes(paths(), args.vocab, args.device, tidy, log, gliss)
+            return load_pipes(paths(), args.vocab, args.device, tidy, log, gliss, tcheck)
         threading.Thread(target=keep_updated, args=(pipes, args.update_every, reload), kwargs={"log": log},
                          daemon=True).start()
         log(f"checking for a newer release every {args.update_every:g} min (--update-every, --no-update)")

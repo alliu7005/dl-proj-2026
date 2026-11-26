@@ -1552,6 +1552,13 @@ seq2seq stays best on classical real audio (10.65).
   - against today's default (Beat This!, which on clean MIDI means the rendered MIDI);
   - on Gangqinpu, against the default with Beat This! on the rendered MIDI (`_rsb`, new in
     `scripts/system_scores.py --real-beats synth`), which is what a MIDI upload gets today.
+- **The timing check** (`src/timing.py`, `_tc`), in the same batch: `nl_gq` + `meter_v4_gq` with
+  and without it, on ASAP and Gangqinpu.
+  - It writes a triplet-written note that was played on a straight eighth or sixteenth straight.
+  - It came from the user's song, where one window of the new labeller wrote 40% of bars 64-71 as
+    triplets against straight playing (the old labeller wrote 17% there).
+  - On that song it moved 89 notes, all on clear evidence: played at 0.44-0.55 of the beat and
+    written at 1/3 or 2/3, or played on a sixteenth at least 0.1 of a beat from the triplet spot.
 
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
