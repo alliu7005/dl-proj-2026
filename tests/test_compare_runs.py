@@ -306,6 +306,13 @@ def test_compare_systems():
         md = out.read_text()
         assert "| a vs b | `a` | `b` | **-1.10** |" in md and "| c vs b | `c` | `b` | +0.00 |" in md, md
         assert "zzz" not in md and "## beat ablation" in md and "**-2.00**" in md and "6/6" in md, md
+    # pieces: an ASAP performance belongs to its folder; a Gangqinpu one (one per score) is its own
+    assert cs.piece_of("Bach/Prelude/bwv_875/Ahfat01M.mid") == "Bach/Prelude/bwv_875"
+    assert cs.piece_of("gangqinpu/1004946") == "gangqinpu/1004946"
+    gq_a = {"gangqinpu/%d" % k: 5.0 + 0.1 * (k % 3) for k in range(30)}
+    gq_b = {"gangqinpu/%d" % k: 5.5 for k in range(30)}
+    r = cs.paired(gq_a, gq_b)
+    assert r["pieces"] == 30 and r["lo"] < r["mean"] < r["hi"], r   # a real interval, not zero-width
 
 
 def test_login_node_python():

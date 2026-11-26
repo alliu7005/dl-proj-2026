@@ -30,7 +30,7 @@ python scripts/audio_to_score.py recording.wav --v2
 
 | folder | what | parameters | trained run |
 |---|---|---|---|
-| `v2_labeller/` | **v2 note labeller.** A transformer encoder over a window of performed notes, with per-note heads: keep or delete, bar correction, position in the bar, written length, staff, grace / arpeggio / ornament flags. | 25.6M | `nl_base_gn` (step 18,000; training timing jittered like the beat tracker's) |
+| `v2_labeller/` | **v2 note labeller.** A transformer encoder over a window of performed notes, with per-note heads: keep or delete, bar correction, position in the bar, written length, staff, grace / arpeggio / ornament flags. | 25.6M | `nl_gq` (step 40,000): half of its training windows from Gangqinpu's pop, folk, jazz and classical scores |
 | `v2_meter/` | **v2 meter model.** A transformer over the piece's tracked beats (Beat This!) predicting bar starts, beat lengths and time signatures. A Viterbi search then decodes one consistent grid for the whole piece. `decode.json` holds its tuned decoder, including a prior on the written tempo. | 4.8M | `meter_v4_gq` (step 56,000): trained with Gangqinpu's pop, folk and jazz performances as half of every batch |
 | `seq2seq/` | **The seq2seq score model (Scoreformer).** An encoder-decoder that writes score tokens window by window, with beats as an input. | 44.9M | `sf_base_reg_cab_c128` |
 
@@ -74,6 +74,9 @@ lower is better. MUSTER mean on real audio (24 performances, transcribed by Tran
 | v2 (`v2_meter` = `meter_v4_gq` + `v2_labeller`, at these settings) | 12.70 / 15.18 |
 | v2 with the classical-only meter model (`meter_v3`, release v2-round4) | 12.31 / 14.53 |
 
+- **Outside classical piano** (58 Gangqinpu test pieces, mostly pop, transcribed from their
+  recordings; MUSTER mean): this v2 (`nl_gq` + `meter_v4_gq`) 4.00, seq2seq 7.69, Beyer & Dai
+  8.07, v2 with the classical-only models 6.18. On ASAP, v2 with these models: 12.71 / 14.86.
 - **Why the default meter model is the Gangqinpu one:** people bring songs, not only classical
   pieces. On Gangqinpu's real recordings, `meter_v4_gq` gets the time signature right 0.79 of the
   time against 0.54 for `meter_v3`, and the note-value level 0.75 against 0.65. On the classical

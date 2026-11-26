@@ -1340,6 +1340,62 @@ quoted from a PM2S that never saw them.
     without the leak;
   - `meter_v4_gq_pmho`, the meter model trained again for its beats.
 
+### Seventh round: results (2026-11-26)
+
+`pace/v2_pm2s.sh` ran end to end: 8 jobs, the retraining 2 h 51 min.
+
+**The retrained PM2S is under-trained.**
+- Its training loss rose from 0.48 at step 8,000 to 0.61 at step 38,000, and validation fell with
+  it (mean beat / downbeat F 0.62 at 10k, 0.50 at 38k, 0.54 at 60k).
+- A training loss that rises is unstable optimisation, not overfitting. PM2S's recipe (AdamW 1e-3,
+  betas 0.8 / 0.8, no clipping) does not train stably on our data, so best.pt is from step 10,000.
+- What follows understates a properly trained PM2S without our test pieces.
+
+**Its beats (`beats_compare_ho.md`, `tracked_report_ho.json`):**
+
+| beats | ASAP test clean (beat / downbeat F, wrong tempo octave) | Gangqinpu test (beat / downbeat F) |
+|---|---|---|
+| PM2S, released (trained on ASAP incl. our test pieces) | 0.786 / 0.618, 0% | 0.710 / 0.513 |
+| PM2S, held out (`pm2s_ho`) | 0.655 / 0.514, 50% | **0.780** / 0.636 |
+| Beat This!, on the recording | 0.711 / 0.596, 33% | 0.709 / **0.668** |
+| Beat This!, on the MIDI rendered to audio | 0.576 / 0.422, 29% | - |
+
+- On ASAP the released weights were far ahead: partly the leak, partly this under-trained retrain.
+  Half of its pieces come out at double or half the tempo.
+- On Gangqinpu, which it trained on and the released one did not, it beats both.
+
+**Whole pieces (MUSTER mean, real recordings / clean MIDI):**
+
+| system | real (24) | clean (59) |
+|---|---|---|
+| the release (`meter_v3_tp`, Beat This!) | 12.31 | 14.53 |
+| the release + released PM2S | 11.56 | 12.43 |
+| the release + `pm2s_ho` | 12.96 | 13.13 |
+| `meter_v4_gq_pm` + `pm2s_ho` | 11.80 | 12.35 |
+| **`meter_v4_gq_pmho` + `pm2s_ho`** | **11.59** | **11.85** |
+| seq2seq / Beyer & Dai | 10.65 / 11.14 | 11.74 / 11.05 |
+
+Paired (`outputs/system_eval/paired.md`):
+- **The leak was real.** With the release, `pm2s_ho` against the released PM2S: +1.40 on real
+  ([+0.54, +2.78], worse), +0.70 on clean (chance).
+- **The PM2S path still helps MIDI input without it.** `meter_v4_gq_pmho` + `pm2s_ho` against the
+  release:
+  - **-2.68 on clean** ([-3.70, -1.52], 51 of 59);
+  - -0.71 on real (chance).
+- **That is level with the baselines.**
+  - Against seq2seq: -0.10 on clean, -0.94 on real, both within chance.
+  - Against Beyer & Dai: -0.79 on clean and -0.45 on real, both within chance.
+- **Training the meter model for this PM2S helped:** `meter_v4_gq_pmho` against `meter_v4_gq_pm`,
+  both on `pm2s_ho`: -0.50 on clean (sure), -0.21 on real.
+
+**Conclusion.**
+- **For MIDI input, with no recording to track,** `meter_v4_gq_pmho` + PM2S is the best honest v2
+  and level with seq2seq and Beyer & Dai. Beat This! on a rendered MIDI is far worse.
+- **For recordings, Beat This! on the audio stays.** On Gangqinpu's real recordings, PM2S was worse
+  (eighth round below).
+- **Next:** retrain `pm2s_ho` with stable optimisation: a lower rate, the usual betas, gradient
+  clipping. It is about 3 GPU hours.
+
 ### Eighth round: the labeller on Gangqinpu's scores, whole pieces outside classical piano
 
 `pace/v2_gqlabel.sh` (pace/README.md, 4q). The sixth round made the meter model general:
@@ -1392,6 +1448,88 @@ only seen classical scores, and "more general" had no whole-piece measure.
   - `meter_v4_gql`: `meter_v4_gq` with 100k steps. Its best checkpoint was at 56k of 60k.
   - `meter_v3_s1_tp`: the release's meter model's second seed with the tempo-prior decoder, on
     whole pieces. This is v2's run-to-run spread for the report (the labeller's is ±0.2).
+
+### Eighth round: results (2026-11-26)
+
+`pace/v2_gqlabel.sh` ran end to end: 8 jobs, the longest 2 h 07 min.
+
+**The data.**
+- 17,392 of Gangqinpu's 17,589 training performances became 322,541 training windows (42.6M input
+  notes, 9 minutes on 16 CPUs). 196 had too few aligned notes; 0.5% of windows were dropped.
+- Validation: 492 performances, 4,628 windows. Test: 506 performances, 4,762 windows.
+- 505 training tokens of 1.3M+ are outside the vocabulary (`<unk>`).
+- 324,711 notes were held across a bar line (written tied). Duplicates (72k) and zero-length notes
+  (48k) were dropped.
+
+**`nl_gq`** (`nl_base_gn`'s recipe, half of the windows from Gangqinpu) stopped early at step 43,110
+(best 40,000) in 1 h 48 min, with the evaluation. Onset F1 with the true grid:
+
+| | ASAP clean | ASAP real | PERiScoPe | Gangqinpu |
+|---|---|---|---|---|
+| `nl_base_gn` | 0.782 | 0.800 | 0.857 | 0.882 |
+| `nl_gq` | **0.785** | **0.806** | **0.866** | **0.921** |
+
+- It is better everywhere, classical included.
+- On the meter models' grids, window onset F1 barely moves: on Gangqinpu with `meter_v4_gq`'s grid
+  from Beat This!'s beats of the recordings, 0.498 for both. Where the grid is wrong, it is wrong
+  for either labeller.
+
+**Whole pieces, ASAP (paired, against the same meter model with `nl_base_gn`):**
+
+| | real | clean |
+|---|---|---|
+| `nl_gq` + `meter_v3_tp` (12.23 / 14.38) | -0.07 (chance) | **-0.15** [-0.31, -0.04] |
+| `nl_gq` + `meter_v4_gq` (12.71 / 14.86) | +0.01 (chance) | **-0.32** [-0.56, -0.14] |
+
+**Whole pieces, Gangqinpu.**
+- 59 test pieces, one per score: 25 pop, 15 unlabelled, 10 classical, 5 other, 3 folk, 1 jazz.
+- 58 were scored by every system. MUSTER mean:
+
+| system | from the recording (`gangqinpu_real`) | aligned notes (`gangqinpu`) |
+|---|---|---|
+| Beyer & Dai | 8.07 | 7.65 |
+| seq2seq (`sf_base_reg_cab_c128`) | 7.69 | 7.64 |
+| v2, the release (`nl_base_gn` + `meter_v3_tp`) | 6.18 | 6.46 |
+| v2, `nl_base_gn` + `meter_v4_gq` | 5.84 | 6.37 |
+| v2, `nl_base_gn` + `meter_v4_gq_pm` + PM2S (released) | 6.55 | 6.35 |
+| v2, `nl_gq` + `meter_v3_tp` | 4.25 | 4.49 |
+| **v2, `nl_gq` + `meter_v4_gq`** | **4.00** | **4.40** |
+
+Paired, from the recordings (`outputs/system_eval_gangqinpu/paired.md`; each piece its own, see
+the note below):
+- **On pop, v2 is far ahead of both baselines.** Even the release beats seq2seq by 1.51
+  ([+0.88, +2.10]) and Beyer & Dai by 1.88. With both Gangqinpu models, seq2seq is +3.69 behind
+  ([+3.06, +4.37], 1 of 58 better) and Beyer & Dai +4.07.
+- **`nl_gq` makes the biggest difference:** -1.93 against the release ([-2.34, -1.54], 57 of 58).
+  - MUSTER offsets (written lengths) go from 17.4 to 10.7, onsets from 5.5 to 3.6.
+- **`meter_v4_gq` helps too:** -0.35 against `meter_v3_tp` ([-0.72, +0.01]).
+  - Score similarity's duration error halves: 48% to 24-28%.
+- **PM2S is worse on recordings:** +0.71 ([+0.38, +1.05]). On the aligned notes it is equal.
+
+**Also:**
+- **`meter_v4_gql` (100k steps).** It stopped at 66,000 (best 50,000). Its meter scores are a little
+  lower than `meter_v4_gq`'s. On whole pieces it is within chance everywhere: -0.58 real, -0.29
+  clean, 0.00 on Gangqinpu. Not promoted; the 60k model stays.
+- **The meter model's second seed (`meter_v3_s1_tp`)** against the release's `meter_v3_tp`: +0.59
+  on real (chance), **+0.93 on clean** ([+0.44, +1.33]). v2's spread from the meter model's
+  training seed is up to about 0.9 on whole classical pieces, against 0.2 for the labeller's. So
+  differences between meter models smaller than about a point are within training noise,
+  `meter_v4_gq`'s +0.65 on clean included.
+- **Publishing.**
+  - `nl_gq` was made the default on Hugging Face by the batch itself. The job order of that batch
+    compared it on the three classical sets only; it won there too.
+  - `meter_v4_gql` was archived.
+  - The release on the repo is now `nl_gq` + `meter_v4_gq`.
+- **The paired comparison's first output grouped all of Gangqinpu's performances as one piece**
+  (zero-width intervals). Fixed in `scripts/compare_systems.py` (`piece_of`), and the intervals
+  above are from the fixed version.
+
+**Conclusion.** v2 with both Gangqinpu models is the general system:
+- best by far on music outside classical piano (4.00 against 7.69 and 8.07);
+- on the classical benchmark within chance of the release on real audio, and within the meter
+  model's seed spread on clean MIDI.
+
+seq2seq stays best on classical real audio (10.65).
 
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 

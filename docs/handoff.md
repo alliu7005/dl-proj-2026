@@ -1,4 +1,4 @@
-# Handoff: where the project stands (2026-11-25)
+# Handoff: where the project stands (2026-11-26)
 
 The course deadline is **2026-12-04** (9 days). This page is for deciding what to do with them:
 - what exists;
@@ -46,6 +46,14 @@ The details behind every number are in [experiments.md](experiments.md).
   - PM2S's beats bring v2 within chance of seq2seq and Beyer & Dai (11.12 real / 12.08 clean).
     PM2S trained on our test pieces, so that has to be re-checked first
     ([Sixth round](#sixth-round-results-2026-11-25)).
+- **Seventh and eighth rounds (2026-11-26,
+  [below](#seventh-and-eighth-rounds-results-2026-11-26)):**
+  - **On pop and other non-classical piano, v2 is now far ahead.** On 58 Gangqinpu test pieces
+    from their recordings, MUSTER mean: v2 4.00, seq2seq 7.69, Beyer & Dai 8.07. That is with
+    the labeller trained with Gangqinpu (`nl_gq`), now the default on Hugging Face.
+  - **The PM2S gain was partly the leak.** Without it, v2 for MIDI input (`meter_v4_gq_pmho` + the
+    retrained PM2S) is still level with seq2seq and Beyer & Dai on clean MIDI (11.85 vs 11.74 /
+    11.05).
 - **Hands-on testing on downloaded songs:**
   - the playback sounds right;
   - the score is still hard to read: rhythm, extra voices;
@@ -372,9 +380,42 @@ Each option has the evidence for it, what it could gain, and a rough cost:
 - **Beat times from the notes:** -0.26 on clean (sure), nothing on real.
 - **Both trackers together** (`meter_v4_gq_both`): worse than either.
 
+## Seventh and eighth rounds: results (2026-11-26)
+
+Full tables in docs/experiments.md, "Seventh round: results" and "Eighth round: results".
+
+| system, MUSTER mean (lower is better) | ASAP real (24) | ASAP clean (59) | Gangqinpu real (58) |
+|---|---|---|---|
+| the release (`nl_base_gn` + `meter_v3_tp`) | 12.31 | 14.53 | 6.18 |
+| **v2 now (`nl_gq` + `meter_v4_gq`, the demo's)** | 12.71 | 14.86 | **4.00** |
+| v2, `nl_gq` + `meter_v3_tp` | **12.23** | 14.38 | 4.25 |
+| v2 for MIDI input (`meter_v4_gq_pmho` + retrained PM2S) | 11.59 | **11.85** | - |
+| seq2seq | **10.65** | 11.74 | 7.69 |
+| Beyer & Dai | 11.14 | 11.05 | 8.07 |
+
+- **Gangqinpu for the labeller (`nl_gq`) is the largest gain outside classical music:** -1.93
+  against the release on Gangqinpu (57 of 58 pieces better). On classical it is equal or slightly
+  better (-0.15 / -0.32 on clean, sure).
+- **The retrained PM2S (`pm2s_ho`) is under-trained.** Its training became unstable after step
+  8,000. Even so, v2 for MIDI input with it is level with both baselines on clean MIDI.
+  - Retrain it with stable optimisation: about 3 GPU hours.
+  - Then the demo should use PM2S + `meter_v4_gq_pmho` for MIDI uploads. Today it renders the MIDI
+    for Beat This!, which costs about 3 points on clean MIDI.
+- **The meter model's training seed moves whole classical pieces by up to 0.9** (`meter_v3_s1_tp`).
+  The labeller's moves them by 0.2. Differences between meter models under about a point are
+  noise.
+- **Not worth it:** `meter_v4_gq` trained longer, and PM2S for recordings (worse on Gangqinpu).
+- **For the report:**
+  - v2 is the general system: best by far on non-classical piano, and on classical within the
+    meter model's noise of where it was.
+  - seq2seq wins classical real audio (10.65).
+  - For MIDI input, v2 with PM2S is level with both baselines.
+
 ## Decisions for the team
 
-- **The main system:** which one the report and demo present as "the model" (option 2).
+- **The main system:** which one the report and demo present as "the model" (option 2). After the
+  eighth round: v2 (`nl_gq` + `meter_v4_gq`) as the general model, with seq2seq as the classical
+  benchmark result.
 - **Next steps:** which of the options above fit the time left. After the sixth round, the
   first candidate is PM2S retrained without our test pieces (option 1). If its gain holds, the
   release changes to `meter_v4_gq_pm` + PM2S.

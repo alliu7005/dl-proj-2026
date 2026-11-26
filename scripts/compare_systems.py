@@ -88,6 +88,16 @@ def load(path):
     return out
 
 
+def piece_of(performance):
+    """The piece a performance is of: ASAP's folder (``Bach/Prelude/bwv_875/Ahfat01M.mid`` ->
+    ``Bach/Prelude/bwv_875``), whose performances are not independent. A Gangqinpu performance
+    (``gangqinpu/<sample id>``, scripts/gangqinpu_inputs.py: one per score) is its own piece; the
+    first version grouped all of them into one ("gangqinpu"), which gave zero-width intervals."""
+    if performance.startswith("gangqinpu/"):
+        return performance
+    return performance.rsplit("/", 1)[0]
+
+
 def paired(a, b, n_boot=4000, seed=0):
     """A - B on the performances both scored: n, pieces, mean, 95% interval, how many A is better on."""
     common = sorted(set(a) & set(b))
@@ -95,7 +105,7 @@ def paired(a, b, n_boot=4000, seed=0):
         return None
     by_piece = defaultdict(list)
     for p in common:
-        by_piece[p.rsplit("/", 1)[0]].append(a[p] - b[p])
+        by_piece[piece_of(p)].append(a[p] - b[p])
     groups = list(by_piece.values())
     diffs = [x for g in groups for x in g]
     rng = random.Random(seed)
