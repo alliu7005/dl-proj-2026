@@ -73,6 +73,10 @@ def update(repo: str = HF_REPO, out: Path = ROOT / MODELS, hub=None, log=print) 
         files = lambda m: {k: v.get("files") for k, v in m.get("models", {}).items()}  # noqa: E731
         same = local is not None and files(local) == files(remote)
         if same and not verify(Path(out)):
+            if local.get("settings") != remote.get("settings"):   # the rule verdict changed: no files to fetch
+                mf.write_text(json.dumps(remote, indent=1))
+                log(f"models: {repo}'s settings changed (rules: {remote.get('settings', {}).get('rules')})")
+                return True
             return False
         log(f"models: {repo} has release {remote.get('release')} (here: "
             f"{local.get('release') if local else 'none'}): downloading")

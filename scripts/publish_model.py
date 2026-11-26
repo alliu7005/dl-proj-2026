@@ -26,6 +26,9 @@ and when promoted the slot's folder and manifest.json (the release renamed <date
 tagged so). A run whose checkpoint is in the archive already, with nothing to change, is skipped; the
 default's own run with a file added or changed (a labeller's beat_decode.json, tuned after it was
 published: scripts/tune_beat_decode.py) updates the slot.
+
+--settings <rule_verdict.json> publishes no model: the benchmark's verdict on the correction rules
+(scripts/rule_verdict.py) goes into the manifest's settings, and the demo turns off what it says.
 Needs `hf auth login` once (a token with write access) where it runs; without one it says so and
 exits 2 (the batch jobs go on).
 """
@@ -126,9 +129,56 @@ def remote_manifest(api, repo: str, hf_hub_download) -> dict:
     return json.loads(Path(p).read_text())
 
 
+def publish_settings(path: Path, repo: str, dry_run: bool = False, hub=None) -> int:
+    """The rule verdict's decisions -> manifest["settings"]["rules"] (and the evidence beside them):
+    one commit of manifest.json; the demo picks it up at its next check. A rule the verdict could not
+    decide (None) keeps the manifest's current value."""
+    v = json.loads(path.read_text())
+    if hub is None:
+        try:
+            import huggingface_hub as hub
+        except ImportError:
+            print("not published: needs huggingface_hub (pip install huggingface_hub)")
+            return 2
+    api = hub.HfApi()
+    if not dry_run:
+        try:
+            api.whoami()
+        except Exception as e:  # noqa: BLE001
+            print(f"not published: not logged in to Hugging Face ({type(e).__name__}); run `hf auth login` once")
+            return 2
+    manifest = remote_manifest(api, repo, hub.hf_hub_download)
+    settings = manifest.setdefault("settings", {"delete_above": 0.95, "tidy": True})
+    rules = dict(settings.get("rules", {}))
+    decided = {k: bool(on) for k, on in v.get("rules", {}).items() if on is not None}
+    rules.update(decided)
+    if rules == settings.get("rules") and settings.get("rule_verdict", {}).get("date") == v.get("date"):
+        print("the release's rules are as decided already: nothing to do")
+        return 0
+    settings["rules"] = rules
+    settings["rule_verdict"] = {"date": v.get("date"), "labeller": v.get("labeller"), "rule": v.get("rule"),
+                                "evidence": v.get("evidence")}
+    print("rules: " + ", ".join(f"{k} {'on' if on else 'OFF'}" for k, on in sorted(rules.items())), flush=True)
+    if dry_run:
+        print("(dry run: nothing uploaded)")
+        return 0
+    with tempfile.TemporaryDirectory() as t:
+        mf = Path(t) / "manifest.json"
+        mf.write_text(json.dumps(manifest, indent=1))
+        commit = api.create_commit(repo_id=repo, repo_type="model",
+                                   operations=[hub.CommitOperationAdd(path_in_repo="manifest.json", path_or_fileobj=str(mf))],
+                                   commit_message=("rule verdict " + str(v.get("date")) + ": " + ", ".join(
+                                       f"{k} {'on' if on else 'off'}" for k, on in sorted(decided.items())))[:200])
+    print(f"uploaded: {getattr(commit, 'commit_url', commit)}", flush=True)
+    return 0
+
+
 def main(argv=None, hub=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run", required=True, help="the finished training run's folder")
+    ap.add_argument("--run", default=None, help="the finished training run's folder")
+    ap.add_argument("--settings", default=None,
+                    help="instead of a run: a rule verdict (scripts/rule_verdict.py's JSON) put in the manifest's "
+                         "settings, which the demo follows")
     ap.add_argument("--repo", default=HF_REPO)
     ap.add_argument("--runs-dir", default="outputs/runs", help="where the current default's run may be evaluated")
     ap.add_argument("--force", action="store_true", help="make it the default whatever the gate says")
@@ -136,6 +186,10 @@ def main(argv=None, hub=None):
     ap.add_argument("--dry-run", action="store_true", help="say what would be uploaded, upload nothing")
     ap.add_argument("--vocab", action="append", default=None)
     args = ap.parse_args(argv)
+    if args.settings:
+        return publish_settings(Path(args.settings), args.repo, args.dry_run, hub)
+    if not args.run:
+        ap.error("--run or --settings")
     run = Path(args.run)
     kind = kind_of(run)
     slot = SLOT[kind]

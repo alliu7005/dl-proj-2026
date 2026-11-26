@@ -1644,6 +1644,24 @@ weighs each step against the median written tempo of the steps around it.
 - It is tuned on validation (ASAP, real, PERiScoPe and Gangqinpu: `eval_meter.py --local-tempo`)
   and measured as its own system; `_jf` stays until something beats it.
 
+**4. Which rules stay: decided by the benchmark** (`pace/v2_decode2.sh`, `scripts/rule_verdict.py`).
+The project keeps as much of the decision with the models as it can, so a correction rule has to
+earn its place. The deep-learning configuration is the labeller + its tuned beat decoding on
+`meter_v4_gq`; each correction rule is measured added to it, for both labellers, on whole pieces
+from real recordings (ASAP `real`, Gangqinpu `gangqinpu_real`), MUSTER mean error paired by
+performance with a 95% bootstrap over pieces.
+
+| what | decision |
+|---|---|
+| beat decoding (`_bd`, model side) | on unless significantly worse on a condition |
+| timing check (`_tc`), whole-beat check (`_tb`), short-bar fix (`_jf`) | on only if significantly better on a condition and worse on none |
+| engraving (tidy, `_rd`, glissandos, grace notes and rolls) | not decided: how a rhythm is written, not what it is |
+
+The verdict is for the labeller the release serves (`nl_gq_mc` if its training publish promoted it,
+else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the release manifest, which
+the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
+the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
+
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
 The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced

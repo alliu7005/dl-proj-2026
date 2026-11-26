@@ -42,6 +42,17 @@ default in between jobs. When it is offline, it runs on what is there.
   - Swung notes (between 2/3 and 3/4 of the beat) stay as the labeller wrote them.
   - On the user's song it moved 89 notes. In bars 64-71, where a window had read straight eighths
     as triplets, triplets went from 40% to 20% and eighths from 7% to 23%.
+- **Which rules run is decided by the benchmark.** The rules that correct a model's output (the
+  timing check, the whole-beat check, the short-bar fix) and the beat-level decoding are on by
+  default (`src/release.py`), and the release manifest can turn them off:
+  - `scripts/rule_verdict.py` (`pace/v2_decode2.sh`) keeps a correction rule only if it makes the
+    whole system significantly better on real recordings and worse nowhere, and keeps the decoding
+    (the model side) unless it makes it worse.
+  - `publish_model.py --settings` writes the decisions into the manifest. The demo reads it at
+    start and at its hourly check (a settings change needs no download) and logs the rules it runs.
+  - `--no-timing-check`, `--no-timing-beats`, `--no-fix-jumps` and `--no-beat-decode` still turn a
+    rule off whatever the manifest says. The engraving rules (lengths, stems, glissandos, grace
+    notes) are not the models' job and are not decided this way.
 - **Beat-level decoding of the labeller** (`src/beat_decode.py`, on by default,
   `--no-beat-decode` to turn off): instead of taking each note's likeliest split of the quarter on
   its own, the labeller's own probabilities are combined with when the note was played, and

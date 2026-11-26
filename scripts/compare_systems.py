@@ -112,6 +112,19 @@ PAIRS = [  # (A, B, what A changes)
      "the meter decoder with local tempo consistency"),
     (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd", GQ_NL + "_meter_v4_gq_d95_tidy",
      "the demo's default against the plain system"),
+    # the follow-up (pace/v2_decode2.sh): each correction rule added to the models alone (scripts/rule_verdict.py)
+    (GQ_NL + "_meter_v4_gq_d95_tidy_bd", GQ_NL + "_meter_v4_gq_d95_tidy", "nl_gq: the beat decoding"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_bd", GQ_NL + "_meter_v4_gq_d95_tidy_bd", "nl_gq + decoding: the timing check"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tb_bd", GQ_NL + "_meter_v4_gq_d95_tidy_bd", "nl_gq + decoding: the whole-beat check"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_jf_bd", GQ_NL + "_meter_v4_gq_d95_tidy_bd", "nl_gq + decoding: the short-bar fix"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy",
+     "the retrained labeller (contradicted labels masked), models alone"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy", "nl_gq_mc: the beat decoding"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_tc_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd", "nl_gq_mc + decoding: the timing check"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_tb_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd", "nl_gq_mc + decoding: the whole-beat check"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_jf_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd", "nl_gq_mc + decoding: the short-bar fix"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd",
+     "nl_gq_mc + decoding: every rule"),
 ]
 
 

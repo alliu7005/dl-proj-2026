@@ -20,8 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.pipeline import BEAT_SOURCES, GUARD_MARGIN, MODES, ScorePipeline, V2Pipeline  # noqa: E402
-from src.release import (BEAT_DECODE, DELETE_ABOVE, FIX_JUMPS, GLISSANDO, READABLE, TIDY, TIMING_BEATS,  # noqa: E402
-                         TIMING_CHECK, default_path)
+from src.release import DELETE_ABOVE, GLISSANDO, READABLE, TIDY, default_path, rule_settings  # noqa: E402
 
 
 def main():
@@ -57,12 +56,13 @@ def main():
     args = ap.parse_args()
 
     if args.v2:
+        rules = rule_settings()   # the benchmark's verdict on the correction rules (src/release.py)
         pipe = V2Pipeline(args.labeller, args.meter, args.vocab, args.device, tidy=TIDY and not args.no_tidy,
                           glissando=GLISSANDO and not args.no_glissando,
-                          timing_check=TIMING_CHECK and not args.no_timing_check,
-                          readable=READABLE and not args.no_readable, fix_jumps=FIX_JUMPS and not args.no_fix_jumps,
-                          timing_beats=TIMING_BEATS and not args.no_timing_beats,
-                          beat_decode=BEAT_DECODE and not args.no_beat_decode)
+                          timing_check=rules["timing_check"] and not args.no_timing_check,
+                          readable=READABLE and not args.no_readable, fix_jumps=rules["fix_jumps"] and not args.no_fix_jumps,
+                          timing_beats=rules["timing_beats"] and not args.no_timing_beats,
+                          beat_decode=rules["beat_decode"] and not args.no_beat_decode)
     else:
         pipe = ScorePipeline(args.ckpt, args.vocab, args.device)
     print(f"model: {pipe.info}", flush=True)

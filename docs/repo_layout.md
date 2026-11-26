@@ -57,6 +57,7 @@ scripts/build_notelabels.py      v2: labels + true grids per split -> <split>/no
 scripts/label_ceiling.py         v2: every window rendered from its true labels (the labeller's ceiling)
 scripts/train_labeller.py        v2: train the note labeller
 scripts/eval_labeller.py         v2: evaluate it on the test sets (true grid: grid_true; a meter model's: grid_meter_<run>)
+scripts/rule_verdict.py          decides from the whole-piece benchmark which correction rules the demo keeps (publish_model.py --settings publishes it)
 scripts/tune_beat_decode.py      tunes a labeller's beat decoding on validation windows (writes beat_decode.json)
 scripts/audit_labels.py          how often a dataset's scores write a beat the performance contradicts (triplet / straight)
 src/meter.py                     v2: the meter model (beat + note-encoder inputs, targets, alignment ground truth, augmentation, transformer, consistent Viterbi decoding, beat times refined from the notes)
@@ -91,6 +92,7 @@ pace/v2_release.sh               the release: its configuration scored on whole 
 pace/v2_level.sh                 v2 fifth round: the written-tempo head for the note-value level, trained, tuned, scored
 pace/v2_gangqinpu.sh             v2 sixth round: meter models trained with Gangqinpu; the grid's beat times taken from the notes
 pace/v2_pm2s.sh                  v2 seventh round: PM2S retrained without our test pieces, its beats on whole pieces, a meter model for it
+pace/v2_decode2.sh               v2 tenth round follow-up: each correction rule added to the models alone (nl_gq, nl_gq_mc), the rule verdict published (4 jobs)
 pace/v2_decode.sh                v2 tenth round: beat decoding tuned, the label audit, nl_gq_mc (contradicted labels masked), meter_v4_gq_lt (local tempo), every rule on whole pieces (8 jobs)
 pace/v2_timing.sh                the timing check on whole pieces, ASAP and Gangqinpu (3 jobs; pace/v2_pm2s2.sh measures it too)
 pace/v2_pm2s2.sh                 v2 ninth round: PM2S retrained with stable optimisation (two learning rates, the better picked), its meter model, MIDI input on ASAP and Gangqinpu
@@ -111,6 +113,7 @@ tests/test_gangqinpu_scores.py   v2: Gangqinpu's written scores (ties, graces, p
 tests/test_pm2s.py               PM2S: post-processing, the tracker on random weights, the weights' hash, beat_source, system names
 tests/test_publish.py            publishing: archive, the gate, --force, refusals, the demo's update + swap, the batch jobs' hook
 tests/test_readable.py           the readability rules: jumps (and what is no jump), lengths (and what is left), stems and hidden rests, the switches
+tests/test_rule_verdict.py       the rule verdict: its decisions, publishing it, the demo following it, pace/v2_decode2.sh
 tests/test_beat_decode.py        the beat decoding, its tuner, the contradicted-label audit and mask, the local tempo term, the switches, pace/v2_decode.sh
 tests/test_timing.py             the timing check: moved / kept notes, meters, lengths, whole beats (and what stays), the pipeline's switches, pace/v2_timing.sh
 tests/test_playback.py           grace notes and rolled chords in the score MIDI: timing, rolls across staves, tied chords, nothing held on

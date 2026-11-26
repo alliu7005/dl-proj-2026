@@ -43,7 +43,7 @@ from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 
 from src.pipeline import AUDIO_EXT, MIDI_EXT, MODES, ScorePipeline, V2Pipeline  # noqa: E402
 from src.release import (BEAT_DECODE, FIX_JUMPS, GLISSANDO, READABLE, TIDY, TIMING_BEATS, TIMING_CHECK,  # noqa: E402
-                         default_path)
+                         default_path)  # the decided rules' defaults; their published verdict: rule_settings
 
 MAX_MB = 100
 STAGES = {"transcribe": (0.0, 0.45), "beats": (0.45, 0.5), "grid": (0.5, 0.55), "score": (0.55, 0.95),
@@ -245,14 +245,21 @@ def main(argv=None):
     given = {k: getattr(args, k) for k in ("labeller", "meter", "ckpt") if getattr(args, k)}
     tidy = TIDY and not args.no_tidy
     gliss = GLISSANDO and not args.no_glissando
-    tcheck = TIMING_CHECK and not args.no_timing_check
-    rd, jf = READABLE and not args.no_readable, FIX_JUMPS and not args.no_fix_jumps
-    tb = TIMING_BEATS and not args.no_timing_beats
-    bd = BEAT_DECODE and not args.no_beat_decode
+    rd = READABLE and not args.no_readable
+
+    def rules():   # the benchmark's verdict (models/manifest.json, src/release.py rule_settings); --no-* still turn off
+        from src.release import rule_settings
+        r = rule_settings()
+        r = {"timing_check": r["timing_check"] and not args.no_timing_check,
+             "timing_beats": r["timing_beats"] and not args.no_timing_beats,
+             "fix_jumps": r["fix_jumps"] and not args.no_fix_jumps,
+             "beat_decode": r["beat_decode"] and not args.no_beat_decode}
+        log("rules: " + ", ".join(f"{k} {'on' if v else 'off'}" for k, v in r.items()))
+        return r
 
     def paths():
         return {**default_paths(), **given}
-    pipes = load_pipes(paths(), args.vocab, args.device, tidy, log, gliss, tcheck, rd, jf, tb, bd)
+    pipes = load_pipes(paths(), args.vocab, args.device, tidy, log, gliss, readable=rd, **rules())
     if not pipes:
         raise SystemExit("no checkpoints found: give --labeller and --meter (v2) and/or --ckpt (seq2seq)")
     for k, p in pipes.items():
@@ -260,7 +267,7 @@ def main(argv=None):
     app = create_app(pipes, Path(args.out), args.system)
     if not args.no_update and args.update_every > 0 and len(given) < 3:
         def reload():   # only the models not given on the command line come from the release
-            return load_pipes(paths(), args.vocab, args.device, tidy, log, gliss, tcheck, rd, jf, tb, bd)
+            return load_pipes(paths(), args.vocab, args.device, tidy, log, gliss, readable=rd, **rules())
         threading.Thread(target=keep_updated, args=(pipes, args.update_every, reload), kwargs={"log": log},
                          daemon=True).start()
         log(f"checking for a newer release every {args.update_every:g} min (--update-every, --no-update)")

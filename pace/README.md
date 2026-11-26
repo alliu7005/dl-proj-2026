@@ -816,6 +816,36 @@ To bring the results back:
 cd ~/scratch/dl-proj-2026 && tar czf v2_decode.tgz outputs/label_audit.json outputs/runs/nl_gq/beat_decode.json outputs/runs/nl_gq/eval_pieces_best.json outputs/runs/nl_gq_mc/config.json outputs/runs/nl_gq_mc/status.json outputs/runs/nl_gq_mc/log.csv outputs/runs/nl_gq_mc/eval_pieces_best.json outputs/runs/nl_gq_mc/beat_decode.json outputs/runs/meter_v4_gq_lt/decode.json outputs/runs/meter_v4_gq_lt/eval_meter.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-dc*.out slurm-labeller_nl_gq_mc-*.log 2>/dev/null; ls -la v2_decode.tgz
 ```
 
+## 4u. The rule verdict (after or alongside 4t)
+
+`pace/v2_decode2.sh` measures each correction rule added to the models alone (labeller + its
+tuned beat decoding), for `nl_gq` and the retrained `nl_gq_mc`, and lets the benchmark decide which
+rules the demo keeps (`scripts/rule_verdict.py`). It waits for 4t's jobs that are still queued
+(found by name), so it can be submitted while they run (4 jobs):
+
+```bash
+bash pace/v2_decode2.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `d2tests` | the test suites (CPU) | - |
+| `d2asap` | whole pieces on ASAP: `nl_gq` + decoding (+ `tb` / `jf`); `nl_gq_mc` alone, + decoding, + `tc` / `tb` / `jf`, every rule | `d2tests`; `dctune`, `dceval` if queued |
+| `d2gq` | the same on Gangqinpu's whole pieces | the same |
+| `d2final` | Beyer & Dai's metrics, both `paired.md`, the rule verdict (`outputs/rule_verdict.md`), published to the release | `d2asap`, `d2gq`; `dcfinal` if queued |
+
+The verdict, for the labeller the release serves: the beat decoding stays on unless it makes the
+system significantly worse; a correction rule (`timing_check`, `timing_beats`, `fix_jumps`) stays
+on only if it makes it significantly better on real recordings (ASAP or Gangqinpu) and worse on
+neither. `publish_model.py --settings` puts the decisions in the release manifest; the demo reads
+them at its next check (`PUBLISH=0 bash pace/v2_decode2.sh`: decided, not published).
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_decode2.tgz outputs/rule_verdict.json outputs/rule_verdict.md outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md slurm-d2*.out 2>/dev/null; ls -la v2_decode2.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

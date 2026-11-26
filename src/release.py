@@ -58,6 +58,27 @@ TIMING_BEATS = True
 BEAT_DECODE = True
 FIX_JUMPS = True
 
+# The rules that correct a model's output (as opposed to how a rhythm is engraved) are decided by the
+# benchmark (scripts/rule_verdict.py: on only when they make the whole system significantly better;
+# the beat decoding, the model side, on unless it makes it worse), published in the release
+# manifest's settings (publish_model.py --settings). These are the defaults above, overridden by it.
+DECIDED_RULES = {"timing_check": TIMING_CHECK, "timing_beats": TIMING_BEATS, "fix_jumps": FIX_JUMPS,
+                 "beat_decode": BEAT_DECODE}
+
+
+def rule_settings(models: Path | None = None) -> dict:
+    """{rule: on?} for DECIDED_RULES: the defaults, overridden by models/manifest.json's
+    settings["rules"] (the benchmark's verdict, pulled with the models)."""
+    import json
+    out = dict(DECIDED_RULES)
+    mf = Path(models or ROOT / MODELS) / "manifest.json"
+    try:
+        rules = json.loads(mf.read_text()).get("settings", {}).get("rules", {})
+    except (OSError, ValueError):
+        rules = {}
+    out.update({k: bool(v) for k, v in rules.items() if k in out})
+    return out
+
 
 def default_path(name: str) -> str:
     """models/<file> if it is there, else the training run's checkpoint (paths relative to the repo)."""
