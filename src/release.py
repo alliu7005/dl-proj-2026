@@ -53,6 +53,9 @@ READABLE = True
 # whole beats written straight where the timing fits straight sixteenths better than the labeller's
 # triplets (src/timing.py check_beats)
 TIMING_BEATS = True
+# the labeller's splits of the quarter decoded a beat at a time, fused with the timing (src/beat_decode.py;
+# the parameters tuned on validation windows, beat_decode.json next to the labeller)
+BEAT_DECODE = True
 FIX_JUMPS = True
 
 

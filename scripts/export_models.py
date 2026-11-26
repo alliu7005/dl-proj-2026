@@ -91,6 +91,8 @@ def export(name: str, run: Path, out: Path, kind: str, vocabs, decode: Path | No
         extra["config.json"] = run / "config.json"
     if kind in ("seq2seq", "labeller"):
         extra["vocab.json"] = pick_vocab(run, kind, vocabs)
+    if kind == "labeller" and (run / "beat_decode.json").exists():   # its tuned beat decoding (src/beat_decode.py)
+        extra["beat_decode.json"] = run / "beat_decode.json"
     if kind == "seq2seq":
         for p in [run / "feature_stats.json", Path("data/processed/feature_stats.json")]:
             if p.exists():

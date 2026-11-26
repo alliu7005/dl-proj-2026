@@ -42,6 +42,16 @@ default in between jobs. When it is offline, it runs on what is there.
   - Swung notes (between 2/3 and 3/4 of the beat) stay as the labeller wrote them.
   - On the user's song it moved 89 notes. In bars 64-71, where a window had read straight eighths
     as triplets, triplets went from 40% to 20% and eighths from 7% to 23%.
+- **Beat-level decoding of the labeller** (`src/beat_decode.py`, on by default,
+  `--no-beat-decode` to turn off): instead of taking each note's likeliest split of the quarter on
+  its own, the labeller's own probabilities are combined with when the note was played, and
+  optionally one family of splits (straight or triplet) is kept per beat.
+  - The settings are tuned on validation data for each labeller (`scripts/tune_beat_decode.py`,
+    `beat_decode.json` next to the checkpoint, published with it). Without that file the labeller
+    decides as before, so the demo gets it once the tenth round has tuned and published it.
+  - On ASAP's validation set alone it gained 0.1 point of position accuracy. It could not fix the
+    song's bars 64-71: the labeller writes those notes as triplets with a median confidence of
+    67,000 to 1, so the whole-beat rule below still does that work.
 - **Whole beats checked** (`src/timing.py` check_beats, on by default, `--no-timing-beats` to turn
   off): the timing check judges one note at a time, which missed the song's bars 64-71.
   - Each bar there repeats a syncopation played at 1.5, 1.71, 2.24 and 2.73: the straight 16th
@@ -78,7 +88,7 @@ default in between jobs. When it is offline, it runs on what is there.
       bar 29, half-note chords under a melody looked like 32nd beams.
     - 114 bars of the song had this.
   - Closing rests had cost duration accuracy against ASAP's scores before (`tidy_lengths`), so the
-    benchmark measures both rules (`pace/v2_readable.sh`) before they count as more than a demo
+    benchmark measures both rules (`pace/v2_decode.sh`) before they count as more than a demo
     default.
 - **Click to play from there:** a click anywhere on the score sends the player playing, else the
   one last used, else the score's, to that moment, and plays on. The bar jumps there at once.

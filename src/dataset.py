@@ -355,6 +355,10 @@ class ScoreSegmentDataset(Dataset):
         # and its validation): set by scripts/train_labeller.py --grid-noise, drawn from its own
         # stream (seed, epoch, index, 13), so every other random draw is unchanged
         self.grid_noise = None
+        # the notes whose written split of the quarter the performance contradicts (src/notelabels.py
+        # contradicted, on the true grid) leave their position and length out of the targets, and the
+        # item says which ("contradicted"): scripts/train_labeller.py --mask-contradicted
+        self.mask_contradicted = False
         self.metrical = bool(metrical)
         self._mfile = None
         self._mcache: dict = {}
@@ -588,7 +592,8 @@ class ScoreSegmentDataset(Dataset):
             feats = np.concatenate([feats, beat_features(notes[:, 1], bt, bd)], axis=1)
         extra = {}
         if nl is not None:
-            from .notelabels import grid_features, score_notes, targets
+            from .notelabels import IGNORE, contradicted, grid_features, score_notes, targets
+            contra = None
             if self.grid_override is not None and i in self.grid_override:
                 g_t, g_q, win = self.grid_override[i]
                 g_t = np.asarray(g_t) * tempo
@@ -596,14 +601,21 @@ class ScoreSegmentDataset(Dataset):
                 g0, g1 = self._nl["grid_index"][i]
                 win = score_notes(self.vocab.decode(tokens.tolist()))[1]
                 g_t, g_q = self._nl["grid_t"][g0:g1] * tempo, self._nl["grid_q"][g0:g1]
+                if self.mask_contradicted:   # on the true grid, before the tracker's errors move it
+                    _, bar_t, pos_t = grid_features(notes[:, 1], g_t, g_q, win)
+                    contra = contradicted(nl, bar_t, pos_t)
                 if self.grid_noise is not None:
                     g_t, g_q = self.grid_noise(g_t, g_q, np.random.default_rng((self.seed, self.epoch, i, 13)))
             gf, bar_est, pos_est = grid_features(notes[:, 1], g_t, g_q, win)
             feats = np.concatenate([feats, gf], axis=1)
             tg, fl = targets(nl, bar_est, self.label_space)
+            if contra is not None:          # the performance contradicts the written split: not learned
+                tg[contra > 0, 2:5] = IGNORE
             extra = {"labels": torch.from_numpy(tg), "flags": torch.from_numpy(fl),
                      "bar_est": torch.from_numpy(bar_est.astype(np.int64)),
                      "pos_est": torch.from_numpy(pos_est.astype(np.float32))}
+            if contra is not None:
+                extra["contradicted"] = torch.from_numpy(contra)
         item = {"notes": torch.from_numpy(feats), "roles": torch.from_numpy(roles),
                 "target": torch.from_numpy(target), "prompt_len": len(head), **extra}
         if self.keep_raw:  # rows follow "notes" / "roles"

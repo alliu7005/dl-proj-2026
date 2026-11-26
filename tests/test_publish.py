@@ -135,6 +135,15 @@ def test_publish():
         # --force: the worse one becomes the default anyway
         assert P.main(["--run", str(b), "--force"] + repo, hub=hub) == 0
         assert json.loads((tmp / "hub" / "me/models" / "manifest.json").read_text())["models"]["v2_meter"]["source_run"] == "meter_b"
+        # the default's own run with a file changed (re-tuned after publishing): the slot is updated
+        n = len(hub.commits)
+        (b / "decode.json").write_text(json.dumps({"decode": {"bar_weight": 4.0, "tempo_weight": 0.5}}))
+        assert P.main(["--run", str(b)] + repo, hub=hub) == 0 and len(hub.commits) == n + 1
+        assert "v2_meter/decode.json" in hub.commits[-1][1]
+        m = json.loads((tmp / "hub" / "me/models" / "manifest.json").read_text())
+        assert "files changed (decode.json)" in m["history"][-1]["why"]
+        assert json.loads((tmp / "hub" / "me/models" / "v2_meter" / "decode.json").read_text())["decode"]["bar_weight"] == 4.0
+        assert P.main(["--run", str(b)] + repo, hub=hub) == 0 and len(hub.commits) == n + 1   # and then nothing
         # refused: trained for PM2S, not tuned, not evaluated, not logged in
         pm = meter_run(runs, "meter_pm", {"clean": 0.9, "real": 0.9}, args={"tracked": "pm2s"})
         assert P.main(["--run", str(pm)] + repo, hub=hub) == 1

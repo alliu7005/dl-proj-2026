@@ -1559,7 +1559,7 @@ seq2seq stays best on classical real audio (10.65).
     triplets against straight playing (the old labeller wrote 17% there).
   - On that song it moved 89 notes, all on clear evidence: played at 0.44-0.55 of the beat and
     written at 1/3 or 2/3, or played on a sixteenth at least 0.1 of a beat from the triplet spot.
-- **The beat-level timing check** (`src/timing.py` check_beats, `_tb`, in `pace/v2_readable.sh`):
+- **The beat-level timing check** (`src/timing.py` check_beats, `_tb`, in `pace/v2_decode.sh`):
   - The per-note check left the song's bars 64-71 at 20% triplets: a syncopation played straight
     (1.5, 1.71, 2.24, 2.73) passed no single note's test.
   - Judging each beat as a whole fixed it: the straight 16ths against the eighth triplets (sixths
@@ -1567,7 +1567,7 @@ seq2seq stays best on classical real audio (10.65).
     no triplets, and the whole song went from 4.5% to 2.2%.
   - Expected: positive on Gangqinpu (pop: syncopation), about neutral on ASAP, where played
     triplets are nearer their own grid.
-- **The readability rules** (`src/readable.py`, `pace/v2_readable.sh`), each on the timing check
+- **The readability rules** (`src/readable.py`, `pace/v2_decode.sh`), each on the timing check
   (`_tc`), on ASAP and Gangqinpu:
   - `_jf` is the short-bar fix. The meter decoder's ts-change penalty makes it stretch a short bar
     rather than change the time signature. In the user's song, bars 47 and 51 (0.46 s and 0.66 s)
@@ -1580,6 +1580,69 @@ seq2seq stays best on classical real audio (10.65).
   - Expected: `_jf` small but positive where the decoder stretched bars. `_rd` may cost on duration
     against ASAP's scores, which do write 16th rests (closing every rest under an eighth cost about
     2 points before), and is kept for the demo whatever it scores, if it costs under a point.
+
+### Tenth round design: the deep-learning side of the rules (2026-11-26)
+
+The rules above (`src/timing.py`, `src/readable.py`) patch model errors after the fact. This round
+asks whether the models can be made not to make them, and keeps every rule as its own system so the
+models' scores stay separate. `pace/v2_decode.sh`, 8 jobs.
+
+**1. Beat-level decoding of the labeller** (`src/beat_decode.py`, `_bd`). The labeller picks each
+note's split of the quarter on its own (argmax of its `sub` head). The decoding scores each split as
+log p_model + a timing term (the played position against the split, weight tuned) and can keep one
+family of splits (straight or triplet; 1/2 in both) per beat, per staff or for both hands, measured
+from where the beat's on-the-quarter notes were played. `scripts/tune_beat_decode.py` picks the
+setting on validation windows with the tracker's timing errors on the grid (as in training).
+
+- ASAP validation, 600 windows (local, CPU; the released `nl_gq`):
+
+  | setting | position accuracy | length accuracy |
+  |---|---|---|
+  | the labeller's own (argmax) | 91.58% | 84.30% |
+  | timing term, weight 2, per note | **91.69%** | 84.30% |
+  | weight 4, one family per beat and staff, anchored | 91.60% | 84.00% |
+  | weight 4, one family per beat (both hands) | 91.33% | 83.82% |
+  | weight 64, per note | 90.39% | 84.30% |
+
+  Classical scores do mix straight and triplet splits within a beat, so the one-family constraint
+  costs a little there, and the timing term helps only at a small weight (the grid is noisy).
+- On the user's song it changed almost nothing (bars 64-71: 39.8% triplets -> 38.9% at the
+  strongest setting). The reason: the labeller writes 526 of the song's notes as triplets that were
+  played on a straight sixteenth (median 0.008 of a quarter from it, 0.109 from the written spot),
+  with a median confidence of **67,000 to 1**. Overturning that needs a timing weight of about 900;
+  above about 4, validation accuracy falls. A confident model error is not a decoding problem.
+- The tenth round tunes it on ASAP + Gangqinpu validation and measures it on test windows
+  (`eval_labeller.py --beat-decode`, modes `*_bd`) and whole pieces.
+
+**2. The labels the labeller learns from** (`scripts/audit_labels.py`, `nl_gq_mc`). The old
+labeller (no Gangqinpu) wrote 17% of bars 64-71 as triplets, `nl_gq` 40%: the Gangqinpu training
+pairs are the suspect. Their scores are user-made arrangements; where one writes a beat as triplets
+the pianist played straight, the pair teaches exactly the song's error.
+
+- `src/notelabels.py contradicted` judges a beat at a time on the window's true grid (the score's
+  beats timed through the alignment): written with a triplet split, every note within 0.06 of a
+  quarter of a straight sixteenth and nearer the sixteenths than the written grid by 0.03 on
+  average (and the reverse). One note's timing is no evidence: in ASAP's validation performances
+  22% of the notes written on the half beat are played more than 0.08 from it, and a per-note test
+  flagged 22-25% of ASAP's written triplets (and 10-14% of its sixteenths, the other way).
+- ASAP, 1,500 windows each, beat-level: **5.6% (train) / 7.9% (val)** of written triplets played
+  straight; 0.7% / 1.2% of written sixteenths played as triplets. That is the baseline; the audit
+  measures Gangqinpu against it.
+- `nl_gq_mc` retrains `nl_gq` (same recipe) with those notes' position and length left out of the
+  loss (`--mask-contradicted`; keep, bar and staff still learned): if the pop labels are the cause,
+  it should write fewer triplets where the timing is straight, without losing accuracy elsewhere.
+
+**3. The meter decoder's short bars** (`src/meter.py local_tempo_logprior`, `meter_v4_gq_lt`). The
+decoder pays 11.5 for a time-signature change and only about 1.8 (its written-tempo prior) for a
+step of three quarters in one beat's time, so it stretches a short bar. A second decoding pass
+weighs each step against the median written tempo of the steps around it.
+
+- On the song it removed both jumps but did not write 2/4 bars: it moved the meter by two beats
+  instead, and four bar lines (89.8-95.5 s) left the tracked downbeats (the short-bar rule keeps
+  all 18 there). Writing a single inserted short bar needs the decoder to price "one bar of another
+  meter, then back" below two time-signature changes, which is a larger change.
+- It is tuned on validation (ASAP, real, PERiScoPe and Gangqinpu: `eval_meter.py --local-tempo`)
+  and measured as its own system; `_jf` stays until something beats it.
 
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 

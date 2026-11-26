@@ -23,7 +23,9 @@ unknown (not in the manifest, no evaluation here) is not replaced without --forc
 
 Everything goes up as one commit: runs/<run>/ (the slimmed checkpoint, its files, its evaluation),
 and when promoted the slot's folder and manifest.json (the release renamed <date>-<slot>-<run> and
-tagged so). A run whose checkpoint is in the archive already, with nothing to change, is skipped.
+tagged so). A run whose checkpoint is in the archive already, with nothing to change, is skipped; the
+default's own run with a file added or changed (a labeller's beat_decode.json, tuned after it was
+published: scripts/tune_beat_decode.py) updates the slot.
 Needs `hf auth login` once (a token with write access) where it runs; without one it says so and
 exits 2 (the batch jobs go on).
 """
@@ -169,7 +171,11 @@ def main(argv=None, hub=None):
         if cur is None:
             promote, msg = True, "the slot is empty"
         elif cur.get("files", {}).get("model.pt", {}).get("sha256") == sha:
-            promote, msg = False, "it is the default already"
+            changed = sorted(set(entry["files"]) ^ set(cur.get("files", {})) |
+                             {f for f in entry["files"] if cur.get("files", {}).get(f, {}).get("sha256")
+                              not in (None, entry["files"][f]["sha256"])})
+            promote, msg = ((True, f"it is the default, its files changed ({', '.join(changed)})") if changed
+                            else (False, "it is the default already"))
         else:
             promote, msg = gate(cand, current_scores(cur, kind, Path(args.runs_dir)))
             if not current_scores(cur, kind, Path(args.runs_dir)):

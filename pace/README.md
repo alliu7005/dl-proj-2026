@@ -790,27 +790,30 @@ To bring the results back:
 cd ~/scratch/dl-proj-2026 && tar czf v2_timing.tgz outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-tc*.out 2>/dev/null; ls -la v2_timing.tgz
 ```
 
-## 4t. The readability rules on whole pieces
+## 4t. Tenth round: the model-side fixes, and every rule measured
 
-`src/readable.py` (the short-bar fix `jf`, the readability rules `rd`) and the beat-level timing
-check (`src/timing.py` check_beats, `tb`) are on in the demo. This measures each on top of the timing
-check. Submit it once the queue has room (4 jobs):
+`pace/v2_decode.sh` tests the deep-learning side of the rhythm problems the demo's rules patch, and
+scores each rule on its own (whole pieces, ASAP and Gangqinpu). It needs the queue empty (8 jobs):
 
 ```bash
-bash pace/v2_readable.sh
+bash pace/v2_decode.sh
 ```
 
 | job | what | waits for |
 |---|---|---|
-| `rdtests` | the test suites (CPU) | - |
-| `rdasap` | `nl_gq` + `meter_v4_gq:tidy,d95,tc` with `tb`, `rd`, `jf`, all three (and `tc` alone if 4s did not run) on ASAP | `rdtests` |
-| `rdgq` | the same on Gangqinpu's whole pieces | `rdtests` |
-| `rdfinal` | Beyer & Dai's metrics for every system (ASAP, Gangqinpu), both `paired.md` | `rdasap`, `rdgq` (finished or not) |
+| `dctests` | the test suites (CPU) | - |
+| `dcaudit` | the label audit (`scripts/audit_labels.py`): how often Gangqinpu's and ASAP's scores write a beat as triplets that was played straight | `dctests` |
+| `dctune` | `nl_gq`'s beat decoding tuned on validation (`beat_decode.json`), the labeller evaluated with it, published (the demo pulls it); `meter_v4_gq_lt`: the meter decoder's local tempo term tuned and evaluated | `dctests` |
+| `dctrain` | `nl_gq_mc`: `nl_gq` retrained with the contradicted labels left out of the loss (`--mask-contradicted`), evaluated, published if better | `dctests` |
+| `dceval` | `nl_gq_mc` on `meter_v4_gq`'s grids; its beat decoding tuned | `dctrain` |
+| `dcasap` | whole pieces on ASAP: `nl_gq` + `meter_v4_gq:tidy,d95,tc` alone and with `tb`, `rd`, `jf`, `bd`, the rules together, all of them; `nl_gq_mc`; `meter_v4_gq_lt` (systems already scored are kept) | `dctune`, `dceval` (finished or not) |
+| `dcgq` | the same on Gangqinpu's whole pieces | `dctune`, `dceval` (finished or not) |
+| `dcfinal` | Beyer & Dai's metrics for every system (ASAP, Gangqinpu), both `paired.md` | `dcasap`, `dcgq` (finished or not) |
 
 To bring the results back:
 
 ```bash
-cd ~/scratch/dl-proj-2026 && tar czf v2_readable.tgz outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-rd*.out 2>/dev/null; ls -la v2_readable.tgz
+cd ~/scratch/dl-proj-2026 && tar czf v2_decode.tgz outputs/label_audit.json outputs/runs/nl_gq/beat_decode.json outputs/runs/nl_gq/eval_pieces_best.json outputs/runs/nl_gq_mc/config.json outputs/runs/nl_gq_mc/status.json outputs/runs/nl_gq_mc/log.csv outputs/runs/nl_gq_mc/eval_pieces_best.json outputs/runs/nl_gq_mc/beat_decode.json outputs/runs/meter_v4_gq_lt/decode.json outputs/runs/meter_v4_gq_lt/eval_meter.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-dc*.out slurm-labeller_nl_gq_mc-*.log 2>/dev/null; ls -la v2_decode.tgz
 ```
 
 ## 5. Compare the runs and bring results back

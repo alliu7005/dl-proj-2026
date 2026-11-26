@@ -90,7 +90,7 @@ PAIRS = [  # (A, B, what A changes)
     (GQ_NL + "_meter_v4_gq_d95_tidy_tc", GQ_NL + "_meter_v4_gq_d95_tidy",
      "the timing check: triplets the timing contradicts written straight"),
     # the beat-level timing check (src/timing.py check_beats), the readability rules and the short-bar
-    # fix (src/readable.py), each on the timing check (pace/v2_readable.sh)
+    # fix (src/readable.py), each on the timing check (pace/v2_decode.sh)
     (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
      "the beat-level timing check: beats played straight written straight, not as the labeller's triplets"),
     (GQ_NL + "_meter_v4_gq_d95_tidy_tc_rd", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
@@ -100,6 +100,17 @@ PAIRS = [  # (A, B, what A changes)
     (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
      "all three (the demo's default) against the timing check alone"),
     (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf", GQ_NL + "_meter_v4_gq_d95_tidy",
+     "the rules against the plain system"),
+    # tenth round (pace/v2_decode.sh): the deep-learning side of the same problems
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_bd", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "beat-level decoding of the labeller (its probabilities + the timing, tuned on validation)"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_bd", GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb",
+     "beat-level decoding against the whole-beat rule"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_tc", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "the labeller retrained without the contradicted labels (written triplet, played straight)"),
+    (GQ_NL + "_meter_v4_gq_lt_d95_tidy_tc", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "the meter decoder with local tempo consistency"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd", GQ_NL + "_meter_v4_gq_d95_tidy",
      "the demo's default against the plain system"),
 ]
 

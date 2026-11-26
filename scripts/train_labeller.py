@@ -152,6 +152,10 @@ def main(argv=None):
     ap.add_argument("--beat-noise", default="configs/beat_noise.json", help="the tracker errors --grid-noise draws")
     ap.add_argument("--gangqinpu-share", type=float, default=0.0,
                     help="share of training windows from train_gangqinpu (scripts/build_gangqinpu_windows.py); 0 = none")
+    ap.add_argument("--mask-contradicted", action="store_true",
+                    help="leave out of the loss the positions (and lengths) of training notes whose written split of "
+                         "the quarter the performance contradicts (src/notelabels.py contradicted: written as a "
+                         "triplet, played on a straight sixteenth, or the reverse; scripts/audit_labels.py counts them)")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--eval-every", type=int, default=1000)
     ap.add_argument("--eval-loss-windows", type=int, default=400)
@@ -222,6 +226,7 @@ def main(argv=None):
     gnoise = GridNoise.from_json(args.beat_noise, args.grid_noise) if args.grid_noise > 0 else None
     for part in parts:
         part.grid_noise = gnoise
+        part.mask_contradicted = bool(args.mask_contradicted)
     note_len = np.minimum(note_len + args.context_before + args.context_after, args.max_notes)
     coll = TruncatingCollate(args.max_notes, 10 ** 9)
     batches = TokenBudgetBatches(sampler, note_len, note_len, args.batch_notes, args.batch_notes, seed=args.seed)

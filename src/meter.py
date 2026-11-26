@@ -393,6 +393,15 @@ class DecodeConfig:
     # where the anchors around it put it. 0 (the default): the grid as decoded.
     snap_s: float = 0.0
     fill_tol: float = 0.0
+    # local tempo consistency (local_tempo_logprior): the grid decoded once, each step's written
+    # tempo compared with the median of the steps around it (LOCAL_WINDOW each side), and the
+    # decoder run again with local_weight x a log-normal (local_sigma) around that median added to
+    # the step head. The decoder alone takes a short bar as a jump (three quarters in one beat's
+    # time: the user's bars 47 and 51) because a new time signature costs more than an implausible
+    # tempo for one step; this weighs the step against its neighbours. 0 (the default): off;
+    # scripts/eval_meter.py --local-tempo tunes it on validation (ASAP, real, PERiScoPe, Gangqinpu).
+    local_weight: float = 0.0
+    local_sigma: float = 0.25
 
     def to_dict(self):
         return asdict(self)
@@ -947,14 +956,46 @@ def tempo_logprior(beat_t: np.ndarray, cfg: DecodeConfig) -> np.ndarray:
     return out
 
 
+LOCAL_WINDOW = 8   # local_tempo_logprior: steps on each side whose median written tempo is the reference
+
+
+def local_tempo_logprior(beat_t: np.ndarray, q: np.ndarray, cfg: DecodeConfig, window: int = LOCAL_WINDOW) -> np.ndarray:
+    """[K, len(Q_STEPS)]: the log-weight of each step between beat k and k + 1 by how far the
+    written tempo it implies is from the median of the decoded steps around it (``q``: the first
+    decoding's quarters per beat; itself excluded; at least 3 neighbours, else 0)."""
+    t, q = np.asarray(beat_t, np.float64), np.asarray(q, np.float64)
+    out = np.zeros((len(t), len(Q_STEPS)))
+    if len(t) < 4 or cfg.local_weight <= 0 or len(q) != len(t):
+        return out
+    dt = np.clip(np.diff(t), 1e-3, None)
+    dq = np.diff(q)
+    qpm_dec = np.where(dq > 0, 60.0 * dq / dt, np.nan)
+    steps = np.asarray(Q_STEPS, np.float64)
+    for j in range(len(dt)):
+        lo, hi = max(0, j - window), min(len(dt), j + window + 1)
+        nb = np.concatenate([qpm_dec[lo:j], qpm_dec[j + 1:hi]])
+        nb = nb[np.isfinite(nb)]
+        if len(nb) < 3:
+            continue
+        ref = np.log(np.median(nb))
+        out[j] = -0.5 * cfg.local_weight * ((np.log(60.0 * steps / dt[j]) - ref) / cfg.local_sigma) ** 2
+    return out
+
+
 def grid_from_logp(beat_t: np.ndarray, lp: dict | None, cfg: DecodeConfig = DecodeConfig()) -> dict:
     """``predict_logp``'s output decoded into a grid (a single bar without it), with cfg's tempo
-    prior added to the step head's log-probabilities when its weight is above 0, then the piece's
-    note-value level chosen (``choose_level``; with cfg's level weights at 0, the grid as decoded)."""
+    prior added to the step head's log-probabilities when its weight is above 0 (and with
+    cfg.local_weight above 0, decoded a second time with local_tempo_logprior added), then the
+    piece's note-value level chosen (``choose_level``; with cfg's level weights at 0, the grid as
+    decoded)."""
     if lp is None:
         return grid_from_states(beat_t, [(0, 0)] * len(beat_t))
     step = lp["step"] + tempo_logprior(beat_t, cfg) if cfg.tempo_weight > 0 else lp["step"]
     states, steps = decode(lp["bar"], step, lp["ts"], cfg, return_steps=True)
+    if cfg.local_weight > 0 and len(beat_t) >= 4:
+        first = grid_from_states(beat_t, states, steps)
+        step = step + local_tempo_logprior(beat_t, first["q"], cfg)
+        states, steps = decode(lp["bar"], step, lp["ts"], cfg, return_steps=True)
     return choose_level(grid_from_states(beat_t, states, steps), cfg, lp.get("tempo"))
 
 

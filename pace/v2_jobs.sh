@@ -25,7 +25,8 @@
 #   systems <spec>...      whole pieces (scripts/system_scores.py): <labeller>+<meter> = v2 (only
 #                          with both models finished and the meter model evaluated), with options
 #                          after a colon, comma-separated: tidy (--tidy), gl (--glissando), tc
-#                          (--timing-check), tb (--timing-beats), rd (--readable), jf (--fix-jumps),
+#                          (--timing-check), tb (--timing-beats), bd (--beat-decode), rd (--readable),
+#                          jf (--fix-jumps),
 #                          d<percent> (--delete-above,
 #                          e.g. d95), keepall (--delete-above 1), missing (--only-missing: what an
 #                          earlier job wrote is kept), pm (PM2S's beats on clean MIDI: --clean-beats
@@ -56,6 +57,11 @@
 #                          --tracker pm2s: <condition>_pm2s), the others with Beat This!'s real beats
 #                          of Gangqinpu's test recordings (--real-tracked: gangqinpu_real; a model
 #                          that reads PM2S as well gets its beats there too)
+#   beatdecode <nl>...     the labeller's beat decoding (src/beat_decode.py) tuned on validation
+#                          (scripts/tune_beat_decode.py: <nl>/beat_decode.json), the labeller
+#                          evaluated with it (true grid, meter_v4_gq's grids: modes *_bd), published
+#   localtempo <meter>     <meter>_lt: the same checkpoint with the decoder's local tempo term
+#                          (src/meter.py local_tempo_logprior) tuned on validation and evaluated
 #   gqbase <meter>...      these finished meter models evaluated on the Gangqinpu test set too
 #                          (eval_meter.py --conditions gangqinpu, their own decoders), so the new
 #                          models trained with it have something to beat
@@ -126,6 +132,9 @@ nl_flags() {
     nl_base_gn1_f1) echo "--size base --grid-noise 1.0 --select onset_f1" ;;
     # nl_base_gn's recipe with Gangqinpu's scores as half of the training windows (scripts/build_gangqinpu_windows.py)
     nl_gq) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5" ;;
+    # nl_gq's recipe, the training notes whose written split the performance contradicts left out of
+    # the loss (src/notelabels.py contradicted; scripts/audit_labels.py)
+    nl_gq_mc) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5 --mask-contradicted" ;;
     *) echo "unknown labeller run $1 (add it to nl_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
   esac
 }
@@ -161,6 +170,7 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
       gl) out="$out --glissando" ;;
       tc) out="$out --timing-check" ;;
       tb) out="$out --timing-beats" ;;
+      bd) out="$out --beat-decode" ;;
       rd) out="$out --readable" ;;
       jf) out="$out --fix-jumps" ;;
       keepall) out="$out --delete-above 1" ;;
@@ -169,13 +179,13 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
       rpm) out="$out --real-beats pm2s" ;;
       rsb) out="$out --real-beats synth" ;;
       d[0-9]*) out="$out --delete-above 0.${o#d}" ;;
-      *) echo "unknown v2 option $o (tidy, gl, tc, tb, rd, jf, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
+      *) echo "unknown v2 option $o (tidy, gl, tc, tb, bd, rd, jf, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
     esac
   done
   echo "$out"
 }
 
-task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo, levelexp, refine, gqbase, trackers}
+task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo, levelexp, refine, gqbase, trackers, beatdecode, localtempo}
 shift
 case "$task" in
   meters)
@@ -218,6 +228,26 @@ case "$task" in
       in_list "$nl" "$fresh" && publish "$nl"   # finished in this job: published
     done
     exit $ok ;;
+  beatdecode)   # <labeller>...: its beat decoding tuned on validation, the labeller evaluated with it, published
+    ok=0
+    for nl in "$@"; do
+      if ! done_run "$nl"; then echo "$nl: skipped, not finished"; ok=1; continue; fi
+      python scripts/tune_beat_decode.py --run "$nl" --normal-priority || { ok=1; continue; }
+      python scripts/eval_labeller.py --run "$nl" --beat-decode --normal-priority || ok=1
+      python scripts/eval_labeller.py --run "$nl" --beat-decode --grid meter:meter_v4_gq --conditions "$EVAL_CONDITIONS" \
+        --normal-priority || ok=1
+      publish "$nl"   # the default's files changed (beat_decode.json): the demo pulls it
+    done
+    exit $ok ;;
+  localtempo)   # <meter>: a copy <meter>_lt (the same checkpoint) with the local tempo term tuned, evaluated
+    m=${1:?localtempo <meter>}
+    lt="${m}_lt"
+    if ! done_run "$m" || [ ! -f "outputs/runs/$m/decode.json" ]; then echo "$m: not finished or not tuned"; exit 1; fi
+    mkdir -p "outputs/runs/$lt"
+    ln -sf "../$m/best.pt" "outputs/runs/$lt/best.pt"
+    for f in config.json status.json decode.json; do cp "outputs/runs/$m/$f" "outputs/runs/$lt/$f"; done
+    python scripts/eval_meter.py --run "$lt" --local-tempo || exit 1
+    exit 0 ;;
   grids)
     ok=0
     for m in $GRIDS_REEVAL; do  # their tuned decoder (decode.json) kept

@@ -590,7 +590,8 @@ class V2Pipeline(_FrontEnd):
     def __init__(self, labeller_ckpt: str | Path, meter_ckpt: str | Path, vocab: str | Path | None = None,
                  device: str = "auto", window_notes: int = 128, delete_above: float = DELETE_ABOVE,
                  tidy: bool = False, glissando: bool = False, timing_check: bool = False,
-                 readable: bool = False, fix_jumps: bool = False, timing_beats: bool = False):
+                 readable: bool = False, fix_jumps: bool = False, timing_beats: bool = False,
+                 beat_decode: bool = False):
         """``glissando``: find glissandos in the notes (src/glissando.py) and write each as its first
         and last note joined by a "gliss." line, not as the run of notes. ``timing_check``: a note
         written on a triplet position but played on a straight eighth or sixteenth is moved there
@@ -598,7 +599,10 @@ class V2Pipeline(_FrontEnd):
         trimmed, stems by voice (src/readable.py). ``fix_jumps``: a bar the meter model's decoder
         stretched with a jump is shortened instead (src/readable.py fix_jumps). ``timing_beats``: a
         beat whose timing fits straight sixteenths better than the labeller's triplets is written
-        straight (src/timing.py check_beats). All off by default:
+        straight (src/timing.py check_beats). ``beat_decode``: the labeller's splits of the quarter
+        decoded a beat at a time, fused with the timing (src/beat_decode.py), with the parameters
+        tuned for the checkpoint (beat_decode.json next to it; without one, each note's likeliest
+        split as before, and the stats say so). All off by default:
         the scoring script measures each as its own system."""
         from .labeller import load_labeller
         from .meter import DecodeConfig, build_meter_model
@@ -636,6 +640,9 @@ class V2Pipeline(_FrontEnd):
         self.readable = bool(readable)
         self.timing_beats = bool(timing_beats)
         self.fix_jumps = bool(fix_jumps)
+        from .beat_decode import BeatDecode
+        self.beat_params = BeatDecode.load(labeller_ckpt.parent)   # None: not tuned for this labeller
+        self.beat_decode = bool(beat_decode)
         self.info = {"system": "v2", "labeller": str(labeller_ckpt), "meter": str(meter_ckpt),
                      "params_M": round((n_lab + n_met) / 1e6, 1), "device": str(self.device),
                      "decode": self.decode_cfg.to_dict()}
@@ -696,7 +703,8 @@ class V2Pipeline(_FrontEnd):
               progress: Progress = _noop, delete_above: float | None = None,
               tidy: bool | None = None, glissandi: list | None = None,
               drop: np.ndarray | None = None, timing_check: bool | None = None,
-              readable: bool | None = None, timing_beats: bool | None = None) -> tuple[list[str], dict]:
+              readable: bool | None = None, timing_beats: bool | None = None,
+              beat_decode: bool | None = None) -> tuple[list[str], dict]:
         """Every note labelled in its window, all rendered in the grid's bars as one score.
         ``delete_above``: leave a note out only above this p(delete); ``tidy``: written lengths stop
         at the next onset of their staff when they run just past it (tidy_lengths). Defaults: the
@@ -718,13 +726,15 @@ class V2Pipeline(_FrontEnd):
         progress("score", 0.0, f"labelling {len(windows)} windows")
         items, frames = self.items(windows, grid)
         coll = TruncatingCollate(self.cfg.max_notes, 10 ** 9)
+        bd = self.beat_decode if beat_decode is None else bool(beat_decode)
+        bparams = self.beat_params if bd else None   # None also when not tuned
         placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
-                                delete_above=delete_above)
+                                delete_above=delete_above, beat_decode=bparams)
         staves = piece_staves([p.staff for pl in placed for p in pl])
         folded = sum(p.staff >= staves for pl in placed for p in pl)
         if folded:  # a stray third / fourth staff: those notes on their likeliest of the staves kept
             placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
-                                    staves=staves, delete_above=delete_above)
+                                    staves=staves, delete_above=delete_above, beat_decode=bparams)
         notes_out = []
         skip = np.asarray(drop, bool) if drop is not None else np.zeros(len(notes), bool)
         for w, win, pl in zip(windows, frames, placed):
@@ -778,6 +788,8 @@ class V2Pipeline(_FrontEnd):
                         "tidy": tidy, "lengths_tidied": tidied, "glissandi": gl,
                         "timing_check": timing, "timing_fixed": fixed,
                         "timing_beats": tb, "timing_beats_fixed": beat_fixed,
+                        "beat_decode": ((self.beat_params.to_dict() if self.beat_params else "not tuned") if bd
+                                        else False),
                         "readable": rd, "rests_closed": closed, "overlaps_trimmed": trimmed,
                         "follow": follow_map(grid, notes_out)}
 
@@ -786,12 +798,12 @@ class V2Pipeline(_FrontEnd):
             beat_checkpoint: str = "final0", delete_above: float | None = None, tidy: bool | None = None,
             beat_source: str = "beat_this", glissando: bool | None = None, timing_check: bool | None = None,
             readable: bool | None = None, fix_jumps: bool | None = None, timing_beats: bool | None = None,
-            **_) -> Result:
+            beat_decode: bool | None = None, **_) -> Result:
         """``beats``: (times, down) in the input's seconds, given instead of tracking them.
         ``beat_checkpoint``: the Beat This! model that tracks them (scripts/system_scores.py gives
         each ASAP test piece the cross-validation model that never heard it). ``beat_source``:
         beat_this (the recording; a MIDI input rendered to audio first) or pm2s (PM2S on the notes:
-        the MIDI, or the transcription of a recording). ``glissando``, ``timing_check``, ``timing_beats``, ``readable``,
+        the MIDI, or the transcription of a recording). ``glissando``, ``timing_check``, ``timing_beats``, ``beat_decode``, ``readable``,
         ``fix_jumps``: the pipeline's settings if None."""
         if beat_source not in BEAT_SOURCES:
             raise ValueError(f"beat_source must be one of {BEAT_SOURCES}, not {beat_source!r}")
@@ -856,7 +868,7 @@ class V2Pipeline(_FrontEnd):
         drop = ~inner_mask(len(notes), found) if found else None
         tokens, counts = self.label(notes, pedal, grid, progress, delete_above=delete_above, tidy=tidy,
                                     glissandi=found, drop=drop, timing_check=timing_check, readable=readable,
-                                    timing_beats=timing_beats)
+                                    timing_beats=timing_beats, beat_decode=beat_decode)
         gl = counts.pop("glissandi")
         timing["score_s"] = round(time.perf_counter() - t, 1)
         res.tokens = tokens

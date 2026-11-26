@@ -20,7 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.pipeline import BEAT_SOURCES, GUARD_MARGIN, MODES, ScorePipeline, V2Pipeline  # noqa: E402
-from src.release import DELETE_ABOVE, FIX_JUMPS, GLISSANDO, READABLE, TIDY, TIMING_BEATS, TIMING_CHECK, default_path  # noqa: E402
+from src.release import (BEAT_DECODE, DELETE_ABOVE, FIX_JUMPS, GLISSANDO, READABLE, TIDY, TIMING_BEATS,  # noqa: E402
+                         TIMING_CHECK, default_path)
 
 
 def main():
@@ -48,6 +49,7 @@ def main():
                     help="v2: keep written lengths that run just past the next onset (default: trim them)")
     ap.add_argument("--no-glissando", action="store_true", help="v2: write each note of a glissando, not its first and last joined by a gliss. line")
     ap.add_argument("--no-timing-check", action="store_true", help="v2: keep the labeller's triplets even where the timing says straight eighths (src/timing.py)")
+    ap.add_argument("--no-beat-decode", action="store_true", help="v2: take each note's likeliest split of the quarter, not one decoded a beat at a time with the timing (src/beat_decode.py)")
     ap.add_argument("--no-timing-beats", action="store_true", help="v2: keep the labeller's triplets in beats whose timing fits straight sixteenths better (src/timing.py check_beats)")
     ap.add_argument("--no-readable", action="store_true", help="v2: keep rests of a 16th or less, overlaps of a 16th or less, and stems as written (src/readable.py)")
     ap.add_argument("--no-fix-jumps", action="store_true", help="v2: keep the meter model's stretched bars (a jump of beats in one beat's time) as decoded")
@@ -59,7 +61,8 @@ def main():
                           glissando=GLISSANDO and not args.no_glissando,
                           timing_check=TIMING_CHECK and not args.no_timing_check,
                           readable=READABLE and not args.no_readable, fix_jumps=FIX_JUMPS and not args.no_fix_jumps,
-                          timing_beats=TIMING_BEATS and not args.no_timing_beats)
+                          timing_beats=TIMING_BEATS and not args.no_timing_beats,
+                          beat_decode=BEAT_DECODE and not args.no_beat_decode)
     else:
         pipe = ScorePipeline(args.ckpt, args.vocab, args.device)
     print(f"model: {pipe.info}", flush=True)

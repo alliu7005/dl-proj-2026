@@ -154,13 +154,15 @@ def keep_mask(keep_logits: torch.Tensor, delete_above: float = 0.5) -> torch.Ten
 
 
 def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, staves: int = 0,
-                 delete_above: float = 0.5) -> list[Placed]:
+                 delete_above: float = 0.5, pos_est=None, beat_decode=None) -> list[Placed]:
     """Item ``b`` of a batch's predictions -> the notes to render: every own note (window or
     carried, ``own`` mask over the item's notes; context notes belong to other windows) the keep
     head keeps, at its predicted bar (grid bar + correction, never before bar 0), position,
     length, staff and flags. ``pitches`` / ``bar_est``: the item's notes (performed pitches).
     ``staves``: only the first that many staves (each note on its likeliest of them; 0 = all).
-    ``delete_above``: see keep_mask."""
+    ``delete_above``: see keep_mask. ``beat_decode`` (src/beat_decode.py BeatDecode) with
+    ``pos_est`` (each note's position on the grid, quarters from its grid bar line): the splits of
+    the quarter decoded a beat at a time, fused with the timing, instead of each note's likeliest."""
     n = min(len(own), out["keep"].shape[1])  # the batch pads every item to its longest one
     keep = keep_mask(out["keep"][b, :n], delete_above).cpu().numpy()
     pick = {k: out[k][b, :n].argmax(-1).cpu().numpy() for k in ("delta", "pos", "sub", "dur")}
@@ -169,6 +171,14 @@ def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, st
         staff_logits = staff_logits[:, :staves]
     pick["staff"] = staff_logits.argmax(-1).cpu().numpy()
     flags = (out["flags"][b, :n] > 0).cpu().numpy()
+    if beat_decode is not None and beat_decode.active and pos_est is not None:
+        from .beat_decode import Families, decode_item
+        fams = getattr(space, "_families", None)
+        if fams is None:
+            fams = space._families = Families(space)
+        pick["sub"], pick["dur"] = decode_item(out["sub"][b, :n].float().cpu().numpy(),
+                                               out["dur"][b, :n].float().cpu().numpy(), pick, bar_est, pos_est,
+                                               np.asarray(own[:n], bool) & keep, fams, beat_decode)
     res = []
     for i in np.nonzero(np.asarray(own[:n], bool) & keep)[0]:
         grace, arp, orns = unflag(int(sum(int(v) << k for k, v in enumerate(flags[i]))))
@@ -191,11 +201,13 @@ def load_labeller(path, device) -> NoteLabeller:
 
 @torch.no_grad()
 def predict_placed(model, items: list[dict], coll, device, amp: bool, space, batch_size: int = 32,
-                   carried: bool = True, staves: int = 0, delete_above: float = 0.5) -> list[list[Placed]]:
+                   carried: bool = True, staves: int = 0, delete_above: float = 0.5,
+                   beat_decode=None) -> list[list[Placed]]:
     """Label dataset items (ScoreSegmentDataset(notelabels=True), or src/pipeline.py V2Pipeline's
     windows): the notes each keeps, placed in its window's bars. ``carried``: also the notes carried
     over from the window before (a window's target writes their continuation; a whole piece
-    places each note once, in its own window). ``staves``, ``delete_above``: see placed_notes."""
+    places each note once, in its own window). ``staves``, ``delete_above``, ``beat_decode`` (with
+    the items' "pos_est"): see placed_notes."""
     from .dataset import ROLE_CARRIED, ROLE_WINDOW
     model.eval()
     res = [None] * len(items)
@@ -209,13 +221,14 @@ def predict_placed(model, items: list[dict], coll, device, amp: bool, space, bat
         for r, i in enumerate(idx):
             it = items[i]
             own = (it["roles"] <= (ROLE_CARRIED if carried else ROLE_WINDOW)).numpy()
+            pe = it["pos_est"].numpy() if "pos_est" in it else None
             res[i] = placed_notes(out, r, it["notes"][:, 0].numpy(), it["bar_est"].numpy(), own, space, staves,
-                                  delete_above)
+                                  delete_above, pos_est=pe, beat_decode=beat_decode)
     return res
 
 
 def predict_windows(model, items: list[dict], windows: list, coll, device, amp: bool, space,
-                    batch_size: int = 32) -> list[list[str]]:
+                    batch_size: int = 32, beat_decode=None) -> list[list[str]]:
     """Label dataset items (ScoreSegmentDataset(notelabels=True)) and render each as tokens in the
     frame ``windows[k]`` (src/notelabels.py Window: its bars' time / key signatures; Phase 1 gives
     the target's own). Returns one token list per item, in order. The window's own notes only:
@@ -223,5 +236,6 @@ def predict_windows(model, items: list[dict], windows: list, coll, device, amp: 
     by the window it was struck in, as V2Pipeline renders a piece, and as the label ceiling counts
     it), so its untrained outputs are not rendered."""
     from .notelabels import render
-    placed = predict_placed(model, items, coll, device, amp, space, batch_size, carried=False)
+    placed = predict_placed(model, items, coll, device, amp, space, batch_size, carried=False,
+                            beat_decode=beat_decode)
     return [render(w, pl) for w, pl in zip(windows, placed)]

@@ -28,6 +28,7 @@ scripts/build_metrical.py        precompute the metrical labels of every split (
 src/pipeline.py                  audio / MIDI -> MusicXML: ScorePipeline (seq2seq, window by window), V2Pipeline (grid + labeller)
 src/timing.py                    the timing check: a triplet-written note played on a straight eighth / sixteenth written there (quarter-beat meters, clear timing only); check_beats: a whole beat played straight written straight
 src/playback.py                  the score MIDI plays grace notes (just before their beat) and rolled chords (spread upwards) as written: music21's MIDI export does not
+src/beat_decode.py               beat-level decoding of the labeller's splits of the quarter: its probabilities + the timing, one family per beat (tuned per labeller: beat_decode.json)
 src/readable.py                  the readability rules: bars the meter decoder stretched with a jump shortened (fix_jumps), 16th rests closed / overlaps trimmed (readable_lengths), stems by voice and the other voices' rests hidden (stem_voices)
 src/glissando.py                 glissandos: found in the notes (fast one-way runs on one key colour), their two ends in the score, the gliss. line, the swept notes in the score MIDI
 src/synth.py                     MIDI -> audio (additive piano), so Beat This! can track a MIDI input
@@ -56,6 +57,8 @@ scripts/build_notelabels.py      v2: labels + true grids per split -> <split>/no
 scripts/label_ceiling.py         v2: every window rendered from its true labels (the labeller's ceiling)
 scripts/train_labeller.py        v2: train the note labeller
 scripts/eval_labeller.py         v2: evaluate it on the test sets (true grid: grid_true; a meter model's: grid_meter_<run>)
+scripts/tune_beat_decode.py      tunes a labeller's beat decoding on validation windows (writes beat_decode.json)
+scripts/audit_labels.py          how often a dataset's scores write a beat the performance contradicts (triplet / straight)
 src/meter.py                     v2: the meter model (beat + note-encoder inputs, targets, alignment ground truth, augmentation, transformer, consistent Viterbi decoding, beat times refined from the notes)
 src/preprocessing/gangqinpu.py   v2: Gangqinpu rows -> meter-model performances (transcribed notes, trusted bars' grids); its written scores -> score.py measures, labeller windows (aligned notes), references
 src/pm2s_beats.py                PM2S's beat tracker (Liu et al. 2022, MIT, vendored): beats from the notes, an alternative to Beat This! for v2
@@ -88,7 +91,7 @@ pace/v2_release.sh               the release: its configuration scored on whole 
 pace/v2_level.sh                 v2 fifth round: the written-tempo head for the note-value level, trained, tuned, scored
 pace/v2_gangqinpu.sh             v2 sixth round: meter models trained with Gangqinpu; the grid's beat times taken from the notes
 pace/v2_pm2s.sh                  v2 seventh round: PM2S retrained without our test pieces, its beats on whole pieces, a meter model for it
-pace/v2_readable.sh              the beat-level timing check, the readability rules and the short-bar fix on whole pieces, each on the timing check, ASAP and Gangqinpu (4 jobs)
+pace/v2_decode.sh                v2 tenth round: beat decoding tuned, the label audit, nl_gq_mc (contradicted labels masked), meter_v4_gq_lt (local tempo), every rule on whole pieces (8 jobs)
 pace/v2_timing.sh                the timing check on whole pieces, ASAP and Gangqinpu (3 jobs; pace/v2_pm2s2.sh measures it too)
 pace/v2_pm2s2.sh                 v2 ninth round: PM2S retrained with stable optimisation (two learning rates, the better picked), its meter model, MIDI input on ASAP and Gangqinpu
 pace/v2_gqlabel.sh               v2 eighth round: the labeller trained with Gangqinpu's scores, whole pieces on Gangqinpu's test split, meter_v4_gq longer, the meter model's second seed
@@ -107,7 +110,8 @@ tests/test_gangqinpu.py          v2: Gangqinpu notes, beat filters, grids, relea
 tests/test_gangqinpu_scores.py   v2: Gangqinpu's written scores (ties, graces, pickups, parts), windows and labels, extra-notes-only noise, build + train + evaluate, whole-piece inputs, pace/v2_gqlabel.sh
 tests/test_pm2s.py               PM2S: post-processing, the tracker on random weights, the weights' hash, beat_source, system names
 tests/test_publish.py            publishing: archive, the gate, --force, refusals, the demo's update + swap, the batch jobs' hook
-tests/test_readable.py           the readability rules: jumps (and what is no jump), lengths (and what is left), stems and hidden rests, the switches, pace/v2_readable.sh
+tests/test_readable.py           the readability rules: jumps (and what is no jump), lengths (and what is left), stems and hidden rests, the switches
+tests/test_beat_decode.py        the beat decoding, its tuner, the contradicted-label audit and mask, the local tempo term, the switches, pace/v2_decode.sh
 tests/test_timing.py             the timing check: moved / kept notes, meters, lengths, whole beats (and what stays), the pipeline's switches, pace/v2_timing.sh
 tests/test_playback.py           grace notes and rolled chords in the score MIDI: timing, rolls across staves, tied chords, nothing held on
 tests/test_glissando.py          glissandos: the detector (and what it must not take), the ends, the line and the MIDI, V2Pipeline on / off, the switches

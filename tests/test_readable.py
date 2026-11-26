@@ -7,7 +7,7 @@ everything after it back; a long gap at the usual tempo (the tracker missed beat
 bar keeps two beats; a step that leaves its bar is left. readable_lengths: short rests closed,
 small overlaps trimmed, not across the bar line, not into an unwritable length or across grids,
 grace notes left. stem_voices: stems by voice, the other voices' rests hidden. The pipeline's
-switches, the system names, the demo's, the CLI's and the jobs' switches; pace/v2_readable.sh.
+switches, the system names, the demo's, the CLI's and the jobs' switches.
 """
 from __future__ import annotations
 
@@ -151,47 +151,6 @@ def test_pipeline_and_switches():
         assert on.stats["readable"] is True and "stems_set" in on.stats["export"]
         assert on.stats["notes_kept"] == off.stats["notes_kept"]           # lengths and stems, never notes
         assert (tmp / "on" / "score.musicxml").exists()
-
-
-def test_batch():
-    """pace/v2_readable.sh: 4 jobs, both datasets after the tests, the scoring after both."""
-    import shutil
-    import subprocess
-
-    from tests.batch_env import batch_env
-    if shutil.which("bash") is None:
-        print("  (skipped: no bash)")
-        return
-    with tempfile.TemporaryDirectory() as t:
-        tmp = Path(t)
-        (tmp / "pace").mkdir()
-        shutil.copy(ROOT / "pace" / "v2_readable.sh", tmp / "pace")
-        for f in ("outputs/runs/nl_gq/best.pt", "outputs/runs/meter_v4_gq/best.pt", "outputs/system_eval/manifest.json",
-                  "outputs/system_eval_gangqinpu/manifest.json", "bd/MIDI2ScoreTF.ckpt"):
-            (tmp / f).parent.mkdir(parents=True, exist_ok=True)
-            (tmp / f).write_text("x")
-        (tmp / "bin").mkdir()
-        (tmp / "bin" / "sbatch").write_text('#!/bin/bash\nn=$(( $(cat "$SUBMITS.n" 2>/dev/null || echo 100) + 1 ))\n'
-                                            'echo $n > "$SUBMITS.n"\nprintf "%s\\t%s\\n" "$n" "$*" >> "$SUBMITS"\necho $n\n')
-        (tmp / "bin" / "sbatch").chmod(0o755)
-        r = subprocess.run([shutil.which("bash"), "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/v2_readable.sh'], cwd=tmp,
-                           env=batch_env(SUBMITS=str(tmp / "jobs.txt"), USER="me", BD=str(tmp / "bd")),
-                           capture_output=True, text=True)
-        assert r.returncode == 0, r.stdout + r.stderr
-        by = {cmd.split("-J ")[1].split()[0]: (jid, cmd)
-              for jid, cmd in (ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines())}
-        assert list(by) == ["rdtests", "rdasap", "rdgq", "rdfinal"]
-        assert "tests.test_readable" in by["rdtests"][1]
-        m = "nl_gq+meter_v4_gq:tidy,d95,tc"
-        for j in ("rdasap", "rdgq"):
-            s = by[j][1]
-            assert f"afterok:{by['rdtests'][0]}" in s
-            assert f"systems {m},missing {m},tb {m},rd {m},jf {m},tb,rd,jf" in s, s
-        assert "--manifest outputs/system_eval_gangqinpu/manifest.json" in by["rdgq"][1]
-        assert "system_eval_gangqinpu" not in by["rdasap"][1]
-        f = by["rdfinal"][1]
-        assert f"afterany:{by['rdasap'][0]}:{by['rdgq'][0]}" in f and f.count("beyer_dai.py score") == 2
-        assert "compare_systems.py" in f
 
 
 def main():

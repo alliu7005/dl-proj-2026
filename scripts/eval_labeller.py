@@ -16,7 +16,9 @@ grids of the transcriptions with Beat This!'s beats, periscope its grids of the 
 transcriptions with the simulated tracker, one per segment: a window takes the one whose span
 holds it), each window's bars, time signatures and key signature taken from it (src/notelabels.py window_frame), so nothing comes from the score. The
 result is stored as mode ``grid_true`` / ``grid_meter_<run>`` in the run's
-eval_pieces_<ckpt>.json, next to the other systems' modes, so scripts/compare_runs.py tables it;
+eval_pieces_<ckpt>.json, next to the other systems' modes, so scripts/compare_runs.py tables it
+(with --beat-decode: the splits of the quarter decoded a beat at a time with the run's tuned
+beat_decode.json, src/beat_decode.py, as mode ``grid_true_bd`` / ``grid_meter_<run>_bd``);
 per-head accuracies are kept with it. Conditions: clean (ASAP test, clean MIDI), synthetic (the
 same with the fixed synthetic noise draw), real (Transkun transcriptions), periscope, gangqinpu
 (Gangqinpu's test scores, scripts/build_gangqinpu_windows.py: their recordings' aligned Transkun
@@ -106,6 +108,8 @@ def main(argv=None):
     ap.add_argument("--ckpt", default="best.pt")
     ap.add_argument("--conditions", default="clean,synthetic,real,periscope,gangqinpu,gangqinpu_real")
     ap.add_argument("--grid", default="true", help="true, or meter:<run> (a meter model's decoded grids)")
+    ap.add_argument("--beat-decode", action="store_true",
+                    help="decode the splits a beat at a time with <run>/beat_decode.json (scripts/tune_beat_decode.py)")
     ap.add_argument("--limit-perfs", type=int, default=0)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", default="auto")
@@ -123,6 +127,14 @@ def main(argv=None):
     ctx = {"context_before": cfg.context_before, "context_after": cfg.context_after}
     coll = TruncatingCollate(cfg.max_notes, 10 ** 9)
     mode = grid_mode(args.grid)
+    bd = None
+    if args.beat_decode:
+        from src.beat_decode import FILE, BeatDecode
+        bd = BeatDecode.load(run)
+        if bd is None:
+            raise SystemExit(f"no {run / FILE}: run scripts/tune_beat_decode.py --run {args.run} first")
+        mode += "_bd"
+        print(f"beat decoding: {bd.to_dict()}")
     out_file = run / f"eval_pieces_{Path(args.ckpt).stem}.json"
     nm = NoiseModel.from_json("configs/noise_stats.json")
     nm.cfg.clean_prob = 0.0
@@ -179,7 +191,8 @@ def main(argv=None):
         items = [ds[i] for i in windows]
         gts = [ds.vocab.decode(it["target"][it["prompt_len"]:-1].tolist()) for it in items]
         wins = [frames[i][2] for i in windows] if frames else [score_notes(g)[1] for g in gts]
-        preds = predict_windows(model, items, wins, coll, device, amp, ds.label_space, args.batch_size)
+        preds = predict_windows(model, items, wins, coll, device, amp, ds.label_space, args.batch_size,
+                                beat_decode=bd)
         acc, acc_unseen = Accumulator(), Accumulator()
         for i, g, p in zip(windows, gts, preds):
             acc.add(g, p)
