@@ -18,8 +18,14 @@ holds it), each window's bars, time signatures and key signature taken from it (
 result is stored as mode ``grid_true`` / ``grid_meter_<run>`` in the run's
 eval_pieces_<ckpt>.json, next to the other systems' modes, so scripts/compare_runs.py tables it;
 per-head accuracies are kept with it. Conditions: clean (ASAP test, clean MIDI), synthetic (the
-same with the fixed synthetic noise draw), real (Transkun transcriptions), periscope; a split
-without notelabels.npz (scripts/build_notelabels.py) is skipped with the reason.
+same with the fixed synthetic noise draw), real (Transkun transcriptions), periscope, gangqinpu
+(Gangqinpu's test scores, scripts/build_gangqinpu_windows.py: their recordings' aligned Transkun
+notes) and gangqinpu_real (the same windows; with a meter model's grids, the ones it decoded from
+Beat This!'s beats of the recordings instead of the simulated tracker's); a split without
+notelabels.npz (scripts/build_notelabels.py) is skipped with the reason. The meter model's
+Gangqinpu grids cover only the runs of bars whose beats the release timed reliably
+(src/preprocessing/gangqinpu.py): a window outside all of them is left out of that grid's result
+(and counted), as there is no decoded grid to give it.
 """
 from __future__ import annotations
 
@@ -42,11 +48,19 @@ from src.labeller import head_counts, load_labeller, predict_windows  # noqa: E4
 from src.notelabels import LABEL_FILE, score_notes, window_frame  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 
-SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed", "periscope": "test_periscope"}
+SPLITS = {"clean": "test", "synthetic": "test", "real": "test_transcribed", "periscope": "test_periscope",
+          "gangqinpu": "test_gangqinpu", "gangqinpu_real": "test_gangqinpu"}
 # 2: a window's notes carried over from the window before are no longer rendered (no label to learn:
 # their untrained outputs were scored), and context notes match the inference pipeline's
 LABELLER_EVAL = 2
-METER_GRIDS = {"clean": "clean", "synthetic": "clean", "real": "real", "periscope": "periscope"}  # -> eval_meter.py's grids
+METER_GRIDS = {"clean": "clean", "synthetic": "clean", "real": "real", "periscope": "periscope",  # -> eval_meter.py's grids
+               "gangqinpu": "gangqinpu", "gangqinpu_real": "gangqinpu_real"}
+SPAN_ONLY = ("gangqinpu", "gangqinpu_real")   # grids of reliable runs of bars only: windows outside them are left out
+
+
+def in_span(cands: list, t: float) -> bool:
+    """Whether time ``t`` lies inside one of a performance's grids."""
+    return any((g.get("span") or (-np.inf, np.inf))[0] <= t <= (g.get("span") or (-np.inf, np.inf))[1] for g in cands)
 
 
 def grid_for(cands: list, t: float) -> dict:
@@ -90,7 +104,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
     ap.add_argument("--ckpt", default="best.pt")
-    ap.add_argument("--conditions", default="clean,synthetic,real,periscope")
+    ap.add_argument("--conditions", default="clean,synthetic,real,periscope,gangqinpu,gangqinpu_real")
     ap.add_argument("--grid", default="true", help="true, or meter:<run> (a meter model's decoded grids)")
     ap.add_argument("--limit-perfs", type=int, default=0)
     ap.add_argument("--batch-size", type=int, default=32)
@@ -144,7 +158,16 @@ def main(argv=None):
         if grids is not None:
             names = [p for p in names if p in grids]
         windows = [i for p in names for i in sorted(perfs[p], key=lambda i: ds.store.meta[i]["win"])]
-        frames = {}
+        frames, outside = {}, 0
+        if grids is not None and cond in SPAN_ONLY:
+            def mid_time(i):
+                m, on = ds.store.meta[i], ds.store.get(i)[0][:, 1]
+                return float(m["perf_t0"]) + (float(np.median(on[on >= 0])) if (on >= 0).any() else 0.0)
+            kept = [i for i in windows if in_span(grids[ds.store.meta[i]["performance"]], mid_time(i))]
+            outside, windows = len(windows) - len(kept), kept
+            if not windows:
+                print(f"skip {cond}: no window inside the meter model's grids")
+                continue
         if grids is not None:  # each window's grid, bars and key from the decoded grid, nothing from the score
             for i in windows:
                 m = ds.store.meta[i]
@@ -172,6 +195,8 @@ def main(argv=None):
                     counts[k] = counts.get(k, 0) + v
         res = stamp(acc.result(), None, args.limit_perfs)
         res["labeller_eval"] = LABELLER_EVAL
+        if cond in SPAN_ONLY and grids is not None:
+            res["windows_outside_grids"] = outside
         res.update({f"head_{h}_acc": counts[f"{h}_ok"] / max(counts[f"{h}_n"], 1)
                     for h in ("keep", "delta", "pos", "sub", "dur", "staff")})
         new = {cond: {mode: res}}
@@ -182,7 +207,7 @@ def main(argv=None):
         merge_predictions(run / f"pred_pieces_{Path(args.ckpt).stem}_{cond}.jsonl", mode,
                           [{"performance": ds.store.meta[i]["performance"], "win": ds.store.meta[i]["win"],
                             "mode": mode, "pred": p} for i, p in zip(windows, preds)])
-        print(f"{cond} ({len(windows)} windows, grid {args.grid}): onset F1 {res['onset_f1']:.3f}, onset-shift "
+        print(f"{cond} ({len(windows)} windows{f', {outside} outside the grids' if outside else ''}, grid {args.grid}): onset F1 {res['onset_f1']:.3f}, onset-shift "
               f"{res['onset_shift_f1']:.3f}, duration {res['duration_acc']:.3f}, staff {res['staff_acc']:.3f}, bar F1 "
               f"{res['bar_f1']:.3f}, note F1 {res['note_f1']:.3f} | heads: keep {res['head_keep_acc']:.3f} pos "
               f"{res['head_pos_acc']:.3f} sub {res['head_sub_acc']:.3f} dur {res['head_dur_acc']:.3f} staff "

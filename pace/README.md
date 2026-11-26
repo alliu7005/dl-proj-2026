@@ -641,6 +641,63 @@ scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_pm2s.tgz .
 tar xzf v2_pm2s.tgz
 ```
 
+## 4q. v2, eighth round: the labeller on Gangqinpu's scores, whole pieces outside classical piano
+
+After 4p (docs/experiments.md, "Eighth round"). The labeller has only seen classical scores, and
+"more general" has only been measured on the meter model. This round trains the labeller with
+Gangqinpu's written scores (`nl_gq`) and scores every system on 60 of Gangqinpu's test pieces as
+whole pieces, with the ASAP benchmark's metrics (`outputs/system_eval_gangqinpu`). It also trains
+`meter_v4_gq` longer (`meter_v4_gql`) and puts the release meter model's second seed through
+whole pieces (`meter_v3_s1_tp`).
+
+**Before you start:**
+- `git pull`;
+- the queue empty: 8 jobs, PACE's limit, so 4p's batch must have finished;
+- 4o's outputs there: the Gangqinpu release, its test recordings, `meter_v4_gq`, `meter_v4_gq_pm`.
+  The script stops with a message if one is missing.
+
+```bash
+bash pace/v2_gqlabel.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `lbtests` | the test suites (CPU) | - |
+| `lbdata` | Gangqinpu's scores as windows (`scripts/build_gangqinpu_windows.py` -> `data/processed/{train,val,test}_gangqinpu`, each with a `report.json`) and their labels (CPU); `meter_v3_s1` with the tempo-prior decoder (`meter_v3_s1_tp`) | `lbtests` |
+| `lbinputs` | 60 whole test pieces, one per score (`scripts/gangqinpu_inputs.py`): the written score as reference, the aligned notes (`gangqinpu`), Transkun on the recording (`gangqinpu_real`), Beat This!'s beats of the recording | `lbtests` |
+| `lbtrain` | `nl_gq` trained (`nl_base_gn`'s recipe, Gangqinpu half of the windows) and evaluated on the true grid; `nl_gq` and `nl_base_gn` on `meter_v3_tp`'s and `meter_v4_gq`'s grids, Gangqinpu's windows included | `lbdata` (cancelled if it fails) |
+| `lbmeter` | `meter_v4_gql` (`meter_v4_gq` with 100k steps) trained, tuned and evaluated | `lbtests` |
+| `lbsys` | whole pieces: `nl_gq` with `meter_v3_tp` and `meter_v4_gq` (ASAP and Gangqinpu), `nl_base_gn` with `meter_v3_s1_tp` (ASAP) | `lbtrain`, `lbinputs` (finished or not) |
+| `lbsys2` | whole pieces on Gangqinpu: the release, `meter_v4_gq`, `meter_v4_gq_pm` with PM2S, seq2seq; Beyer & Dai's predictions there | `lbinputs` (cancelled if it fails) |
+| `lbfinal` | `meter_v4_gql` on whole pieces (if trained); `outputs/compare`; Beyer & Dai's metrics for every system on both test sets; `outputs/system_eval/paired.md`, `outputs/system_eval_gangqinpu/paired.md` | `lbsys`, `lbsys2`, `lbmeter` (finished or not) |
+
+**What to check:**
+- after `lbdata`: `data/processed/train_gangqinpu/report.json`. It should show about 98% of the
+  performances kept, no tokens outside the vocabulary, and few windows dropped.
+- after `lbinputs`: `outputs/system_eval_gangqinpu/inputs_report.json` (what was skipped). If
+  Transkun is not installed in the environment, there is no `gangqinpu_real` and its log says so.
+- after `lbtrain`: `outputs/runs/nl_gq/log.csv`. `val_gq_onset_f1` is the labeller on Gangqinpu's
+  validation windows; `val_onset_f1` and `val_real_onset_f1` should stay near `nl_base_gn`'s.
+
+**If something goes wrong:**
+- *`nl_gq` not done after `lbtrain`:* `bash pace/v2_jobs.sh labellers nl_gq` in a GPU job resumes
+  it, then `STAGE=eval bash pace/v2_gqlabel.sh`.
+- *Only the whole pieces and the scoring again:* `STAGE=eval bash pace/v2_gqlabel.sh`.
+
+To bring the results back (PACE, then Windows, from the repo folder):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_gqlabel.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/manifest.json outputs/system_eval_gangqinpu/inputs_report.json data/processed/*_gangqinpu/report.json outputs/runs/nl_gq/*.json outputs/runs/nl_gq/log.csv outputs/runs/nl_base_gn/eval_pieces_best.json outputs/runs/meter_v4_gql/*.json outputs/runs/meter_v4_gql/log.csv outputs/runs/meter_v3_s1_tp/*.json slurm-lb*.out slurm-labeller_nl_gq*.log slurm-met_meter_v4_gql*.log 2>/dev/null; ls -la v2_gqlabel.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_gqlabel.tgz .
+```
+
+```powershell
+tar xzf v2_gqlabel.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

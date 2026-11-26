@@ -26,11 +26,34 @@ notes or between them (not extrapolated or inside an alignment hole), its confid
 its time signature, the times increase and the tempo is plausible. Bars whose time signature was
 inferred (not written in the score) are dropped unless ``keep_inferred``. Each dropped bar splits
 the performance, as a dropped window splits a PERiScoPe one.
+
+For the note labeller (and the score-level evaluation), ``score_measures(row)`` turns the release's
+``notation`` (the written score: every note with its measure, staff, onset and length in quarters,
+grace flag and the performance note it was aligned to; every measure with its time and key
+signature) into ``src/preprocessing/score.py`` measures, the form every other source's MusicXML
+takes, so ``segment.segment_windows`` cuts it into training windows like a PERiScoPe performance
+(``labeller_performance``; scripts/build_gangqinpu_windows.py). How the release writes a score:
+  * a note held across a bar line is one note whose length runs past it: it is cut at each bar line
+    and continued as tied notes (``tie``), as a MusicXML score writes it;
+  * a written note the score MIDI does not strike again (no aligned performance note, a note of the
+    same pitch and staff ending exactly where it starts, no score MIDI note there) is the
+    continuation of a tie written inside the bar: it gets ``tie``;
+  * a second copy of a note (same pitch, onset, staff, grace) is dropped, and so is a note of length
+    0 that is no grace note (44 of the 499 validation scores have some, the release flags them),
+    together with the performance note aligned to it (there is nothing to label it with);
+  * the measures of the first part give the bars; a second part's staves follow the first's.
+The input notes are the performance notes aligned to a written note, without the ones the
+alignment's refinement interpolated. They are Transkun V2 transcriptions, but the alignment kept
+only notes it matched to the score, so the transcriber's extra notes are gone: these windows are
+stored with ``source: transkun_aligned``, and the Dataset gives them the noise model's extra notes
+only (src/dataset.py, NoiseModel.hallucinations_only); their timing, lengths and missing notes
+are the transcriber's own.
 """
 from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +65,9 @@ SPLITS = {"train": "train", "val": "validation", "test": "test"}   # ours -> the
 TRUSTED_METHODS = ("matched_anchor", "interpolated_between_anchors")
 COLUMNS = ["sample_id", "split", "group_id", "score_group_id", "genre", "audio_url", "source",
            "performance_notes", "alignment", "beats"]
+SCORE_COLUMNS = ["sample_id", "split", "group_id", "score_group_id", "genre", "source", "audio_url",
+                 "performance_notes", "performance_pedal", "alignment", "notation", "score_notes"]
+ALIGNED_SOURCE = "transkun_aligned"   # the windows' ``source`` (src/dataset.py: extra notes only)
 
 
 @dataclass
@@ -240,3 +266,162 @@ def build_split(root: Path, split: str, flt: GridFilter = GridFilter(), limit: i
     report = {"rows": rows, "performances": rows - empty, "segments": len(perfs),
               "beats": dict(sorted(why.items())), "genres": dict(genres.most_common())}
     return perfs, report
+
+
+# ----------------------------------------------------------------------------------------------
+# The written score (``notation``): the note labeller's targets and the score-level references
+# ----------------------------------------------------------------------------------------------
+
+def _q(x) -> float:
+    return round(float(x), 4)
+
+
+def interpolated_performance_notes(row: dict) -> set:
+    """Indices of the performance notes the alignment's refinement interpolated (nothing was
+    played there)."""
+    al = row.get("alignment") or {}
+    idx, interp = al.get("performance_note_indices"), al.get("interpolated_mask")
+    if idx is None or interp is None or len(idx) != len(interp):
+        return set()
+    return {int(i) for i, m in zip(idx, interp) if m and i is not None and i >= 0}
+
+
+def score_measures(row: dict) -> tuple[list, list, Counter]:
+    """The release's written score -> (measures as src/preprocessing/score.py load_score gives
+    them, the struck written notes (graces too, tie continuations not) as (aligned performance
+    note index or -1, quarters from the start of measure 0, grace), what was changed (counts)).
+    Raises ValueError when there is no score."""
+    from .score import MAX_STAFF, Measure, NoteEvent, frac, piano_range
+
+    nt = row.get("notation") or {}
+    notes, meas = nt.get("notes") or [], nt.get("measures") or []
+    why = Counter()
+    if not notes or not meas:
+        raise ValueError("no_notation")
+    first_part = min((m.get("part_index") or 0) for m in meas)
+    frame = sorted((m for m in meas if (m.get("part_index") or 0) == first_part), key=lambda m: m["onset_quarter"])
+    starts = np.array([float(m["onset_quarter"]) for m in frame])
+    origin = float(starts[0])
+    # staves: the first part's, then each next part's after them (score.py folds extra staves into the last)
+    n_parts = max([(x.get("part_index") or 0) for x in notes] + [len(nt.get("parts") or [])]) + 1
+    sizes = [2] * n_parts
+    for k, p in enumerate(nt.get("parts") or []):
+        sizes[k] = int(p.get("staff_count") or 2)
+    staff_base = np.concatenate([[0], np.cumsum(sizes)]).astype(int)
+    measures, ts, key = [], "4/4", 0
+    for m in frame:
+        if isinstance(m.get("time_signature"), str) and "/" in m["time_signature"]:
+            ts = m["time_signature"]
+        if m.get("key_fifths") is not None:
+            key = int(np.clip(m["key_fifths"], -7, 7))
+        measures.append(Measure(length=frac(float(m["duration_quarter"])), time_signature=ts, key=key))
+    ends = starts + np.array([float(x.length) for x in measures])
+
+    # the score MIDI's onsets: a written note it does not strike is a tie continuation (if a note
+    # of its pitch and staff ends where it starts)
+    shift = float(nt.get("midi_origin_offset_quarter") or 0.0)
+    midi = Counter((int(s["pitch"]), _q(s["onset_quarter"] + shift)) for s in row.get("score_notes") or [])
+
+    def staff_of(x):
+        return int(min(staff_base[x.get("part_index") or 0] + (x.get("staff") or 0), MAX_STAFF))
+
+    order = sorted(range(len(notes)), key=lambda i: (notes[i]["onset_quarter"], notes[i].get("source_order") or 0))
+    seen, ends_at, kept = set(), Counter(), []
+    for i in order:
+        x = notes[i]
+        grace = bool(x.get("is_grace"))
+        on, dur = float(x["onset_quarter"]), float(x.get("duration_quarter") or 0.0)
+        ident = (int(x["pitch"]), _q(on), staff_of(x), grace)
+        if ident in seen:
+            why["duplicate_note"] += 1
+            continue
+        if not grace and dur <= 0:
+            why["zero_length_note"] += 1
+            continue
+        seen.add(ident)
+        kept.append(i)
+        if not grace:
+            ends_at[(int(x["pitch"]), staff_of(x), _q(on + dur))] += 1
+    written, seq = [], Counter()
+    for i in kept:
+        x = notes[i]
+        grace = bool(x.get("is_grace"))
+        pitch, staff = int(x["pitch"]), staff_of(x)
+        on, dur = float(x["onset_quarter"]), 0.0 if grace else float(x["duration_quarter"])
+        k = int(np.clip(np.searchsorted(starts, on + 1e-6, side="right") - 1, 0, len(frame) - 1))
+        pi = x.get("performance_note_index")
+        linked = pi is not None and pi >= 0
+        tie = (not grace and not linked and ends_at[(pitch, staff, _q(on))] > 0
+               and midi[(pitch, _q(on))] == 0)
+        why["tie_in_bar" if tie else ("grace_note" if grace else "written_note")] += 1
+        left, first = dur, True
+        while True:
+            room = float(ends[k]) - on
+            part = left if grace or left <= room + 1e-6 or k + 1 >= len(measures) else room
+            measures[k].events.append(NoteEvent(
+                offset=frac(on - float(starts[k])), staff=staff, pitch=piano_range(pitch),
+                duration=Fraction(0) if grace else frac(part), grace=grace, tie=tie or not first, seq=seq[k]))
+            seq[k] += 1
+            left -= part
+            if grace or left <= 1e-6:
+                break
+            if first:
+                why["held_across_bar_line"] += 1
+            k, on, first = k + 1, float(starts[k + 1]), False
+        if not tie:
+            written.append((int(pi) if linked else -1, float(x["onset_quarter"]) - origin, grace))
+    return measures, written, why
+
+
+def score_tokens(measures: list) -> list[str]:
+    """The whole score as target tokens (one bar per measure, no pedal): the reference a
+    whole-piece system is scored against (src/preprocessing/detokenize.py writes it as MusicXML)."""
+    from .score import tokenize_bars
+    return tokenize_bars(measures, [[k] for k in range(len(measures))])
+
+
+def performance_pedal(row: dict, end_time: float) -> np.ndarray:
+    """[K, 2] sustain-pedal (on, off) seconds from the release's controller events."""
+    from .performance import pedal_intervals
+    ev = sorted((float(e["time"]), int(e["value"])) for e in row.get("performance_pedal") or [])
+    return pedal_intervals(ev, 64, end_time)
+
+
+def labeller_performance(row: dict):
+    """One release row -> (notes [N, 4] (pitch, onset, offset, velocity), pedal [K, 2], timeline,
+    measures, info) for ``segment.segment_windows``, or an error string. The input notes are the
+    performance notes aligned to a struck written note, grace notes included (the interpolated
+    ones dropped); the time map pairs the onsets of the non-grace ones with their written onsets
+    (a grace note is played before the beat it is written on)."""
+    from .segment import timeline_from_alignment
+
+    try:
+        measures, written, why = score_measures(row)
+    except ValueError as e:
+        return str(e)
+    perf = row.get("performance_notes") or []
+    if not perf:
+        return "no_performance_notes"
+    interp = interpolated_performance_notes(row)
+    pairs = [(pi, q, g) for pi, q, g in written if 0 <= pi < len(perf) and pi not in interp]
+    if sum(not g for _, _, g in pairs) < 16:
+        return "too_few_aligned_notes"
+    sel = [perf[pi] for pi, _, _ in pairs]
+    notes = np.array([[n["pitch"], n["time"], n["time"] + max(float(n.get("duration") or 0.0), 1e-3),
+                       n.get("velocity") or 64] for n in sel], np.float64)
+    main = np.array([not g for _, _, g in pairs])
+    tl = timeline_from_alignment(notes[main, 1], np.array([q for _, q, _ in pairs])[main], measures)
+    if isinstance(tl, str):
+        return tl
+    notes = notes[np.lexsort((notes[:, 0], notes[:, 1]))].astype(np.float32)
+    pedal = performance_pedal(row, float(notes[:, 2].max()))
+    why.update(input_notes=len(notes), performance_notes=len(perf), interpolated_performance_notes=len(interp))
+    return notes, pedal, tl, measures, dict(why)
+
+
+def window_meta(row: dict, split: str) -> dict:
+    """A Gangqinpu window's metadata (src/preprocessing/store.py META_KEYS)."""
+    return {"dataset": "gangqinpu", "piece": f"gangqinpu/{row.get('score_group_id') or row['sample_id']}",
+            "composition": f"gangqinpu/{row.get('group_id') or row['sample_id']}",
+            "performance": f"gangqinpu/{row['sample_id']}", "split": f"{split}_gangqinpu",
+            "source": ALIGNED_SOURCE, "genre": row.get("genre") or "unknown"}

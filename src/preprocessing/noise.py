@@ -95,6 +95,16 @@ class NoiseModel:
     def empirical(self) -> bool:
         return self._bank is not None
 
+    def hallucinations_only(self) -> "NoiseModel":
+        """The same model adding only its extra notes: no missing notes, no timing, length,
+        velocity or pedal errors. For transcriptions an alignment cleaned (Gangqinpu's aligned
+        notes: their timing, lengths and missing notes are the transcriber's, but its extra notes
+        went with everything else no score note matched)."""
+        from dataclasses import replace
+        return NoiseModel(replace(self.cfg, drop_base=0.0, drop_per_chord_note=0.0, drop_table=None,
+                                  onset_std=0.0, offset_log_std=0.0, velocity_std=0.0, pedal_extend_prob=0.0,
+                                  pedal_time_std=0.0, pedal_drop_prob=0.0))
+
     @classmethod
     def from_json(cls, path: str) -> "NoiseModel":
         with open(path) as f:

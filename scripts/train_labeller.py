@@ -22,6 +22,13 @@ atomic checkpoints and status.json work as in scripts/train_model.py.
 system gives the labeller is anchored on tracked beats, ~20 ms off and with missed / spurious
 ones, not on the beats as played. Validation then gets the same noise on the same windows every
 time (a fixed draw), so the selection measures the labeller as it will be used.
+
+--gangqinpu-share S: S of the training windows come from Gangqinpu's scores (train_gangqinpu,
+scripts/build_gangqinpu_windows.py: pop, classical, folk, jazz piano, the recordings' aligned
+Transkun notes with the noise model's extra notes added), the rest from the usual data in its usual
+proportions. An epoch stays the usual data's: it is 1 / (1 - S) times as many steps, so patience
+and the learning-rate schedule cover the same passes over it. Validation adds val_gangqinpu
+("val_gq"), and the selection averages over it too.
 """
 from __future__ import annotations
 
@@ -39,7 +46,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import TokenBudgetBatches, TruncatingCollate, lower_priority, pick_device, store_lengths  # noqa: E402
 from scripts.train_model import learning_rate  # noqa: E402
-from src.dataset import AugmentConfig, MixedTrainDataset, ScoreSegmentDataset  # noqa: E402
+from src.dataset import AugmentConfig, MixedTrainDataset, ScoreSegmentDataset, ShareMixDataset  # noqa: E402
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.labeller import PRESETS, build_labeller, head_counts, labeller_loss, predict_windows  # noqa: E402
 from src.notelabels import GridNoise, score_notes  # noqa: E402
@@ -58,10 +65,11 @@ class Validator:
     """Fixed validation windows: losses / head accuracies, and rendered-token metrics."""
 
     def __init__(self, data: Path, vocab_path: str, ctx: dict, n_loss: int, n_decode: int, coll, seed: int = 0,
-                 grid_noise: GridNoise | None = None):
+                 grid_noise: GridNoise | None = None, extra: tuple = ()):
+        """``extra``: more (name, split) validation sets after val and val_transcribed."""
         self.sets, self.coll = {}, coll
         rng = np.random.default_rng(seed)
-        for name, split in (("val", "val"), ("val_real", "val_transcribed")):
+        for name, split in (("val", "val"), ("val_real", "val_transcribed")) + tuple(extra):
             if not has_split(data, split):
                 continue
             ds = ScoreSegmentDataset(str(data / split), vocab_path, notelabels=True, **ctx)
@@ -109,10 +117,10 @@ class Validator:
 
 def selection(res: dict, select: str) -> float:
     """The value best.pt minimises: the mean validation loss, or minus the mean decoded onset F1 of
-    the validation sets there are (clean, real)."""
+    the validation sets there are (clean, real, Gangqinpu)."""
     if select == "loss":
         return float(res["val_loss"])
-    f1 = [res[k] for k in ("val_onset_f1", "val_real_onset_f1") if k in res]
+    f1 = [res[k] for k in ("val_onset_f1", "val_real_onset_f1", "val_gq_onset_f1") if k in res]
     return -float(np.mean(f1)) if f1 else float("inf")
 
 
@@ -142,6 +150,8 @@ def main(argv=None):
     ap.add_argument("--grid-noise", type=float, default=0.0,
                     help="share of training windows whose true grid gets the beat tracker's timing (GridNoise)")
     ap.add_argument("--beat-noise", default="configs/beat_noise.json", help="the tracker errors --grid-noise draws")
+    ap.add_argument("--gangqinpu-share", type=float, default=0.0,
+                    help="share of training windows from train_gangqinpu (scripts/build_gangqinpu_windows.py); 0 = none")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--eval-every", type=int, default=1000)
     ap.add_argument("--eval-loss-windows", type=int, default=400)
@@ -186,6 +196,29 @@ def main(argv=None):
         _, note_len = store_lengths(train.store, args.max_notes, 10 ** 9)
         space = train.label_space
         parts = [train]
+    gq_n = 0
+    if args.gangqinpu_share > 0:
+        if not 0 < args.gangqinpu_share < 1:
+            raise SystemExit("--gangqinpu-share must be between 0 and 1")
+        if not has_split(data, "train_gangqinpu"):
+            raise SystemExit(f"--gangqinpu-share: no {data / 'train_gangqinpu'} (scripts/build_gangqinpu_windows.py, "
+                             "then scripts/build_notelabels.py --splits train_gangqinpu,val_gangqinpu,test_gangqinpu)")
+        gq = ScoreSegmentDataset(str(data / "train_gangqinpu"), vocab_path, noise=nm, augment=AugmentConfig(),
+                                 seed=args.seed + 2, notelabels=True, **ctx)
+        gq_n = len(gq)
+        S = args.gangqinpu_share
+        if isinstance(train, MixedTrainDataset):
+            rf, n_old = train.real_fraction, train.n_syn
+            shares = [(1 - S) * (1 - rf), (1 - S) * rf, S]
+        else:
+            n_old, shares = len(train), [1 - S, S]
+        _, g_len = store_lengths(gq.store, args.max_notes, 10 ** 9)
+        note_len = np.concatenate([note_len, g_len])
+        parts = parts + [gq]
+        train = ShareMixDataset(parts, shares, epoch_samples=int(round(n_old / (1 - S))))
+        sampler = train.sampler()
+        print(f"Gangqinpu: {gq_n} training windows, {S:.0%} of the samples; shares {np.round(shares, 3).tolist()}",
+              flush=True)
     gnoise = GridNoise.from_json(args.beat_noise, args.grid_noise) if args.grid_noise > 0 else None
     for part in parts:
         part.grid_noise = gnoise
@@ -241,12 +274,19 @@ def main(argv=None):
                "steps_per_epoch": steps_per_epoch, "total_steps": total_steps,
                "data": {"train_windows": len(train), "train_transcribed": has_split(data, "train_transcribed"),
                         "grid": "true (score beats timed through the note alignment)",
-                        "grid_noise": args.grid_noise, "beat_noise": args.beat_noise if gnoise else None}},
+                        "grid_noise": args.grid_noise, "beat_noise": args.beat_noise if gnoise else None,
+                        "gangqinpu_share": args.gangqinpu_share, "gangqinpu_windows": gq_n}},
               open(run / "config.json", "w"), indent=1)
     print(f"labeller: {n_params / 1e6:.1f}M parameters on {device} | {len(train)} training windows, "
           f"{steps_per_epoch} steps/epoch, {total_steps} steps total", flush=True)
+    extra = ()
+    if args.gangqinpu_share > 0:
+        if has_split(data, "val_gangqinpu"):
+            extra = (("val_gq", "val_gangqinpu"),)
+        else:
+            print(f"note: no {data / 'val_gangqinpu'}: validation on the usual sets only", flush=True)
     validator = Validator(data, vocab_path, ctx, args.eval_loss_windows, args.eval_decode_windows, coll, args.seed,
-                          grid_noise=GridNoise.from_json(args.beat_noise, 1.0) if gnoise else None)
+                          grid_noise=GridNoise.from_json(args.beat_noise, 1.0) if gnoise else None, extra=extra)
 
     def write_status():
         tmp = run / "status.json.tmp"

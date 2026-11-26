@@ -210,7 +210,8 @@ Each option has the evidence for it, what it could gain, and a rough cost:
      Give it the meter model's bars and time signatures instead.
    - *Why:* forcing the true time signature lifted its onset F1 from 0.350 to 0.424 on real
      audio.
-   - *Cost:* 2-3 days (a decoding mode in `src/decoding.py`, plus evaluation).
+   - *Cost:* about a day of code (a decoding mode in `src/decoding.py`), then one evaluation (about an
+     hour of GPU per condition).
    - *Risk:* the meter model's time signatures are right on only 44% of real bars, and round 5
      found no way to fix its level, so it may not help.
 4. **Retrain seq2seq on the rebuilt data.**
@@ -226,7 +227,9 @@ Each option has the evidence for it, what it could gain, and a rough cost:
 6. **Report the noise.**
    - *What:* a second seed of the meter model through whole pieces, so the report can give a
      spread for v2. The labeller's spread is measured already (±0.2).
-   - *Cost:* about 8 GPU hours plus one evaluation.
+   - *Cost:* no training: `meter_v3_s1` exists (round 3). Its decoder is tuned again with the tempo
+     prior (`meter_v3_s1_tp`, CPU), then one whole-piece evaluation. It is in the eighth round
+     (`pace/v2_gqlabel.sh`).
 7. **Gangqinpu: real pop piano performances aligned to scores** (found and inspected on
    2026-11-24).
    - *What:* [Wayne42/gangqinpu](https://huggingface.co/datasets/Wayne42/gangqinpu), 18,786
@@ -257,10 +260,12 @@ Each option has the evidence for it, what it could gain, and a rough cost:
        works: the data the meter model and its note-value level lack (round 5).
      - **An out-of-domain test set** (option 8): its test split. The sixth round scores the meter
        models on it; the labeller needs its targets first.
-     - **The labeller, mostly.** Staff, measures, time signatures, keys, graces and lengths (ties
-       follow from lengths across bar lines) are there. Arpeggio and ornament flags are not
-       (masked). The target tokens use MIDI pitch, so no spelling is needed. It needs a converter
-       from `notation` to our windows and tokens (`src/preprocessing`).
+     - **The labeller: built, in the eighth round.** Staff, measures, time signatures, keys,
+       graces and lengths (ties follow from lengths across bar lines) are there. Arpeggio and
+       ornament flags are not. The target tokens use MIDI pitch, so no spelling is needed.
+       `src/preprocessing/gangqinpu.py score_measures` and `scripts/build_gangqinpu_windows.py`
+       make the windows; `nl_gq` trains with half of its windows from them
+       (docs/experiments.md, "Eighth round").
    - *Caveats:*
      - **Leaks into our test set: handled by the dataset's split.** Its README says the split
        was made jointly with ASAP, by score similarity (transpositions, arrangements and excerpts
@@ -272,8 +277,9 @@ Each option has the evidence for it, what it could gain, and a rough cost:
        of the beats, from 487 of 499 recordings (docs/experiments.md, "Sixth round").
      - **License:** CC BY-NC-SA 4.0 and gated (each user accepts the terms on the page). A model
        trained on it is non-commercial share-alike too, like MAESTRO in our data.
-   - *Cost:* the meter part is done; it runs as the sixth round. The labeller's targets: 2-3
-     days, then a training run.
+   - *Cost:* both parts are built. The meter part ran as the sixth round; the labeller is the
+     eighth (`pace/v2_gqlabel.sh`: the data build and labels are CPU, under an hour; the labeller
+     trains in about 1-2 GPU hours, as the earlier ones did).
 8. **An out-of-domain test set.**
    - *What:* non-classical piano pieces with scores, run through the same evaluation.
    - *Why:* without it, "more general" cannot be measured. Today the only evidence outside
@@ -281,9 +287,10 @@ Each option has the evidence for it, what it could gain, and a rough cost:
    - *Sources:* Gangqinpu's test split (option 7: 514 pairs, mostly pop) first. Otherwise a
      POP909 split (pop piano arrangements as MIDI with beat, downbeat, key and chord annotations),
      or public-domain scores from PDMX; confirm what each contains, and its license, first.
-   - *Cost:* with Gangqinpu, the meter model's evaluation comes with option 7's builder; whole
-     pieces need option 7's labeller targets, or a note-level comparison against its score
-     notes.
+   - *Built (eighth round):* `scripts/gangqinpu_inputs.py`, 60 of Gangqinpu's test pieces as
+     whole pieces. The written score is the reference. The input is the aligned notes, or Transkun
+     on the recording, with Beat This!'s beats of the recording. Every system is scored with the
+     benchmark's metrics in `outputs/system_eval_gangqinpu`.
 9. **More general training data: synthetic performances from public scores.**
    - *What:* take a large set of public piano scores, e.g. PDMX, a public-domain MusicXML set of
      about 250k MuseScore scores with license metadata that should include pop and anime
@@ -351,6 +358,11 @@ Each option has the evidence for it, what it could gain, and a rough cost:
   - **Next:** retrain PM2S without our test and validation pieces, then score again. If the
     gain holds, `meter_v4_gq_pm` + PM2S becomes the release. Built: `scripts/train_pm2s.py`
     and `pace/v2_pm2s.sh` (the seventh round, pace/README.md 4p).
+- **After it, built:** the eighth round (`pace/v2_gqlabel.sh`, pace/README.md 4q).
+  - The labeller trained with Gangqinpu's scores (`nl_gq`).
+  - Whole pieces from Gangqinpu's test split for every system (options 7 and 8).
+  - `meter_v4_gq` trained longer.
+  - The meter model's second seed (option 6).
 - **Beat times from the notes:** -0.26 on clean (sure), nothing on real.
 - **Both trackers together** (`meter_v4_gq_both`): worse than either.
 

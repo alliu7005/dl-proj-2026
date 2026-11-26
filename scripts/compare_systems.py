@@ -21,6 +21,7 @@ BASE = "v2_nl_base_gn_meter_v3"            # the round-3 system: each round-4 ch
 TP = BASE + "_tp"
 RELEASE = TP + "_d95_tidy"                 # the released configuration (src/release.py)
 SEQ = "sf_base_reg_cab_c128_meter_sb"      # the best seq2seq system
+GQ_NL = "v2_nl_gq"                         # the labeller trained with Gangqinpu's scores
 PAIRS = [  # (A, B, what A changes)
     (TP, BASE, "tempo-prior decoder (meter_v3_tp)"),
     (BASE + "_tidy", BASE, "length tidying"),
@@ -58,6 +59,22 @@ PAIRS = [  # (A, B, what A changes)
      "meter model trained for the held-out PM2S vs for the released one"),
     (SEQ, "v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", "seq2seq (best) against v2 with the held-out PM2S"),
     ("beyer_dai", "v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", "Beyer & Dai against v2 with the held-out PM2S"),
+    # eighth round (pace/v2_gqlabel.sh): the labeller trained with Gangqinpu's scores (nl_gq), on ASAP
+    # and on Gangqinpu's test pieces (outputs/system_eval_gangqinpu)
+    (GQ_NL + "_meter_v3_tp_d95_tidy", RELEASE, "the release with the labeller trained with Gangqinpu"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy", "v2_nl_base_gn_meter_v4_gq_d95_tidy",
+     "labeller trained with Gangqinpu, both on the Gangqinpu meter model"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy", RELEASE, "both models trained with Gangqinpu"),
+    ("v2_nl_base_gn_meter_v4_gq_d95_tidy", RELEASE, "meter model trained with Gangqinpu (Beat This!)"),
+    ("v2_nl_base_gn_meter_v4_gq_pm_d95_tidy_pm_rpm", "v2_nl_base_gn_meter_v4_gq_d95_tidy",
+     "PM2S's beats against Beat This!'s (each with its Gangqinpu meter model)"),
+    ("v2_nl_base_gn_meter_v3_s1_tp_d95_tidy", RELEASE, "the release, the meter model's second seed (chance)"),
+    ("v2_nl_base_gn_meter_v4_gql_d95_tidy", "v2_nl_base_gn_meter_v4_gq_d95_tidy",
+     "the Gangqinpu meter model trained longer (100k steps)"),
+    (SEQ, GQ_NL + "_meter_v4_gq_d95_tidy", "seq2seq (best) against v2 with both models trained with Gangqinpu"),
+    ("beyer_dai", GQ_NL + "_meter_v4_gq_d95_tidy", "Beyer & Dai against v2 with both models trained with Gangqinpu"),
+    (SEQ, RELEASE, "seq2seq (best) against the release"),
+    ("beyer_dai", RELEASE, "Beyer & Dai against the release"),
 ]
 
 
@@ -103,7 +120,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--results", default="outputs/system_eval/results.json")
     ap.add_argument("--ablation", default="outputs/system_eval_ablation/results.json",
-                    help="the beat ablation's results (its _ab system against the same system), if there")
+                    help="the beat ablation's results (its _ab system against the same system), if there; '' = none")
     ap.add_argument("--pair", nargs=2, action="append", metavar=("A", "B"), help="instead of the default pairs")
     ap.add_argument("--out", default="outputs/system_eval/paired.md")
     args = ap.parse_args(argv)
@@ -115,7 +132,7 @@ def main(argv=None):
              "MUSTER mean error, system A minus system B, per performance (negative: A is better). "
              "Interval: 95% bootstrap over pieces. Bold: the interval excludes 0. `better on`: "
              "performances where A's error is lower. From `{}` (`scripts/compare_systems.py`).".format(args.results), ""]
-    for cond in ("real", "clean"):
+    for cond in ("real", "clean", "gangqinpu_real", "gangqinpu"):
         rows = []
         for a, b, label in pairs:
             if (a, cond) in res and (b, cond) in res:
@@ -126,7 +143,7 @@ def main(argv=None):
             lines += ["## {}".format(cond), "",
                       "| what | A | B | A - B | 95% interval | A better on | pieces |", "|---|---|---|---|---|---|---|"]
             lines += rows + [""]
-    if Path(args.ablation).exists():
+    if args.ablation and Path(args.ablation).exists():
         ab = load(args.ablation)
         rows = []
         for (s, cond) in sorted(ab):

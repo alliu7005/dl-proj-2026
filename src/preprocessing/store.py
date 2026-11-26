@@ -25,7 +25,7 @@ from .vocab import Vocab
 
 META_KEYS = ("dataset", "piece", "composition", "performance", "split", "bar_start", "n_bars",
              "window_sec", "perf_t0", "carry_min_sec", "source", "maestro_split",
-             "win", "start_pos", "s_lo", "s_hi")
+             "win", "start_pos", "s_lo", "s_hi", "genre")
 
 
 def segment_sizes(s: dict) -> tuple[int, int, int, int]:

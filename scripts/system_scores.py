@@ -26,6 +26,12 @@ real transcriptions instead of Beat This!'s of the recordings (_rpm): PM2S again
 the same pieces and metrics. PM2S's released weights were trained on all of ASAP, these test
 performances included: optimistic until it is retrained without them.
 
+Gangqinpu's test pieces (scripts/gangqinpu_inputs.py: --manifest
+outputs/system_eval_gangqinpu/manifest.json --out outputs/system_eval_gangqinpu --conditions
+gangqinpu,gangqinpu_real): every system gets Beat This!'s beats of the recording on both
+(beats_gangqinpu.npz next to that manifest), as on the real ASAP transcriptions; --real-beats pm2s
+gives v2 PM2S's beats of the input's notes there too.
+
 A piece whose score cannot be written keeps its tokens and the error (<slug>.tokens.txt,
 <slug>.error.txt next to where its score would be), so it can be reproduced; --only-missing runs
 only the pieces a system has no score for yet (kept in its summary.json with the others).
@@ -56,6 +62,7 @@ def parse_v2(spec: str) -> tuple[str, str]:
 
 
 BEAT_SUFFIX = {"synth": "", "audio": "_ab", "pm2s": "_pm"}       # v2 on clean MIDI
+GANGQINPU = ("gangqinpu", "gangqinpu_real")   # scripts/gangqinpu_inputs.py: the recording's beats, as real
 REAL_SUFFIX = {"audio": "", "pm2s": "_rpm"}                      # v2 on the real transcriptions
 
 
@@ -127,6 +134,8 @@ def main(argv=None):
     bp = beats_path(Path(args.tracked), "tracked")
     if wants_beats and bp.exists():
         tracked = load_beats(bp)
+    if wants_beats and any(e["condition"] in GANGQINPU for e in entries):   # the recordings' beats
+        tracked.update(load_beats(Path(args.manifest).parent / "beats_gangqinpu.npz"))
     if wants_beats and midi_beats == "synth":
         synth = load_beats(args.synth_beats)
         if not synth:
@@ -152,10 +161,11 @@ def main(argv=None):
     for k, e in enumerate(entries):
         dst = out / e["condition"] / f"{e['slug']}.musicxml"
         beats, kw = None, {}
-        pm2s = (args.real_beats if e["condition"] == "real" else args.clean_beats) == "pm2s"
+        real_like = e["condition"] == "real" or e["condition"] in GANGQINPU
+        pm2s = (args.real_beats if real_like else args.clean_beats) == "pm2s"
         if pm2s:  # tracked from the notes by the pipeline
             kw = {"beat_source": "pm2s"}
-        elif e["condition"] == "real" or args.clean_beats == "audio":
+        elif real_like or args.clean_beats == "audio":
             beats = tracked.get(e["performance"])
         elif wants_beats and midi_beats == "synth":
             beats = synth.get(e["performance"])

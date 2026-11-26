@@ -1340,6 +1340,59 @@ quoted from a PM2S that never saw them.
     without the leak;
   - `meter_v4_gq_pmho`, the meter model trained again for its beats.
 
+### Eighth round: the labeller on Gangqinpu's scores, whole pieces outside classical piano
+
+`pace/v2_gqlabel.sh` (pace/README.md, 4q). The sixth round made the meter model general:
+Gangqinpu's time signatures right on 0.79 of its real recordings, against 0.54. The labeller has
+only seen classical scores, and "more general" had no whole-piece measure.
+
+- **The data:** Gangqinpu's written scores as labeller windows
+  (`src/preprocessing/gangqinpu.py score_measures` / `labeller_performance`,
+  `scripts/build_gangqinpu_windows.py` -> `{train,val,test}_gangqinpu`, Gangqinpu's own splits).
+  - The release's `notation` gives every written note's measure, onset, length, staff and grace
+    flag, and the performance note aligned to it. It becomes the measures every MusicXML score
+    becomes, and is cut into windows like PERiScoPe.
+  - How the release writes a score:
+    - a note held across a bar line is one long note: cut at the bar line and tied;
+    - a written note the score MIDI does not strike is a tie continuation;
+    - duplicates and zero-length notes are dropped, with their performance notes.
+  - The inputs are the recording's Transkun notes the alignment kept. They have real timing,
+    lengths and missed notes, but not the transcriber's extra notes. So they are stored as
+    `source: transkun_aligned`, and the Dataset adds only the noise model's extra notes
+    (`NoiseModel.hallucinations_only`).
+  - Checked on 40-60 validation pieces:
+    - 98% of the performed notes pair with a written note;
+    - every window has a grid;
+    - no token is outside the vocabulary;
+    - rendering the true labels gives onset F1 0.966, duration 1.000, staff 1.000. The 3% missing
+      are the notes the alignment interpolated.
+    - The references' MusicXML reads back with 25 of 31,841 notes different.
+- **The labeller `nl_gq`:** `nl_base_gn`'s recipe (`--grid-noise 0.8`) with
+  `--gangqinpu-share 0.5`.
+  - The usual data keeps its proportions in the other half. An epoch stays a pass over the usual
+    data, so patience covers the same.
+  - Validation adds `val_gangqinpu` (`val_gq`), and the selection averages over it too.
+- **Window tests** (`scripts/eval_labeller.py`):
+  - `gangqinpu`: Gangqinpu's test windows, with the true grid or a meter model's grid from the
+    simulated tracker;
+  - `gangqinpu_real`: the same windows, with the grid from Beat This!'s beats of the recordings.
+    The meter model's Gangqinpu grids cover only the reliably timed bars: windows outside them
+    are left out and counted.
+- **Whole pieces** (`scripts/gangqinpu_inputs.py` -> `outputs/system_eval_gangqinpu`): 60 test
+  performances, one per score, with genres in proportion.
+  - The reference is the written score as MusicXML.
+  - `gangqinpu` gives the aligned notes as MIDI (like ASAP's clean MIDI). `gangqinpu_real` gives
+    Transkun run on the recording here, cut to the aligned span: what the demo gets from an upload.
+  - Every system gets Beat This!'s beats of the recording (PM2S's with `rpm`).
+  - The systems: the release, `nl_gq` and `meter_v4_gq` each alone and together,
+    `meter_v4_gq_pm` with PM2S, seq2seq and Beyer & Dai. They are scored with Beyer & Dai's
+    metrics and paired by performance (`compare_systems.py --results
+    outputs/system_eval_gangqinpu/results.json`).
+- **Also:**
+  - `meter_v4_gql`: `meter_v4_gq` with 100k steps. Its best checkpoint was at 56k of 60k.
+  - `meter_v3_s1_tp`: the release's meter model's second seed with the tempo-prior decoder, on
+    whole pieces. This is v2's run-to-run spread for the report (the labeller's is ±0.2).
+
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
 The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced

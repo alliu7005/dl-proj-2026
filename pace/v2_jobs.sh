@@ -15,14 +15,17 @@
 #   evals <labeller>...    for each: finish its training if it is not done (a labeller trained
 #                          here), else evaluate it on the true grid (an earlier labeller: its
 #                          results predate the current evaluation); then on every grid: the oracle,
-#                          GRIDS_OLD, METERS (a grid not there is skipped with the reason)
+#                          GRIDS_OLD, METERS (a grid not there is skipped with the reason), on
+#                          EVAL_CONDITIONS
 #   systems <spec>...      whole pieces (scripts/system_scores.py): <labeller>+<meter> = v2 (only
 #                          with both models finished and the meter model evaluated), with options
 #                          after a colon, comma-separated: tidy (--tidy), d<percent> (--delete-above,
 #                          e.g. d95), keepall (--delete-above 1), missing (--only-missing: what an
 #                          earlier job wrote is kept), pm (PM2S's beats on clean MIDI: --clean-beats
 #                          pm2s), rpm (PM2S's beats on the real transcriptions: --real-beats pm2s); <run>:<mode> = seq2seq, <run>:<mode>:sb =
-#                          seq2seq with the rendered-MIDI beats on clean MIDI (a finished seq2seq run)
+#                          seq2seq with the rendered-MIDI beats on clean MIDI (a finished seq2seq run).
+#                          SYS_ARGS: more system_scores.py options for every spec (another manifest:
+#                          Gangqinpu's test pieces, --manifest/--out/--conditions)
 #   tempo <meter> <new>    <new>: <meter>'s checkpoint with its decoder tuned again, the written-tempo
 #                          prior included (eval_meter.py --tune --tempo-prior), then evaluated and its
 #                          grids saved; <meter>'s own results stay as they are
@@ -59,6 +62,8 @@ MAX_HOURS=${MAX_HOURS:-7.5}
 PM2S_RUNS=${PM2S_RUNS-"meter_v4_gq_pm meter_v4_gq_pmho"}   # meter runs trained for PM2S's beats (the trackers task tests them with PM2S)
 SEQ_MODES=${SEQ_MODES:-"oracle,none,guarded,meter"}
 SEQ_CONDITIONS=${SEQ_CONDITIONS:-"clean,synthetic,real,periscope"}
+EVAL_CONDITIONS=${EVAL_CONDITIONS:-"clean,synthetic,real,periscope,gangqinpu,gangqinpu_real"}   # labellers on meter grids
+SYS_ARGS=${SYS_ARGS:-}
 JOB=${SLURM_JOB_ID:-local}
 
 meter_flags() {
@@ -83,6 +88,8 @@ meter_flags() {
     # meter_v4_gq_pm for PM2S retrained without our test pieces (pace/v2_pm2s.sh: run with
     # PM2S_WEIGHTS / PM2S_TAG=ho set, so --tracked pm2s reads that PM2S's stored beats)
     meter_v4_gq_pmho) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_ho.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
+    # meter_v4_gq trained longer (its best checkpoint was at 56,000 of its 60,000 steps)
+    meter_v4_gql) echo "--gangqinpu --gangqinpu-share 0.5 --steps 100000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     # (earlier: meter_v3 fine-tuned on the Gangqinpu mix)
     meter_v3_gqft) echo "--init outputs/runs/meter_v3/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 16000 --lr 1e-4 --warmup 500 --eval-every 2000 --patience 4 --tracked beat_this --tracked-share 0.5" ;;
     *) echo "unknown meter run $1 (add it to meter_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
@@ -93,7 +100,7 @@ meter_eval_flags() {  # how a finished meter run is tuned before its evaluation
     # its bar / step / time-signature heads are meter_v3's: meter_v3_tp's decoder, the level tuned on top
     meter_v3_th) echo "--level --decode-from outputs/runs/meter_v3_tp/decode.json" ;;
     meter_v3_ft) echo "--tune --tempo-prior --level" ;;
-    meter_v4_gq|meter_v4_gq_both|meter_v3_gqft) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
+    meter_v4_gq|meter_v4_gq_both|meter_v3_gqft|meter_v4_gql) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
     # its decoder tuned for the tracker it was trained for (tested with it by the trackers task)
     meter_v4_gq_pm) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s.json" ;;
     meter_v4_gq_pmho) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_ho.json" ;;
@@ -106,6 +113,8 @@ nl_flags() {
     nl_base_gn_s1) echo "--size base --grid-noise 0.8 --seed 1" ;;
     nl_base_gn_f1) echo "--size base --grid-noise 0.8 --select onset_f1" ;;
     nl_base_gn1_f1) echo "--size base --grid-noise 1.0 --select onset_f1" ;;
+    # nl_base_gn's recipe with Gangqinpu's scores as half of the training windows (scripts/build_gangqinpu_windows.py)
+    nl_gq) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5" ;;
     *) echo "unknown labeller run $1 (add it to nl_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
   esac
 }
@@ -206,7 +215,7 @@ case "$task" in
       fi
       for m in meter_oracle $GRIDS_OLD $METERS; do
         echo "== $nl on $m's grids"
-        python scripts/eval_labeller.py --run "$nl" --grid "meter:$m" --conditions clean,synthetic,real,periscope \
+        python scripts/eval_labeller.py --run "$nl" --grid "meter:$m" --conditions "$EVAL_CONDITIONS" \
           --normal-priority || ok=1
       done
     done
@@ -224,12 +233,12 @@ case "$task" in
              fi
              f=$(v2_flags "$opts") || { ok=1; continue; }
              # shellcheck disable=SC2086
-             python scripts/system_scores.py --v2 "$base" $f || ok=1 ;;
+             python scripts/system_scores.py --v2 "$base" $f $SYS_ARGS || ok=1 ;;
         *:*:sb) r=${spec%%:*}; rest=${spec#*:}
                 seq_ready "$r" || { ok=1; continue; }
-                python scripts/system_scores.py --run "$r" --mode "${rest%%:*}" --midi-beats synth || ok=1 ;;
+                python scripts/system_scores.py --run "$r" --mode "${rest%%:*}" --midi-beats synth $SYS_ARGS || ok=1 ;;
         *:*) seq_ready "${spec%%:*}" || { ok=1; continue; }
-             python scripts/system_scores.py --run "${spec%%:*}" --mode "${spec##*:}" || ok=1 ;;
+             python scripts/system_scores.py --run "${spec%%:*}" --mode "${spec##*:}" $SYS_ARGS || ok=1 ;;
         *) echo "unknown system $spec"; ok=1 ;;
       esac
     done
