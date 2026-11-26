@@ -32,7 +32,12 @@ Recipe: PM2S's own (its dev/ code, read 2026-11-25), except where said.
 - Loss: binary cross-entropy for beats and downbeats, NLL for the tempo classes, weights 1. Padding
   is masked (PM2S counts its zeros in the mean).
 - AdamW (lr 1e-3, betas 0.8 / 0.8, eps 1e-4, weight decay 1e-2), the rate x0.1 after
-  --lr-step steps (PM2S: after 50 epochs of 800 steps).
+  --lr-step steps (PM2S: after 50 epochs of 800 steps). On our data this is unstable: pm2s_ho's
+  training loss rose from step 8,000 to 38,000 and its validation fell with it (best at 10,000;
+  docs/experiments.md, "Seventh round: results"). The stable settings (pm2s_ho2 / pm2s_ho3,
+  pace/v2_pm2s2.sh):
+      --lr 3e-4 --betas 0.9,0.999 --eps 1e-8 --clip 1.0 --schedule cosine --warmup 1000
+  (the gradient norm before clipping is logged: "grad_norm").
 - Ours, not PM2S's:
   - the sources and their mix: Gangqinpu --gangqinpu-share of the samples, the others by their size;
   - the selection: best.pt keeps the step with the best mean of beat F and downbeat F of the
@@ -206,12 +211,34 @@ def write_status(run: Path, **kw):
     (run / "status.json").write_text(json.dumps(kw, indent=1))
 
 
+def make_schedule(opt, args):
+    """PM2S's step schedule (x0.1 after --lr-step), or linear warmup then cosine to --min-lr-frac."""
+    import math
+    if args.schedule == "step" and not args.warmup:
+        return torch.optim.lr_scheduler.StepLR(opt, step_size=args.lr_step, gamma=0.1)
+
+    def factor(step):
+        warm = min(1.0, (step + 1) / args.warmup) if args.warmup else 1.0
+        if args.schedule == "step":
+            return warm * 0.1 ** (step // args.lr_step)
+        progress = min(1.0, max(0.0, (step - args.warmup) / max(1, args.steps - args.warmup)))
+        return warm * (args.min_lr_frac + (1 - args.min_lr_frac) * 0.5 * (1 + math.cos(math.pi * progress)))
+    return torch.optim.lr_scheduler.LambdaLR(opt, factor)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--name", default="pm2s_ho")
     ap.add_argument("--steps", type=int, default=60000)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--lr-step", type=int, default=40000, help="steps before the learning rate x0.1")
+    ap.add_argument("--lr-step", type=int, default=40000, help="--schedule step: steps before the learning rate x0.1")
+    ap.add_argument("--schedule", default="step", choices=["step", "cosine"],
+                    help="step: PM2S's (x0.1 after --lr-step); cosine: down to --min-lr-frac by --steps, after --warmup")
+    ap.add_argument("--warmup", type=int, default=0, help="steps of linear warmup (cosine)")
+    ap.add_argument("--min-lr-frac", type=float, default=0.05, help="cosine: the last rate, as a share of --lr")
+    ap.add_argument("--betas", default="0.8,0.8", help="AdamW betas (PM2S: 0.8,0.8; usual: 0.9,0.999)")
+    ap.add_argument("--eps", type=float, default=1e-4, help="AdamW eps (PM2S: 1e-4)")
+    ap.add_argument("--clip", type=float, default=0.0, help="gradient norm clipping (0 = off, as PM2S)")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--length", type=int, default=500, help="notes per training segment")
     ap.add_argument("--gangqinpu-share", type=float, default=0.5,
@@ -265,8 +292,13 @@ def main(argv=None):
         raise SystemExit(f"no validation performances in {data / 'meter'}")
 
     model = build_model().to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=(0.8, 0.8), eps=1e-4, weight_decay=1e-2)
-    sched = torch.optim.lr_scheduler.StepLR(opt, step_size=args.lr_step, gamma=0.1)
+    try:
+        betas = tuple(float(x) for x in args.betas.split(","))
+        assert len(betas) == 2
+    except (ValueError, AssertionError):
+        raise SystemExit(f"--betas: two numbers, e.g. 0.9,0.999 (not {args.betas!r})")
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, betas=betas, eps=args.eps, weight_decay=1e-2)
+    sched = make_schedule(opt, args)
     step, best, best_step, bad = 0, -1.0, 0, 0
     if args.resume and (run / "last.pt").exists():
         ck = torch.load(run / "last.pt", map_location="cpu", weights_only=False)
@@ -291,7 +323,7 @@ def main(argv=None):
     new_log = not (args.resume and log_path.exists())
     log = open(log_path, "w" if new_log else "a", newline="")
     writer = None
-    t0, acc, n_acc = time.time(), {"beat": 0.0, "downbeat": 0.0, "tempo": 0.0}, 0
+    t0, acc, n_acc = time.time(), {"beat": 0.0, "downbeat": 0.0, "tempo": 0.0, "grad_norm": 0.0}, 0
     write_status(run, phase="training", step=step, total_steps=args.steps, best=best, best_step=best_step)
     model.train()
     stopped = False
@@ -300,16 +332,18 @@ def main(argv=None):
         loss, parts = loss_of(model, x, yb, yd, yt, m)
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        grad = float(torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip if args.clip > 0 else float("inf")))
         opt.step()
         sched.step()
         step += 1
-        for k in acc:
+        for k in ("beat", "downbeat", "tempo"):
             acc[k] += parts[k]
+        acc["grad_norm"] += grad if np.isfinite(grad) else 0.0
         n_acc += 1
         if step % args.eval_every == 0 or step == args.steps:
             val = validate(model, groups, device)
             row = {"step": step, "lr": opt.param_groups[0]["lr"], "minutes": round((time.time() - t0) / 60, 1),
-                   **{f"loss_{k}": v / max(n_acc, 1) for k, v in acc.items()}, **val}
+                   **{(k if k == "grad_norm" else f"loss_{k}"): v / max(n_acc, 1) for k, v in acc.items()}, **val}
             acc, n_acc = {k: 0.0 for k in acc}, 0
             if writer is None:
                 writer = csv.DictWriter(log, fieldnames=list(row))

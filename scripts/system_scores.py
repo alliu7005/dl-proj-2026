@@ -63,7 +63,7 @@ def parse_v2(spec: str) -> tuple[str, str]:
 
 BEAT_SUFFIX = {"synth": "", "audio": "_ab", "pm2s": "_pm"}       # v2 on clean MIDI
 GANGQINPU = ("gangqinpu", "gangqinpu_real")   # scripts/gangqinpu_inputs.py: the recording's beats, as real
-REAL_SUFFIX = {"audio": "", "pm2s": "_rpm"}                      # v2 on the real transcriptions
+REAL_SUFFIX = {"audio": "", "pm2s": "_rpm", "synth": "_rsb"}     # v2 on the real transcriptions (and Gangqinpu's)
 
 
 def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, clean_beats: str = "synth",
@@ -101,7 +101,9 @@ def main(argv=None):
                     help="v2 on clean MIDI: Beat This! on the MIDI rendered to audio, on the performance's real "
                          "recording (only the performances that have one), or PM2S on the MIDI's notes")
     ap.add_argument("--real-beats", default="audio", choices=list(REAL_SUFFIX),
-                    help="v2 on the real transcriptions: Beat This! on the recording, or PM2S on the transcription")
+                    help="v2 on the real transcriptions (and Gangqinpu's conditions): Beat This! on the recording, "
+                         "PM2S on the notes, or Beat This! on the input MIDI rendered to audio (synth: what a MIDI "
+                         "upload to the demo gets; system _rsb)")
     ap.add_argument("--delete-above", type=float, default=DELETE_ABOVE,
                     help="v2: leave a note out only above this p(delete) (1 = keep every note); "
                          "a setting other than the default is its own system (_d<percent>, _keepall)")
@@ -171,6 +173,8 @@ def main(argv=None):
         pm2s = (args.real_beats if real_like else args.clean_beats) == "pm2s"
         if pm2s:  # tracked from the notes by the pipeline
             kw = {"beat_source": "pm2s"}
+        elif real_like and args.real_beats == "synth":   # the MIDI rendered and tracked by the pipeline itself
+            kw = {"beat_checkpoint": "final0"}
         elif real_like or args.clean_beats == "audio":
             beats = tracked.get(e["performance"])
         elif wants_beats and midi_beats == "synth":

@@ -398,7 +398,8 @@ Full tables in docs/experiments.md, "Seventh round: results" and "Eighth round: 
   better (-0.15 / -0.32 on clean, sure).
 - **The retrained PM2S (`pm2s_ho`) is under-trained.** Its training became unstable after step
   8,000. Even so, v2 for MIDI input with it is level with both baselines on clean MIDI.
-  - Retrain it with stable optimisation: about 3 GPU hours.
+  - Retrain it with stable optimisation: about 3 GPU hours. Built: the ninth round,
+    `pace/v2_pm2s2.sh` (pace/README.md 4r).
   - Then the demo should use PM2S + `meter_v4_gq_pmho` for MIDI uploads. Today it renders the MIDI
     for Beat This!, which costs about 3 points on clean MIDI.
 - **The meter model's training seed moves whole classical pieces by up to 0.9** (`meter_v3_s1_tp`).

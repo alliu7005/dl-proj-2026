@@ -709,6 +709,65 @@ scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_gqlabel.tgz .
 tar xzf v2_gqlabel.tgz
 ```
 
+## 4r. v2, ninth round: PM2S retrained with stable optimisation
+
+After 4q (docs/experiments.md, "Ninth round"). The seventh round's PM2S without our test pieces
+trained unstably and was best at step 10,000 of 60,000. Even so, it made v2 for MIDI input level
+with seq2seq and Beyer & Dai on clean MIDI. This round trains it twice with stable settings
+(learning rate 3e-4 and 1e-4) and picks the better one by its validation score, linked as
+`pm2s_hos` (tag `hos`). Then it trains the meter model for it (`meter_v4_gq_pmhs`) and scores v2
+with it and `nl_gq` on ASAP and Gangqinpu, against today's default and against Beat This! on the
+rendered MIDI (what a MIDI upload gets now).
+
+**Before you start:**
+- `git pull`. PACE has `configs/beat_noise_pm2s_ho.json` untracked, so move it aside first (the
+  command is below).
+- The queue empty: 8 jobs.
+- 4q's outputs there. The script stops with a message if one is missing.
+
+```bash
+cd ~/scratch/dl-proj-2026 && [ -f configs/beat_noise_pm2s_ho.json ] && mv configs/beat_noise_pm2s_ho.json configs/beat_noise_pm2s_ho.json.pace; git pull && squeue -u $USER
+```
+
+```bash
+bash pace/v2_pm2s2.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `p2tests` | the test suites (CPU) | - |
+| `p2train_a`, `p2train_b` | `pm2s_ho2` (lr 3e-4) and `pm2s_ho3` (lr 1e-4): AdamW betas 0.9 / 0.999, eps 1e-8, clipping 1.0, warmup 1000, cosine; up to 7.5 h each (about 3 h expected) | `p2tests` |
+| `p2track` | the better one picked (`scripts/pick_run.py` -> `outputs/runs/pm2s_hos`, `chosen.json`); its beats stored (`tracked_*_pm2s_hos.npz`), its errors fitted (`configs/beat_noise_pm2s_hos.json`), its beats on the ASAP test inputs (`beats_compare_hos.md`) | both trainings (finished or not) |
+| `p2sys` | the release with its beats (`_pm_rpm_hos`); `meter_v4_gq_pm` at the meter level with them; on Gangqinpu, `nl_gq` + `meter_v4_gq` with Beat This! on the rendered MIDI (`_rsb`) | `p2track` |
+| `p2meter` | `meter_v4_gq_pmhs` trained, tuned and evaluated | `p2track` |
+| `p2eval` | `meter_v4_gq_pmhs` with its beats on every test set, `nl_gq` on its grids, whole pieces (`nl_gq+meter_v4_gq_pmhs:tidy,d95,pm,rpm`) on ASAP and Gangqinpu | `p2meter` (finished or not) |
+| `p2final` | `outputs/compare`, Beyer & Dai's metrics for every system on both test sets, both `paired.md` | `p2sys`, `p2eval` (finished or not) |
+
+**What to check:**
+- after the trainings: `outputs/runs/pm2s_ho2/log.csv` and `pm2s_ho3/log.csv`. `loss_beat` should
+  fall and stay down (pm2s_ho's rose after step 8,000), with `grad_norm` steady.
+- after `p2track`: `outputs/runs/pm2s_hos/chosen.json` (which one won, both scores), then
+  `outputs/system_eval/beats_compare_hos.md` next to `beats_compare_ho.md` and `beats_compare.md`.
+
+**If something goes wrong:**
+- *A training stopped before the end:* `bash pace/v2_pm2s2.sh` again (it resumes from `last.pt`).
+- *`meter_v4_gq_pmhs` not done after `p2meter`:* `STAGE=meter bash pace/v2_pm2s2.sh`.
+- *Only the evaluation again:* `STAGE=eval bash pace/v2_pm2s2.sh`.
+
+To bring the results back (PACE, then Windows, from the repo folder):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_pm2s2.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/beats_compare_hos.* outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json data/processed/meter/tracked_report_hos.json configs/beat_noise_pm2s_hos.json outputs/runs/pm2s_ho2/*.json outputs/runs/pm2s_ho2/log.csv outputs/runs/pm2s_ho3/*.json outputs/runs/pm2s_ho3/log.csv outputs/runs/pm2s_hos/chosen.json outputs/runs/meter_v4_gq_pmhs/*.json outputs/runs/meter_v4_gq_pmhs/log.csv outputs/runs/meter_v4_gq_pm/eval_meter.json outputs/runs/nl_gq/eval_pieces_best.json slurm-p2*.out slurm-met_meter_v4_gq_pmhs*.log 2>/dev/null; ls -la v2_pm2s2.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_pm2s2.tgz .
+```
+
+```powershell
+tar xzf v2_pm2s2.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

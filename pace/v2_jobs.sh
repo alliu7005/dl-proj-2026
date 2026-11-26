@@ -27,7 +27,8 @@
 #                          after a colon, comma-separated: tidy (--tidy), gl (--glissando), d<percent> (--delete-above,
 #                          e.g. d95), keepall (--delete-above 1), missing (--only-missing: what an
 #                          earlier job wrote is kept), pm (PM2S's beats on clean MIDI: --clean-beats
-#                          pm2s), rpm (PM2S's beats on the real transcriptions: --real-beats pm2s); <run>:<mode> = seq2seq, <run>:<mode>:sb =
+#                          pm2s), rpm (PM2S's beats on the real transcriptions: --real-beats pm2s), rsb (Beat This! on
+#                          the input MIDI rendered: --real-beats synth); <run>:<mode> = seq2seq, <run>:<mode>:sb =
 #                          seq2seq with the rendered-MIDI beats on clean MIDI (a finished seq2seq run).
 #                          SYS_ARGS: more system_scores.py options for every spec (another manifest:
 #                          Gangqinpu's test pieces, --manifest/--out/--conditions)
@@ -64,7 +65,7 @@ NEW_NLS=${NEW_NLS-"nl_base_gn nl_base_gn_s1"}
 GRIDS_OLD=${GRIDS_OLD-"meter_v2_nonote"}
 GRIDS_REEVAL=${GRIDS_REEVAL-"meter_v2_nonote meter_v2 meter_v2_s1 meter_v2_asap meter_base"}
 MAX_HOURS=${MAX_HOURS:-7.5}
-PM2S_RUNS=${PM2S_RUNS-"meter_v4_gq_pm meter_v4_gq_pmho"}   # meter runs trained for PM2S's beats (the trackers task tests them with PM2S)
+PM2S_RUNS=${PM2S_RUNS-"meter_v4_gq_pm meter_v4_gq_pmho meter_v4_gq_pmhs"}   # meter runs trained for PM2S's beats (the trackers task tests them with PM2S)
 SEQ_MODES=${SEQ_MODES:-"oracle,none,guarded,meter"}
 SEQ_CONDITIONS=${SEQ_CONDITIONS:-"clean,synthetic,real,periscope"}
 EVAL_CONDITIONS=${EVAL_CONDITIONS:-"clean,synthetic,real,periscope,gangqinpu,gangqinpu_real"}   # labellers on meter grids
@@ -93,6 +94,8 @@ meter_flags() {
     # meter_v4_gq_pm for PM2S retrained without our test pieces (pace/v2_pm2s.sh: run with
     # PM2S_WEIGHTS / PM2S_TAG=ho set, so --tracked pm2s reads that PM2S's stored beats)
     meter_v4_gq_pmho) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_ho.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
+    # and for PM2S retrained with stable optimisation (pace/v2_pm2s2.sh: PM2S_WEIGHTS / PM2S_TAG=hos)
+    meter_v4_gq_pmhs) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_hos.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
     # meter_v4_gq trained longer (its best checkpoint was at 56,000 of its 60,000 steps)
     meter_v4_gql) echo "--gangqinpu --gangqinpu-share 0.5 --steps 100000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     # (earlier: meter_v3 fine-tuned on the Gangqinpu mix)
@@ -109,6 +112,7 @@ meter_eval_flags() {  # how a finished meter run is tuned before its evaluation
     # its decoder tuned for the tracker it was trained for (tested with it by the trackers task)
     meter_v4_gq_pm) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s.json" ;;
     meter_v4_gq_pmho) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_ho.json" ;;
+    meter_v4_gq_pmhs) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_hos.json" ;;
     *) echo "--tune" ;;
   esac
 }
@@ -157,8 +161,9 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
       missing) out="$out --only-missing" ;;
       pm) out="$out --clean-beats pm2s" ;;
       rpm) out="$out --real-beats pm2s" ;;
+      rsb) out="$out --real-beats synth" ;;
       d[0-9]*) out="$out --delete-above 0.${o#d}" ;;
-      *) echo "unknown v2 option $o (tidy, gl, d<percent>, keepall, missing, pm, rpm)" >&2; return 1 ;;
+      *) echo "unknown v2 option $o (tidy, gl, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
     esac
   done
   echo "$out"

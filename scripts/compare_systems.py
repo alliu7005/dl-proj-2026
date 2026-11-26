@@ -22,6 +22,7 @@ TP = BASE + "_tp"
 RELEASE = TP + "_d95_tidy"                 # the released configuration (src/release.py)
 SEQ = "sf_base_reg_cab_c128_meter_sb"      # the best seq2seq system
 GQ_NL = "v2_nl_gq"                         # the labeller trained with Gangqinpu's scores
+PMHS = GQ_NL + "_meter_v4_gq_pmhs_d95_tidy_pm_rpm_hos"   # v2 with PM2S retrained stably and its meter model
 PAIRS = [  # (A, B, what A changes)
     (TP, BASE, "tempo-prior decoder (meter_v3_tp)"),
     (BASE + "_tidy", BASE, "length tidying"),
@@ -75,6 +76,16 @@ PAIRS = [  # (A, B, what A changes)
     ("beyer_dai", GQ_NL + "_meter_v4_gq_d95_tidy", "Beyer & Dai against v2 with both models trained with Gangqinpu"),
     (SEQ, RELEASE, "seq2seq (best) against the release"),
     ("beyer_dai", RELEASE, "Beyer & Dai against the release"),
+    # ninth round (pace/v2_pm2s2.sh): PM2S retrained with stable optimisation (tag hos), with nl_gq
+    (RELEASE + "_pm_rpm_hos", RELEASE + "_pm_rpm_ho", "PM2S retrained stably vs its first retraining"),
+    (RELEASE + "_pm_rpm_hos", RELEASE + "_pm_rpm", "PM2S retrained stably vs the released PM2S (what the leak was worth)"),
+    (RELEASE + "_pm_rpm_hos", RELEASE, "the release with the stably retrained PM2S"),
+    (PMHS, GQ_NL + "_meter_v4_gq_d95_tidy", "PM2S + its meter model vs the default (Beat This!; on clean MIDI: rendered)"),
+    (PMHS, "v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", "the stable PM2S path vs the first one"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_rsb", GQ_NL + "_meter_v4_gq_d95_tidy", "Beat This! on the rendered MIDI vs on the recording"),
+    (PMHS, GQ_NL + "_meter_v4_gq_d95_tidy_rsb", "MIDI input: PM2S + its meter model vs Beat This! on the rendered MIDI"),
+    (SEQ, PMHS, "seq2seq (best) against v2 with the stable PM2S"),
+    ("beyer_dai", PMHS, "Beyer & Dai against v2 with the stable PM2S"),
 ]
 
 

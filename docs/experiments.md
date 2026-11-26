@@ -1531,6 +1531,28 @@ the note below):
 
 seq2seq stays best on classical real audio (10.65).
 
+### Ninth round: PM2S retrained with stable optimisation
+
+`pace/v2_pm2s2.sh` (pace/README.md, 4r).
+- **Why.** `pm2s_ho` trained unstably with PM2S's own optimiser settings: its training loss rose
+  from step 8,000 to 38,000. Even so, v2 for MIDI input with it was level with seq2seq and Beyer &
+  Dai on clean MIDI. The demo renders a MIDI upload for Beat This!, about 3 points worse there.
+- **Two trainings, same data and recipe otherwise:** AdamW betas 0.9 / 0.999, eps 1e-8, gradient
+  clipping 1.0, 1,000 warmup steps, cosine decay to 5% over 60k steps. Learning rate 3e-4
+  (`pm2s_ho2`) and 1e-4 (`pm2s_ho3`). The gradient norm is logged.
+- **The pick.** The better by its own validation score (mean post-processed beat / downbeat F over
+  the validation splits) becomes `pm2s_hos` (`scripts/pick_run.py`). Everything made with it is
+  tagged `hos`.
+- **What is measured:**
+  - its beats against the released PM2S, `pm2s_ho` and Beat This!;
+  - the release with it (how much of the leak's gain a properly trained PM2S keeps);
+  - `meter_v4_gq_pmhs`, the meter model trained for it;
+  - v2 with it and `nl_gq` on whole pieces, on ASAP and on Gangqinpu.
+- **The comparisons that decide the demo's MIDI path:**
+  - against today's default (Beat This!, which on clean MIDI means the rendered MIDI);
+  - on Gangqinpu, against the default with Beat This! on the rendered MIDI (`_rsb`, new in
+    `scripts/system_scores.py --real-beats synth`), which is what a MIDI upload gets today.
+
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
 The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced
