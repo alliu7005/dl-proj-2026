@@ -56,6 +56,15 @@ PAIRS = [  # (A, B, what A changes); negative A - B: A better
     (SEQ, PM, "seq2seq (best) against round 6's best v2"),
     (SEQ, REL, "seq2seq (best) against the v2 release"),
     (SEQ, "beyer_dai", "seq2seq (best) against Beyer & Dai"),
+    # pace/v2_round7_combo.sh: round 7's labeller with round 7's meter models
+    ("v2_nl_base_gn_pm_meter_v4_gq_pm_s1_d95_tidy_pm_rpm", "v2_nl_base_gn_meter_v4_gq_pm_s1_d95_tidy_pm_rpm",
+     "nl_base_gn_pm instead of nl_base_gn, on meter_v4_gq_pm_s1"),
+    ("v2_nl_base_gn_pm_meter_v4_gq_pm_g30_d95_tidy_pm_rpm", "v2_nl_base_gn_meter_v4_gq_pm_g30_d95_tidy_pm_rpm",
+     "nl_base_gn_pm instead of nl_base_gn, on meter_v4_gq_pm_g30"),
+    ("v2_nl_base_gn_pm_meter_v4_gq_pm_g30_d95_tidy_pm_rpm", PM, "both round-7 changes (labeller + Gangqinpu 0.3) against round 6's best"),
+    ("v2_nl_base_gn_pm_meter_v4_gq_pm_s1_d95_tidy_pm_rpm", PM, "round 7's labeller on the second seed against round 6's best"),
+    ("v2_nl_base_gn_pm_meter_v4_gq_pm_g30_d95_tidy_pm_rpm", "beyer_dai", "both round-7 changes against Beyer & Dai"),
+    ("v2_nl_base_gn_pm_meter_v4_gq_pm_g30_d95_tidy_pm_rpm", SEQ, "both round-7 changes against seq2seq"),
 ]
 
 
