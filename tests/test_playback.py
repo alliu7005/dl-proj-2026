@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 TOKENS = ("bar ts_4/4 key_0 pos_0 staff_0 p_62 grace p_60 d_1 "            # a grace note on the first beat
-          "pos_1 p_76 grace p_74 grace p_72 d_1 "                           # two before beat 2: one grace chord
+          "pos_1 p_76 grace p_74 grace p_72 d_1 "                           # a run of two before beat 2
           "pos_2 p_64 d_2 arp p_67 d_2 arp staff_1 p_48 d_2 arp "          # rolled on both staves
           "bar pos_0 staff_0 p_60 d_2 arp p_64 d_2 arp pos_2 p_65 d_2 "     # rolled, E tied into the next bar
           "bar pos_0 p_64 d_1 tie p_67 d_3").split()
@@ -49,11 +49,11 @@ def at(notes, pitch, near):
 
 def test_graces_and_rolls():
     notes, counts = midi_of(TOKENS, 60)             # 1 quarter = 1 s
-    assert counts == {"graces_played": 2, "rolled_chords_played": 1}, counts   # the export writes the two as a chord
+    assert counts == {"graces_played": 3, "rolled_chords_played": 1}, counts
     g = at(notes, 62, 0.0)                          # the piece's first beat: no room before, on the beat
     assert len(g) == 1 and abs(g[0, 1]) < 1e-3 and abs(g[0, 2] - g[0, 1] - 0.07) < 1e-3
-    a, b = at(notes, 76, 1.0), at(notes, 74, 1.0)   # the grace chord, just before beat 2, as written
-    assert abs(a[0, 1] - 0.93) < 1e-3 and abs(b[0, 1] - 0.93) < 1e-3, (a, b)
+    a, b = at(notes, 76, 1.0), at(notes, 74, 1.0)   # the run, in its written order, ending on beat 2
+    assert abs(a[0, 1] - 0.86) < 1e-3 and abs(b[0, 1] - 0.93) < 1e-3, (a, b)
     assert abs(at(notes, 72, 1.0)[0, 1] - 1.0) < 1e-3                    # the main note stays on its beat
     roll = [at(notes, p, 2.0)[0] for p in (48, 64, 67)]                  # across both staves, from the bass up
     assert np.allclose([r[1] for r in roll], [2.0, 2.035, 2.07], atol=1e-3), roll
@@ -74,9 +74,12 @@ def test_engrave():
     with tempfile.TemporaryDirectory() as t:
         res = Result([])
         rep = engrave(TOKENS, Path(t), res, 12.0)
-        assert not res.errors and rep["graces_played"] == 2 and rep["rolled_chords_played"] == 1, (res.errors, rep)
+        assert not res.errors and rep["graces_played"] == 3 and rep["rolled_chords_played"] == 1, (res.errors, rep)
         sc = m21.converter.parse(str(Path(t) / "score.musicxml"))
-        assert sum(len(n.pitches) for n in sc.recurse().notes if n.duration.isGrace) == 3
+        graces = [n for n in sc.parts[0].recurse().notes if n.duration.isGrace]
+        # each grace note its own note: the single one a slashed eighth, the run unslashed 16ths in order
+        assert [(n.pitch.midi, n.duration.type, n.duration.slash) for n in graces] == [
+            (62, "eighth", True), (76, "16th", False), (74, "16th", False)], graces
         assert sum(any(isinstance(e, m21.expressions.ArpeggioMark) for e in n.expressions)
                    for n in sc.recurse().notes) >= 3
 

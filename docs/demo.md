@@ -32,6 +32,10 @@ default in between jobs. When it is offline, it runs on what is there.
   before their main note, and a rolled chord spreads upwards, 35 ms a note, across both staves
   when the roll runs through both. music21's MIDI export alone had left some grace notes out, and
   struck others with their main note and held them for seconds; it played rolled chords as blocks.
+- **Grace notes** before one note are written as a run, each its own note in the order played:
+  unslashed sixteenths for two or more, a slashed eighth for one (`src/preprocessing/detokenize.py`).
+  They had been written as one grace chord. The tokens to MusicXML to tokens round trip now matches
+  exactly on 0.880 of 300 validation windows (0.860 before) and 0.747 of 300 test windows (0.733).
 - **Leaving notes out.** The labeller's keep head marks notes as transcription errors, but its
   "delete" label means the alignment paired no score note with the note. That also covers notes
   really played: extra trill notes, and notes the alignment missed. On clean MIDI, where every

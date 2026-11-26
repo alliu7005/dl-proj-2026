@@ -128,12 +128,16 @@ def spell(midi: int, key: int = 0) -> m21.pitch.Pitch:
     return p
 
 
-def _make_element(group: list[_Note], key: int = 0):
+def _make_element(group: list[_Note], key: int = 0, run: int = 0):
+    """``run``: how many grace notes come before this position, each written as its own note (a run
+    of them as unslashed sixteenths, the way engravers write one; a single one as a slashed eighth)."""
     pitches = sorted({n.pitch for n in group})
     el = (m21.note.Note(spell(pitches[0], key)) if len(pitches) == 1
           else m21.chord.Chord([spell(x, key) for x in pitches]))
     if group[0].grace:
-        el.duration = m21.duration.Duration(0.5).getGraceDuration()
+        el.duration = m21.duration.Duration(0.25 if run > 1 else 0.5).getGraceDuration()
+        if run > 1:
+            el.duration.slash = False
     else:
         el.duration = m21.duration.Duration(group[0].dur)
     if any(n.arp for n in group):
@@ -315,15 +319,20 @@ def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None
             if bi == 0:
                 meas.clef = m21.clef.TrebleClef() if s == 0 else m21.clef.BassClef()
             groups = defaultdict(list)
+            run = defaultdict(int)  # grace notes before one position: a run, each its own note, in order
             for n in bar.notes:
                 if n.staff == s:
+                    if n.grace:
+                        groups[(n.pos, True, n.dur, run[n.pos])].append(n)
+                        run[n.pos] += 1
+                        continue
                     k = 0  # a doubled unison (same pitch twice) goes into a separate element/voice
                     while any(x.pitch == n.pitch for x in groups[(n.pos, n.grace, n.dur, k)]):
                         k += 1
                     groups[(n.pos, n.grace, n.dur, k)].append(n)
             voices: list[list] = []  # each: list of (pos, end, element)
             for (pos, grace, dur, _), group in sorted(groups.items(), key=lambda kv: (kv[0][0], not kv[0][1], kv[0][3])):
-                el, tied = _make_element(group, bar.key)
+                el, tied = _make_element(group, bar.key, run=run[pos] if grace else 0)
                 for p in tied:  # continuation of a tie from an earlier note
                     prev = last_el[s].get(p)
                     if prev is not None:
