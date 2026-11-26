@@ -69,7 +69,8 @@ def _noop(stage: str, frac: float, msg: str):
 
 def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
                         search: float | None = None, context_before: int = 0,
-                        context_after: int = 0, beats: tuple | None = None) -> list[dict]:
+                        context_after: int = 0, beats: tuple | None = None,
+                        drop: np.ndarray | None = None) -> list[dict]:
     """Cut a performance (no score) into model inputs, mirroring segment.segment_windows at eval
     time: cut points at the midpoint of the largest onset gap near every ``size`` notes, onsets
     relative to the cut, notes struck before the cut but still held past it carried over with a
@@ -78,35 +79,42 @@ def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
     notes just before / after it ("before" / "after", same time frame; the carried-over notes are
     not repeated), as src/dataset.py gives the model during training. ``beats`` = (times, down)
     in the performance's seconds: each window gets the beats around it ("beat_t" / "beat_d", in its
-    own time frame), as src/dataset.py does."""
+    own time frame), as src/dataset.py does. ``drop`` (bool [N]): notes left out of every window's
+    input, after the cuts were made on all the notes. "idx", "idx_before", "idx_after": the
+    performance's indices of "notes", "before", "after"."""
     if search is None:
         search = SegmentConfig().cut_search
     on = notes[:, ONSET].astype(np.float64)
     off = notes[:, OFFSET].astype(np.float64)
     cuts = cut_windows(on, lambda: size, 0.0, search)
+    keep = np.ones(len(notes), bool) if drop is None else ~np.asarray(drop, bool)
     out = []
     for a, b in cuts:
         t0 = float(on[a]) if a == 0 else float(on[a - 1] + on[a]) / 2
         t1 = float(off[a:b].max()) if b == len(on) else float(on[b - 1] + on[b]) / 2
-        carried = np.nonzero((on[:a] < t0) & (off[:a] >= t0 + CARRY_MIN_SEC))[0] if a else np.zeros(0, int)
-        sel = np.concatenate([notes[carried], notes[a:b]])
+        carried = np.nonzero((on[:a] < t0) & (off[:a] >= t0 + CARRY_MIN_SEC) & keep[:a])[0] if a else np.zeros(0, int)
+        own = np.arange(a, b)[keep[a:b]]
+        sel = np.concatenate([notes[carried], notes[own]])
         w = np.stack([sel[:, 0], sel[:, ONSET] - t0, sel[:, OFFSET] - sel[:, ONSET], sel[:, 3]], axis=1)
         w[: len(carried), 1] = np.minimum(w[: len(carried), 1], -1e-3)
         lo, hi = t0, t1
         before = after = np.zeros((0, 4), np.float32)
         if context_before and a:
-            prev = np.setdiff1d(np.arange(a), carried)[-context_before:]
+            prev = np.setdiff1d(np.arange(a)[keep[:a]], carried)[-context_before:]
             before = np.stack([notes[prev, 0], on[prev] - t0, off[prev] - on[prev], notes[prev, 3]], axis=1)
             lo = float(on[prev].min()) if len(prev) else t0
         if context_after and b < len(on):
-            nxt = np.arange(b, min(len(on), b + context_after))
+            nxt = np.arange(b, len(on))[keep[b:]][:context_after]
             after = np.stack([notes[nxt, 0], on[nxt] - t0, off[nxt] - on[nxt], notes[nxt, 3]], axis=1)
             hi = max(t1, float(off[nxt].max()))
         ped = pedal[(pedal[:, 1] > lo) & (pedal[:, 0] < hi)] - t0 if len(pedal) else pedal.reshape(-1, 2)
         bt, bd = window_beats(beats[0], beats[1], t0, lo, hi) if beats is not None else (np.zeros(0), np.zeros(0, bool))
         out.append({"notes": w.astype(np.float32), "pedal": np.asarray(ped, np.float32).reshape(-1, 2),
                     "before": np.asarray(before, np.float32), "after": np.asarray(after, np.float32),
-                    "t0": t0, "t1": t1, "n": int(b - a), "carried": int(len(carried)),
+                    "idx": np.concatenate([carried, own]).astype(np.int64),
+                    "idx_before": np.asarray(prev if context_before and a else [], np.int64),
+                    "idx_after": np.asarray(nxt if context_after and b < len(on) else [], np.int64),
+                    "t0": t0, "t1": t1, "n": int(len(own)), "carried": int(len(carried)),
                     "beat_t": bt, "beat_d": bd})
     return out
 
@@ -641,12 +649,16 @@ class V2Pipeline(_FrontEnd):
         context = bool(int(self.cfg.context_before) or int(self.cfg.context_after))
         for w in windows:
             if context:  # the layout of src/dataset.py with context notes (role columns)
-                notes, roles, _ = assembly(w["notes"], w["before"], w["after"])
+                notes, roles, order = assembly(w["notes"], w["before"], w["after"])
                 f = note_features(notes, w["pedal"], roles)
+                if "idx" in w:
+                    w["src"] = np.concatenate([w["idx"], w["idx_before"], w["idx_after"]])[order]
             else:  # and without
                 notes = w["notes"]
                 roles = np.where(notes[:, 1] < 0, ROLE_CARRIED, ROLE_WINDOW).astype(np.int8)
                 f = note_features(notes, w["pedal"])
+                if "idx" in w:
+                    w["src"] = w["idx"]
             f[:, cols] = (f[:, cols] - mean) / std
             g_t, g_q, win = window_frame(grid, w["t0"], w["notes"][:, 1], int(grid.get("key", 0)))
             gf, bar_est, pos_est = grid_features(notes[:, 1], g_t, g_q, win)
@@ -661,13 +673,16 @@ class V2Pipeline(_FrontEnd):
 
     def label(self, notes: np.ndarray, pedal: np.ndarray, grid: dict,
               progress: Progress = _noop, delete_above: float | None = None,
-              tidy: bool | None = None, glissandi: list | None = None) -> tuple[list[str], dict]:
+              tidy: bool | None = None, glissandi: list | None = None,
+              drop: np.ndarray | None = None) -> tuple[list[str], dict]:
         """Every note labelled in its window, all rendered in the grid's bars as one score.
         ``delete_above``: leave a note out only above this p(delete); ``tidy``: written lengths stop
         at the next onset of their staff when they run just past it (tidy_lengths). Defaults: the
-        pipeline's. ``glissandi`` (src/glissando.py find_glissandi, of the full performance; ``notes``
-        keep only their first and last notes): those two found among the labelled notes, the first
-        written to reach the last ("glissandi" in the result, for the export's line)."""
+        pipeline's. ``glissandi`` (src/glissando.py find_glissandi): those two found among the
+        labelled notes (by the performed note each came from), the first written to reach the last
+        ("glissandi" in the result, for the export's line). ``drop``: notes not to write (the
+        glissandos' middles): the labeller still gets every note, exactly as without them, so the rest
+        of the piece is written exactly as it would be, and their labels are left out."""
         delete_above = self.delete_above if delete_above is None else float(delete_above)
         tidy = self.tidy if tidy is None else bool(tidy)
         import sys
@@ -689,9 +704,14 @@ class V2Pipeline(_FrontEnd):
             placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
                                     staves=staves, delete_above=delete_above)
         notes_out = []
-        for win, pl in zip(frames, placed):
+        skip = np.asarray(drop, bool) if drop is not None else np.zeros(len(notes), bool)
+        for w, win, pl in zip(windows, frames, placed):
             for p in pl:
                 p.bar += win.first_bar
+                p.src = int(w["src"][p.src]) if p.src >= 0 and "src" in w else -1   # the performance's note
+                if p.src >= 0 and skip[p.src]:
+
+                    continue
                 notes_out.append(p)
         graces = attach_graces(notes_out, list(grid["bars"]))
         tidied = tidy_lengths(notes_out, list(grid["bars"])) if tidy else 0
@@ -713,8 +733,9 @@ class V2Pipeline(_FrontEnd):
             gl = attach(glissandi, notes_out, grid, [ts for ts, _ in bars])
         piece = Window(bars=bars, opens_with_bar=opens, start_pos=Fraction(0) if opens else None)
         tokens = render(piece, notes_out)
-        own = int(sum(int((it["roles"] == 0).sum()) for it in items))
-        return tokens, {"windows": len(windows), "notes_kept": len(notes_out), "notes_deleted": own - len(notes_out),
+        own = int(sum(int((it["roles"] == 0).sum()) for it in items)) - int(skip.sum())
+        kept = len(notes_out) - sum(g.get("written", 0) for g in gl)
+        return tokens, {"windows": len(windows), "notes_kept": kept, "notes_deleted": own - kept,
                         "bar_ts": [ts for ts, _ in bars], "staves": max([2] + [p.staff + 1 for p in notes_out]),
                         "staff_folded": int(folded), "graces_attached": graces, "delete_above": delete_above,
                         "tidy": tidy, "lengths_tidied": tidied, "glissandi": gl,
@@ -789,9 +810,9 @@ class V2Pipeline(_FrontEnd):
         if self.glissando if glissando is None else glissando:
             from .glissando import find_glissandi, inner_mask
             found = find_glissandi(notes)
-        lab_notes = notes[inner_mask(len(notes), found)] if found else notes
-        tokens, counts = self.label(lab_notes, pedal, grid, progress, delete_above=delete_above, tidy=tidy,
-                                    glissandi=found)
+        drop = ~inner_mask(len(notes), found) if found else None
+        tokens, counts = self.label(notes, pedal, grid, progress, delete_above=delete_above, tidy=tidy,
+                                    glissandi=found, drop=drop)
         gl = counts.pop("glissandi")
         timing["score_s"] = round(time.perf_counter() - t, 1)
         res.tokens = tokens

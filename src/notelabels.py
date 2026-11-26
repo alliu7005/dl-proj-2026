@@ -144,6 +144,8 @@ class Placed:
     grace: bool = False
     arp: bool = False
     orns: tuple = ()
+    src: int = -1       # the performed note it came from (src/labeller.py placed_notes: the item's
+                        # note; src/pipeline.py V2Pipeline.label: the performance's), -1 if none
 
 
 def render(win: Window, placed: list[Placed]) -> list[str]:

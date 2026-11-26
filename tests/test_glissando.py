@@ -3,10 +3,13 @@
     python -m tests.test_glissando        # or: pytest tests/test_glissando.py
 
 Covers: the detector (a white-key sweep among chords, a black-key one, one split by a missed note,
-a rolled chord, a fast written scale, a short run: the last three not glissandos); the labeller's
-input without the run's middle; its two ends found among the placed notes, the first written to
-reach the last, a left-out end written back; the "gliss." line in the MusicXML and the swept notes
-in the score MIDI; V2Pipeline end to end with tiny models (on and off); the scripts' switches.
+one with a note Transkun timed out of order, a rolled chord, a fast written scale, a short run: the
+last three not glissandos); the two ends found among the placed notes (by the performed note each
+came from, else by pitch and place), put where the grid says to the sixteenth, the first written to
+reach the last, a left-out end written back on a staff it reads on, the end on the start's staff;
+the "gliss." line in the MusicXML, an octave sign for an end far off its staff (the sounding pitch
+kept), the swept notes in the score MIDI; V2Pipeline end to end with tiny models: every bar but
+the glissando's written exactly as with glissandos off; the scripts' switches.
 """
 from __future__ import annotations
 
@@ -51,21 +54,22 @@ def test_detector():
     g1 = sweep(89, 18, 2.03, 68)                                   # F6 down to A3, white keys (the user's)
     g2 = sweep(73, 12, 6.01, 50, direction=+1, keys="black")      # a black-key sweep up
     g3 = sweep(105, 20, 9.02, 83, skip=(7,))                      # down, one note missed in the middle
+    late = [[G.KEYS["white"][G.KEYS["white"].index(105) - 7], 9.02 + 8.5 / 83, 9.2, 60]]   # the missed one, late
     rolled = [[p, 12.0 + i * 0.004, 12.5, 70] for i, p in enumerate((48, 52, 55, 58, 60, 64, 67))]
     scale = sweep(60, 16, 13.0, 20, direction=+1)                  # a written scale: 32nds at 150 qpm
     short = sweep(84, 6, 15.0, 60)                                 # too few notes
-    notes = np.array(chords(0, 17) + g1 + g2 + g3 + rolled + scale + short, np.float32)
+    notes = np.array(chords(0, 17) + g1 + g2 + g3 + late + rolled + scale + short, np.float32)
     notes = notes[np.random.default_rng(0).permutation(len(notes))]   # any order
     found = G.find_glissandi(notes)
     got =[(g.pitches[0], g.pitches[-1], g.keys, g.direction, len(g.idx)) for g in found]
     blk = G.KEYS["black"]
     wht = G.KEYS["white"]
     assert got == [(89, wht[wht.index(89) - 17], "white", -1, 18), (73, blk[blk.index(73) + 11], "black", 1, 12),
-                   (105, G.KEYS["white"][G.KEYS["white"].index(105) - 19], "white", -1, 19)], got
+                   (105, G.KEYS["white"][G.KEYS["white"].index(105) - 19], "white", -1, 20)], got
     assert all(sorted(notes[g.idx, 1].tolist()) == notes[g.idx, 1].tolist() for g in found)   # in time order
     assert abs(found[0].rate - 68) < 1 and found[0].summary()["direction"] == "down"
     keep = G.inner_mask(len(notes), found)
-    assert (~keep).sum() == 16 + 10 + 17 and keep[found[0].idx[[0, -1]]].all()
+    assert (~keep).sum() == 16 + 10 + 18 and keep[found[0].idx[[0, -1]]].all()
     assert G.find_glissandi(np.array(chords(0, 5), np.float32)) == []
     assert G.find_glissandi(np.zeros((0, 4), np.float32)) == []
 
@@ -85,10 +89,30 @@ def test_attach_and_line():
     out = G.attach([g], placed, grid, bars)
     assert len(out) == 1 and out[0]["start"] == (2, Fraction(3), 89, 0) and out[0]["end"][:3] == (2, Fraction(7, 2), 57)
     assert a.total == Fraction(1, 2) and out[0]["written"] == 0 and len(out[0]["inner"]) == 16
+    # one hand's glissando: its end (A3, two ledger lines under the treble) written on the start's staff
+    assert out[0]["end_moved"] and b.staff == 0 and out[0]["end"][3] == 0
+    assert G.fits(57, 0) and not G.fits(55, 0) and G.fits(64, 1) and not G.fits(65, 1)
+    wide = G.Glissando(np.arange(30), -1, "white", 5.5, 5.75, [89] + [80] * 28 + [40])
+    c, d = Placed(2, Fraction(3), 89, Fraction(1, 2), 0), Placed(2, Fraction(7, 2), 40, Fraction(1, 4), 1)
+    w = G.attach([wide], [c, d], grid, bars)
+    assert not w[0]["end_moved"] and d.staff == 1                 # a sweep to E2: the line crosses the staves
     # the first note left out by the labeller: written back at the grid's sixteenth
     placed2 = [Placed(2, Fraction(7, 2), 57, Fraction(1, 4), 1)]
     out2 = G.attach([g], placed2, grid, bars)
-    assert out2[0]["written"] == 1 and len(placed2) == 2 and (placed2[1].bar, placed2[1].pos, placed2[1].staff) == (2, 3, 1)
+    # (on the treble: F6 does not read on the bass, where the other end is; that end then joins it)
+    assert out2[0]["written"] == 1 and len(placed2) == 2 and (placed2[1].bar, placed2[1].pos, placed2[1].staff) == (2, 3, 0)
+    assert placed2[0].staff == 0 and out2[0]["end_moved"]
+    # by the performed note each came from (V2Pipeline's placed notes carry it): exact, even when the
+    # labeller put it elsewhere (at 4/7 of a beat, reading the run as a tuplet), then snapped to the grid
+    s_a = Placed(2, Fraction(3), 89, Fraction(1, 2), 0, src=0)
+    s_b = Placed(2, Fraction(26, 7), 57, Fraction(1, 16), 0, src=17)
+    decoy = Placed(2, Fraction(7, 2), 57, Fraction(1, 4), 0, src=40)        # the same pitch where the grid says
+    o3 = G.attach([g], [s_a, decoy, s_b], grid, bars)
+    assert o3[0]["end"][:3] == (2, Fraction(7, 2), 57) and s_b.pos == Fraction(7, 2) and decoy.pos == Fraction(7, 2)
+    assert s_b.total == Fraction(1, 4)                                        # a sixteenth at least
+    gone = G.attach([g], [Placed(2, Fraction(7, 2), 57, Fraction(1, 4), 0, src=17),
+                          Placed(2, Fraction(3), 89, Fraction(1, 2), 0, src=99)], grid, bars)
+    assert gone[0]["written"] == 1                                            # src 0 not placed: written back
     # both ends on one sixteenth: no line
     assert G.attach([G.Glissando(np.arange(9), -1, "white", 5.5, 5.52, list(range(89, 80, -1)))],
                     [Placed(2, Fraction(3), 89, Fraction(1, 4), 0), Placed(2, Fraction(3), 81, Fraction(1, 4), 0)],
@@ -110,6 +134,19 @@ def test_attach_and_line():
         back = m21.converter.parse(str(path))
         line = [sp for sp in back.spannerBundle if isinstance(sp, m21.spanner.Glissando)]
         assert len(line) == 1 and [n.pitch.midi for n in line[0].getSpannedElements()] == [89, 57]
+        # an end far above the treble (A7: six ledger lines) under 15ma, an end at G6 under 8va
+        assert (G.octave_sign(105, 0), G.octave_sign(91, 0), G.octave_sign(89, 0)) == ("15ma", "8va", None)
+        assert (G.octave_sign(21, 1), G.octave_sign(33, 1), G.octave_sign(40, 1)) == ("15mb", "8vb", None)
+        hi = G.Glissando(np.arange(20), -1, "white", 5.5, 5.75, [105] + [90] * 18 + [69])
+        e1, e2 = Placed(2, Fraction(3), 105, Fraction(1, 2), 0), Placed(2, Fraction(7, 2), 69, Fraction(1, 2), 0)
+        ohi = G.attach([hi], [e1, e2], grid, bars)
+        path2 = Path(t) / "hi.musicxml"
+        tokens_to_musicxml(render(Window(bars=[(ts, 0) for ts in bars]), [e1, e2]), str(path2),
+                           decorate=lambda sc_: G.decorate(sc_, ohi))
+        x2 = path2.read_text(encoding="utf-8")
+        assert '<octave-shift number="1" size="15" type="down"' in x2 and "<glissando" in x2
+        back2 = m21.converter.parse(str(path2))
+        assert sorted(n.pitch.midi for n in back2.recurse().notes) == [69, 105]     # it still sounds A7
         sc = tokens_to_score(tokens)
         n0 = len(list(sc.flatten().notes))
         assert G.decorate(sc, out, playback=True) == 1
@@ -131,6 +168,7 @@ def test_pipeline():
     from src.pipeline import V2Pipeline
     from src.preprocessing.performance import load_performance
     from tests.test_v2_system import make_v2
+    import torch
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
         lab, met = make_v2(tmp)
@@ -155,6 +193,28 @@ def test_pipeline():
         assert off.stats["glissandi_found"] == 0 and "<glissando" not in (tmp / "off" / "score.musicxml").read_text()
         assert off.stats["notes_kept"] + off.stats["notes_deleted"] == n_in
         assert len(heard) >= st["notes_kept"] + 16 - 1                          # the sweep plays
+
+        # the labeller gets every note either way (an earlier version left the run out of its input,
+        # which moved the windows and rewrote 46 of the 152 bars of the user's song): the same input,
+        # the same labels; afterwards only the run's notes are taken out (and a grace note that had
+        # one as its next note joins another), so nothing away from the glissando changes
+        import src.labeller as LB
+        seen, real = [], LB.predict_placed
+
+        def spy(model, items, *a, **k):
+            out = real(model, items, *a, **k)
+            seen.append(([it["notes"] for it in items],
+                         [[(p.bar, p.pos, p.pitch, p.total, p.staff, p.grace, p.src) for p in pl] for pl in out]))
+            return out
+        LB.predict_placed = spy
+        try:
+            pipe.run(midi, tmp / "on2", beats=beats)
+            pipe.run(midi, tmp / "off2", beats=beats, glissando=False)
+        finally:
+            LB.predict_placed = real
+        (in_on, lab_on), (in_off, lab_off) = seen[0], seen[-1]
+        assert len(in_on) == len(in_off) and all(torch.equal(x, y) for x, y in zip(in_on, in_off))
+        assert lab_on == lab_off
         assert not V2Pipeline(lab, met, vocab=V, device="cpu").glissando        # off unless asked
 
 

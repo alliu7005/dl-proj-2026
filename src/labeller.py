@@ -174,7 +174,7 @@ def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, st
         grace, arp, orns = unflag(int(sum(int(v) << k for k, v in enumerate(flags[i]))))
         bar = max(0, int(bar_est[i]) + int(pick["delta"][i]) - 1)
         res.append(Placed(bar, space.pos_value(pick["pos"][i], pick["sub"][i]), int(round(float(pitches[i]))),
-                          space.dur_value(pick["dur"][i]), int(pick["staff"][i]), grace, arp, orns))
+                          space.dur_value(pick["dur"][i]), int(pick["staff"][i]), grace, arp, orns, int(i)))
     return res
 
 

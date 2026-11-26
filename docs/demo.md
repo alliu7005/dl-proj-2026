@@ -25,9 +25,15 @@ default in between jobs. When it is offline, it runs on what is there.
   staves for all 73 bars.
 - **Glissandos** (`src/glissando.py`, on by default, `--no-glissando` to turn off): a fast one-way
   run on the white keys (or the black keys) is written as its first and last note joined by a
-  "gliss." line. The MusicXML has a `<glissando>`, which MuseScore draws. The page's viewer
-  (OpenSheetMusicDisplay 1.9) draws none, so the page labels it "gliss." and draws a line when both
-  ends are on one staff. The score's MIDI plays the sweep.
+  "gliss." line, both where the beat grid puts them (to the sixteenth). The labeller still gets
+  every note and the run's middle is taken out of what it writes, so the rest of the piece is
+  written exactly as with glissandos off: on the user's song, only the two glissandos' bars differ.
+  An end with more than three ledger lines is written under 8va / 15ma (8vb / 15mb under the bass).
+  A glissando is one hand's, so its last note goes on the first note's staff when it reads there
+  within two ledger lines (down to A3 under the treble, up to E4 over the bass). A wider sweep keeps
+  its line across the staves. The MusicXML has a `<glissando>`, which MuseScore draws.
+  The page's viewer (OpenSheetMusicDisplay 1.9) draws none, so the page labels it "gliss." and draws
+  a line when both ends are on one staff. The score's MIDI plays the sweep.
 - **The score, played back** (`score.mid`, `src/playback.py`): grace notes sound 70 ms each just
   before their main note, and a rolled chord spreads upwards, 35 ms a note, across both staves
   when the roll runs through both. music21's MIDI export alone had left some grace notes out, and
