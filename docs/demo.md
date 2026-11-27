@@ -146,6 +146,42 @@ python demo/app.py --labeller outputs/runs/nl_base/best.pt --meter outputs/runs/
 # open http://127.0.0.1:7860 and drop in a WAV / MP3 / FLAC (or a .mid to skip transcription)
 ```
 
+`python scripts/check_env.py` loads each package the demo needs in its own process and says what is
+missing, failing, or blocked (exit code 0 / 1 / 2).
+
+### Windows: files blocked by Application Control
+
+The error is `ImportError: DLL load failed while importing ...: An Application Control policy has
+blocked this file` (or `[WinError 4551]`). Windows 11's **Smart App Control** (on by default on
+some new installs) refuses to load programs and libraries it cannot verify, and Python packages
+ship many unsigned ones (`.dll`, `.pyd`). An organisation's own policy (a school or work computer)
+gives the same message. The project itself has no programs of its own (it is Python source), so
+what is blocked is a package's library, and which one depends on the machine. `scripts/check_env.py`
+lists them, with the exact paths from Windows' Code Integrity log; Windows Security > App &
+browser control > Protection history shows them too.
+
+The ways around it, the first changing nothing in Windows' security:
+
+1. **Run it in WSL** (Linux inside Windows). The policy checks Windows programs, not Linux ones; an
+   NVIDIA GPU works there through the Windows driver, and the page opens in the Windows browser.
+   In PowerShell as administrator, once (then restart, and Ubuntu asks for a Linux user name):
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+   Then in the Ubuntu terminal (keep the repo in the Linux home folder, not under `/mnt/c`, which
+   is much slower):
+   ```bash
+   curl -L -O https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh && bash Miniforge3-Linux-x86_64.sh -b && ~/miniforge3/bin/conda init bash && exec bash
+   git clone https://github.com/alliu7005/dl-proj-2026.git && cd dl-proj-2026 && conda env create -f environment.yml && conda activate dl-proj && pip install --no-deps transkun==2.0.1 && python scripts/check_env.py && python scripts/download_models.py
+   python demo/app.py      # then open http://localhost:7860 in the Windows browser
+   ```
+2. **Turn Smart App Control off** (Windows Security > App & browser control > Smart App Control
+   settings). It is a protection against unknown programs, so this is the computer owner's call;
+   read the warning Windows shows (on some versions of Windows it cannot be turned back on without
+   resetting Windows).
+3. **A managed computer:** the policy belongs to its IT department, which can allow the files or
+   say whether WSL is allowed; otherwise use another computer.
+
 Everything runs in that Python process, on the GPU if there is one, otherwise the CPU (a
 30-second clip: about 10 s of Transkun on a laptop CPU, plus a few seconds per 128-note window for
 the score model). The page only uploads and displays: the score is drawn with OpenSheetMusicDisplay

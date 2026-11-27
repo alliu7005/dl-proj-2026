@@ -34,6 +34,7 @@ src/glissando.py                 glissandos: found in the notes (fast one-way ru
 src/synth.py                     MIDI -> audio (additive piano), so Beat This! can track a MIDI input
 src/release.py                   the released models (models/), their settings, where the demo and the CLI find them
 scripts/export_models.py         the release from the training runs: no optimizer state, the right vocabulary, manifest + sha256, load check
+scripts/check_env.py             loads each package the demo needs in its own process: what is missing, failing, or blocked by Windows' Application Control (Smart App Control), with the blocked paths
 scripts/download_models.py       the release from the Hugging Face model repo -> models/, checked against its manifest; update(): the demo's pull of a newer default
 scripts/publish_model.py         a finished run -> the Hugging Face repo (runs/<run>/; its folder's default when it scores at least as well); pace/v2_jobs.sh calls it
 demo/app.py, demo/static/        web demo (FastAPI + one HTML page); scripts/audio_to_score.py: CLI
@@ -113,6 +114,7 @@ tests/test_gangqinpu_scores.py   v2: Gangqinpu's written scores (ties, graces, p
 tests/test_pm2s.py               PM2S: post-processing, the tracker on random weights, the weights' hash, beat_source, system names
 tests/test_publish.py            publishing: archive, the gate, --force, refusals, the demo's update + swap, the batch jobs' hook
 tests/test_readable.py           the readability rules: jumps (and what is no jump), lengths (and what is left), stems and hidden rests, the switches
+tests/test_check_env.py          scripts/check_env.py: blocked / missing / failed, the Code Integrity log's paths
 tests/test_rule_verdict.py       the rule verdict: its decisions, publishing it, the demo following it, pace/v2_decode2.sh
 tests/test_beat_decode.py        the beat decoding, its tuner, the contradicted-label audit and mask, the local tempo term, the switches, pace/v2_decode.sh
 tests/test_timing.py             the timing check: moved / kept notes, meters, lengths, whole beats (and what stays), the pipeline's switches, pace/v2_timing.sh

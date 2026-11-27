@@ -58,9 +58,15 @@ Onset through insertion are on real audio.
 
 ```bash
 conda env create -f environment.yml && conda activate dl-proj
+pip install --no-deps transkun==2.0.1      # the transcriber (its other dependencies are in environment.yml)
+python scripts/check_env.py                # everything loads? (on Windows: names any file Smart App Control blocks)
 python scripts/download_models.py          # the released models (dat-dev/scoreformer) -> models/, 300 MB
 python demo/app.py                         # then open http://127.0.0.1:7860 and drop in a recording
 ```
+
+On Windows with Smart App Control on, Windows can refuse some of the packages' libraries ("An
+Application Control policy has blocked this file"). The way around it that changes nothing in
+Windows' security is to run it in WSL: [docs/demo.md](docs/demo.md#windows-files-blocked-by-application-control).
 
 **The demo** runs everything in one process, on the GPU if there is one, else the CPU: Transkun,
 Beat This!, and the system chosen on the page.
