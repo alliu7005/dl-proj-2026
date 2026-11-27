@@ -191,8 +191,8 @@ def test_round12_batch():
         (tmp / "pace" / "v2_ensemble.sh").write_text(
             '#!/bin/bash\nID=$(sbatch --parsable -J e1x ${AFTER:+--dependency=afterany:$AFTER} --wrap=x)\n'
             'echo "$ID" >> "$JOBLOG"\n')
-        for f in ("data/processed/train_gangqinpu/index.npy", "data/processed/val_gangqinpu/index.npy",
-                  "data/processed/train/beats_gt.npz", "bd/MIDI2ScoreTF.ckpt"):
+        for f in ("data/processed/train/index.npy", "data/processed/val/index.npy", "data/processed/vocab.json",
+                  "data/raw/gangqinpu/data/x.parquet", "bd/MIDI2ScoreTF.ckpt"):
             (tmp / f).parent.mkdir(parents=True, exist_ok=True)
             (tmp / f).write_text("x")
         (tmp / "bin").mkdir()
@@ -218,6 +218,8 @@ def test_round12_batch():
         assert "round12_report.py" in by["c1final"][1]
         chooser = ":".join(by[k][0] for k in ("e1x", "c1tests", "c1train", "c1asap", "c1gq", "c1final"))
         assert f"--dependency=afterany:{chooser} " in by["s1data"][1]
+        assert "build_gangqinpu_windows.py --release data/raw/gangqinpu --splits $s" in by["s1data"][1]
+        assert "build_beats.py --splits $B" in by["s1data"][1]
         assert f"afterok:{by['s1data'][0]}" in by["s1train_a"][1]
         assert f"afterany:{by['s1train_a'][0]}" in by["s1train_b"][1]
         assert "seq2seq sf_c128_gq30" in by["s1train_c"][1] and "--gangqinpu-share 0.3" in by["s1train_c"][1]

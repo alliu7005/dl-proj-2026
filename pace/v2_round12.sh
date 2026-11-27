@@ -34,9 +34,11 @@ for s in $STAGES; do
   case "$s" in ensemble|chooser|seq2seq|pm2s) ;; *) echo "unknown stage $s (ensemble, chooser, seq2seq, pm2s)"; exit 1 ;; esac
 done
 [ -s "$BD/MIDI2ScoreTF.ckpt" ] || { echo "no $BD/MIDI2ScoreTF.ckpt: bash pace/bd_setup.sh first"; exit 1; }
-case " $STAGES " in *" seq2seq "*)
-  for f in data/processed/train_gangqinpu/index.npy data/processed/val_gangqinpu/index.npy data/processed/train/beats_gt.npz; do
-    [ -e "$f" ] || { echo "no $f: the seq2seq stage needs Gangqinpu's windows (scripts/build_gangqinpu_windows.py) and the beats (scripts/build_beats.py)"; exit 1; }
+GQ=${GQ:-data/raw/gangqinpu}
+case " $STAGES " in *" seq2seq "*)   # s1data builds Gangqinpu's windows and the beats where they are missing
+  [ -n "$(ls "$GQ"/data/*.parquet 2>/dev/null)" ] || { echo "no $GQ/data/*.parquet: run pace/v2_gangqinpu.sh first"; exit 1; }
+  for f in data/processed/train/index.npy data/processed/val/index.npy data/processed/vocab.json; do
+    [ -e "$f" ] || { echo "no $f: the data build first (pace/data.sbatch)"; exit 1; }
   done ;;
 esac
 export PUBLISH=0
@@ -89,9 +91,12 @@ for stage in $STAGES; do
       submit c1final -c 16 --mem=64G -t 4:00:00 "--dependency=afterany:$asap:$gq" --wrap="$FINAL"
       echo "Beyer & Dai's metrics, outputs/round12/report.md: job $ID" ;;
     seq2seq)
-      submit s1data -c 16 --mem=64G -t 3:00:00 --wrap="source pace/common.sh; python scripts/build_beats.py --splits train_gangqinpu,val_gangqinpu --workers 16 && python scripts/build_metrical.py --splits train_gangqinpu,val_gangqinpu --workers 16"
+      DATA="for s in train val; do [ -s data/processed/\${s}_gangqinpu/index.npy ] || python scripts/build_gangqinpu_windows.py --release $GQ --splits \$s || exit 1; done; "
+      DATA+="B=train_gangqinpu,val_gangqinpu; for s in train val; do [ -f data/processed/\$s/beats_gt.npz ] || B=\$B,\$s; done; "
+      DATA+="python scripts/build_beats.py --splits \$B --workers 16 && python scripts/build_metrical.py --splits train_gangqinpu,val_gangqinpu --workers 16"
+      submit s1data -c 16 --mem=64G -t 6:00:00 --wrap="source pace/common.sh; $DATA"
       data=$ID
-      echo "Gangqinpu's beats and metrical labels for seq2seq: job $data"
+      echo "Gangqinpu's windows (if missing), the beats and metrical labels for seq2seq: job $data"
       prev="afterok:$data"
       for k in a b c; do   # one run over up to three 8-hour jobs: each resumes from last.pt, a finished one evaluates and exits
         submit "s1train_$k" "${G[@]}" -c 8 --mem=64G -t 8:00:00 "--dependency=$prev" --wrap="source pace/common.sh; $JOBS seq2seq $SEQ_RUN $SEQ_ARGS"
