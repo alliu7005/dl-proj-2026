@@ -198,7 +198,7 @@ def test_mix_in_training_and_real_at_test():
 def test_aux_features():
     """A second tracker's beats seen from the first one's: agreeing, beating twice as fast, on the
     off-beats (the first one off by half a beat), none at all; augmentation stretches them too."""
-    from src.meter import N_AUX_FEATURES, N_BEAT_FEATURES, Augment, aux_features, beat_features
+    from src.meter import N_ALL_FEATURES, N_AUX_FEATURES, N_BEAT_FEATURES, Augment, aux_features, beat_features
     t = 0.5 * np.arange(16)
     down = np.arange(16) % 4 == 0
     same = aux_features(t, (t + 0.01, down))
@@ -214,7 +214,7 @@ def test_aux_features():
     assert (empty[:, 0] == 1).all() and (empty[:, 1:] == 0).all()
     notes = np.array([[60, 0.0, 0.3, 80], [64, 1.0, 1.3, 80]], np.float32)
     f = beat_features(notes, t, down, (t + 0.25, down))
-    assert np.allclose(f[:, N_BEAT_FEATURES:], off)
+    assert np.allclose(f[:, N_BEAT_FEATURES:N_ALL_FEATURES], off)   # the repetition features follow
     perf = {"notes": notes, "gt": {"t": t, "down": down}, "beats": (t, down), "aux": (t + 0.25, down)}
     out = Augment(prob=1.0)(perf, np.random.default_rng(0))
     s = out["beats"][0][1] / t[1]
@@ -339,6 +339,7 @@ def test_both_trackers_end_to_end():
         pipe.meter.load_state_dict(ck["model"])
         from src.meter import DecodeConfig
         pipe.decode_cfg = DecodeConfig()
+        pipe.fix_jumps = False   # the pipeline's settings that grid() reads (built without __init__ here)
         pipe.pm2s_beats = lambda notes: calls.append(len(notes)) or (0.5 * np.arange(20), np.arange(20) % 4 == 0)
         notes = np.stack([np.full(40, 60.0), 0.25 * np.arange(40), 0.25 * np.arange(40) + 0.2, np.full(40, 80.0)], 1)
         g = pipe.grid(notes.astype(np.float32), (0.5 * np.arange(20), np.arange(20) % 4 == 0))

@@ -209,10 +209,12 @@ def test_pipeline():
         LB.predict_placed = spy
         try:
             pipe.run(midi, tmp / "on2", beats=beats)
+            n_on = len(seen)    # a run labels twice when notes land on a stray third staff (folded): compare like with like
             pipe.run(midi, tmp / "off2", beats=beats, glissando=False)
         finally:
             LB.predict_placed = real
-        (in_on, lab_on), (in_off, lab_off) = seen[0], seen[-1]
+        assert len(seen) == 2 * n_on
+        (in_on, lab_on), (in_off, lab_off) = seen[0], seen[n_on]
         assert len(in_on) == len(in_off) and all(torch.equal(x, y) for x, y in zip(in_on, in_off))
         assert lab_on == lab_off
         assert not V2Pipeline(lab, met, vocab=V, device="cpu").glissando        # off unless asked
