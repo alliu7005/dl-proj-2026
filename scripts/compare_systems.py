@@ -132,6 +132,12 @@ PAIRS = [  # (A, B, what A changes)
      "two voices to a staff (the demo's configuration)"),
     (GQ_NL + "_meter_v4_gq_pt_d95_tidy_tc_tb_rd_jf_bd_tv", GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd_tv",
      "the piece-tempo prior in the demo's configuration"),
+    # the eleventh round (pace/v2_compound.sh): compound meters in the meter model's training
+    (GQ_NL + "_meter_v5_lv_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "the tracker's levels fitted and replayed"),
+    (GQ_NL + "_meter_v5_cw_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "compound meters drawn 3 times as often"),
+    (GQ_NL + "_meter_v5_lvcw_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "both"),
+    (GQ_NL + "_meter_v5_lvcw_d95_tidy", GQ_NL + "_meter_v5_lv_d95_tidy", "both, against the levels alone"),
+    (GQ_NL + "_meter_v5_lvcw_d95_tidy", GQ_NL + "_meter_v5_cw_d95_tidy", "both, against the weighting alone"),
 ]
 
 

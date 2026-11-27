@@ -871,6 +871,33 @@ To bring the results back:
 cd ~/scratch/dl-proj-2026 && tar czf v2_tempo.tgz outputs/runs/meter_v4_gq_pt/decode.json outputs/runs/meter_v4_gq_pt/eval_meter.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md slurm-pt*.out 2>/dev/null; ls -la v2_tempo.tgz
 ```
 
+## 4w. Compound meters in the meter's training (eleventh round)
+
+`pace/v2_compound.sh` fits the tracker's level per stretch on the real tracked beats (ASAP and
+Gangqinpu), trains `meter_v5_lv` (those levels replayed), `meter_v5_cw` (compound meters weighted
+x3) and `meter_v5_lvcw` (both), evaluates them (also on the real recordings), measures them on
+whole pieces with `nl_gq`, and reports them per true time signature (`outputs/meter_ts.md`). It
+waits for the earlier batches' scoring jobs if still queued (6 jobs):
+
+```bash
+bash pace/v2_compound.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `cmfit` | tests; `fit_beat_noise.py --levels`, `fit_pm2s_noise.py --from-stored beat_this --levels` (CPU) | - |
+| `cmtrain` | the three meters on one GPU | `cmfit` |
+| `cmtrain2` | resumes them if needed, tunes, evaluates, publishes a better one; `trackers` (the real recordings) | `cmtrain` |
+| `cmasap` | whole pieces on ASAP: `nl_gq` + each new meter | `cmtrain2` |
+| `cmgq` | the same on Gangqinpu's whole pieces | the same |
+| `cmfinal` | Beyer & Dai's metrics, both `paired.md`, `outputs/meter_ts.md` | `cmasap`, `cmgq`; `dcfinal`, `d2final`, `ptfinal` if queued |
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_compound.tgz configs/beat_noise_levels.json configs/beat_noise_bt_gangqinpu_levels.json outputs/meter_ts.md outputs/meter_ts.json outputs/runs/meter_v5_*/eval_meter.json outputs/runs/meter_v5_*/decode.json outputs/runs/meter_v5_*/config.json outputs/runs/meter_v5_*/log.csv outputs/system_eval/results.md outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/paired.md slurm-cm*.out 2>/dev/null; ls -la v2_compound.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

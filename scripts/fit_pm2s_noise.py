@@ -31,7 +31,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.fit_beat_noise import summary  # noqa: E402
-from src.beats import compare, fit_noise  # noqa: E402
+from src.beats import compare, fit_noise, piece_compound  # noqa: E402
 from src.pm2s_beats import PM2SBeats  # noqa: E402
 
 
@@ -49,7 +49,7 @@ def comparisons(tracker, perfs: list) -> list[dict]:
     out = []
     for p in perfs:
         t, d = tracker(p["notes"])
-        out.append(compare(p["gt"]["t"], p["gt"]["down"], t, d))
+        out.append(compare(p["gt"]["t"], p["gt"]["down"], t, d, compound=piece_compound(p["gt"])))
     return out
 
 
@@ -65,13 +65,17 @@ def main(argv=None):
                                                 "configs/beat_noise_<tracker>_gangqinpu.json")
     ap.add_argument("--from-stored", default=None, choices=("beat_this", "pm2s"),
                     help="fit on this tracker's stored beats (track_meter_data.py) instead of running PM2S")
+    ap.add_argument("--levels", action="store_true",
+                    help="also fit the tracker's level per stretch, per meter kind (src/beats.py level_runs; "
+                         "--from-stored's default out: configs/beat_noise_<tracker>_gangqinpu_levels.json)")
     ap.add_argument("--min-performances", type=int, default=30,
                     help="--from-stored: fewer tracked performances than this -> no profile written")
     args = ap.parse_args(argv)
     from src.pm2s_beats import tagged
     if args.out is None:   # other PM2S weights ($PM2S_WEIGHTS): configs/beat_noise_pm2s_<tag>.json
-        args.out = (f"configs/beat_noise_{'bt' if args.from_stored == 'beat_this' else args.from_stored}_gangqinpu.json"
-                    if args.from_stored else f"configs/{tagged('beat_noise_pm2s')}.json")
+        lv = "_levels" if args.levels else ""
+        args.out = (f"configs/beat_noise_{'bt' if args.from_stored == 'beat_this' else args.from_stored}_gangqinpu{lv}.json"
+                    if args.from_stored else f"configs/{tagged('beat_noise_pm2s')}{lv}.json")
     device = args.device
     if device == "auto":
         import torch
@@ -97,7 +101,8 @@ def main(argv=None):
 
         def stored(split, segs):
             beats = load_beats(tracked_path(meter, f"{split}_gangqinpu", args.from_stored))
-            return [compare(p["gt"]["t"], p["gt"]["down"], *beats[perf_key(p)]) for p in segs if perf_key(p) in beats]
+            return [compare(p["gt"]["t"], p["gt"]["down"], *beats[perf_key(p)], compound=piece_compound(p["gt"]))
+                    for p in segs if perf_key(p) in beats]
         cs = stored("train", draw("train", 10 ** 9))   # every one it has beats for (only the downloaded recordings)
         if len(cs) < args.min_performances:
             print(f"--from-stored {args.from_stored}: {len(cs)} tracked performances (< {args.min_performances}): "
@@ -105,7 +110,8 @@ def main(argv=None):
             return
         noise = fit_noise(cs, note=f"fitted by scripts/fit_pm2s_noise.py --from-stored {args.from_stored} on {len(cs)} "
                                    "Gangqinpu training performances: the tracker's stored real beats vs the score's "
-                                   "beats timed through the alignment")
+                                   "beats timed through the alignment" + (", with level profiles" if args.levels else ""),
+                          levels=args.levels)
         extra = {"tracker": args.from_stored, "fit_on": summary(cs)}
         rep = stored("val", draw("val", args.n_report))
         if rep:
@@ -114,14 +120,16 @@ def main(argv=None):
         tracker = PM2SBeats(args.weights, device=device)
         cs = comparisons(tracker, fit_on)
         noise = fit_noise(cs, note=f"fitted by scripts/fit_pm2s_noise.py on {len(cs)} Gangqinpu training performances: "
-                                   f"PM2S ({tracker.weights}) on their notes vs the score's beats timed through the alignment")
+                                   f"PM2S ({tracker.weights}) on their notes vs the score's beats timed through the alignment",
+                          levels=args.levels)
         extra = {"tracker": "pm2s", "weights": tracker.weights, "fit_on": summary(cs)}
         report = draw("val", args.n_report)
         if report:
             extra["tracker_on_val_gangqinpu"] = summary(comparisons(tracker, report))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     noise.to_json(args.out, extra)
-    shown = {k: v for k, v in json.loads(Path(args.out).read_text()).items() if k not in ("profiles", "octave_profiles")}
+    shown = {k: v for k, v in json.loads(Path(args.out).read_text()).items()
+             if k not in ("profiles", "octave_profiles", "level_profiles")}
     print(json.dumps(shown, indent=1))
     print(f"(+ {len(noise.profiles or [])} right-tempo and {len(noise.octave_profiles or [])} wrong-tempo "
           f"per-performance profiles in {args.out})")

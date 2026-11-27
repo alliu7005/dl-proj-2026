@@ -36,7 +36,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from .beats import MATCH_TOL, beat_layout
+from .beats import MATCH_TOL, beat_layout, piece_compound
 
 TS_CLASSES = ("4/4", "2/4", "3/4", "6/8", "3/8", "5/8", "9/8", "2/2", "12/16", "12/8", "6/4", "3/2", "4/8",
               "5/4", "4/2")
@@ -722,6 +722,15 @@ class Augment:
         return out
 
 
+def noisy_beats(noise, gt: dict, rng: np.random.Generator):
+    """A simulated tracker's beats of a ground-truth beat list; a BeatNoise with level profiles
+    is told whether the meter is compound (src/beats.py piece_compound), any other noise is
+    called as it always was (the same draws)."""
+    if getattr(noise, "level_profiles", None):
+        return noise(gt["t"], gt["down"], rng, compound=piece_compound(gt))
+    return noise(gt["t"], gt["down"], rng)
+
+
 def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, note_noise=None, augment=None,
            aux_noise=None):
     """One training / validation sample of a performance: its tracked beats (the real tracker's if
@@ -739,13 +748,13 @@ def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, not
     if perf.get("beats") is not None:
         bt, bd = perf["beats"]
     elif noise is not None:
-        bt, bd = noise(gt["t"], gt["down"], rng)
+        bt, bd = noisy_beats(noise, gt, rng)
     else:
         bt, bd = gt["t"], gt["down"]
     bt, bd = np.asarray(bt, np.float64), np.asarray(bd, bool)
     aux = None
     if aux_noise is not None:
-        aux = perf["aux"] if perf.get("aux") is not None else aux_noise(gt["t"], gt["down"], rng)
+        aux = perf["aux"] if perf.get("aux") is not None else noisy_beats(aux_noise, gt, rng)
     if note_noise is not None and len(notes) and is_clean(perf):
         store = np.stack([notes[:, 0], notes[:, 1], notes[:, 2] - notes[:, 1], notes[:, 3]], axis=1).astype(np.float32)
         noisy, _ = note_noise(store, np.zeros((0, 2), np.float32), rng)

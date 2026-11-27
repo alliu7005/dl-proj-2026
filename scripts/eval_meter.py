@@ -127,8 +127,8 @@ def tracked(perf: dict, k: int, noise, seed: int = SEED) -> tuple[np.ndarray, np
     """The beats the system gets for a performance: the real tracker's, else the simulated one."""
     if perf.get("beats") is not None:
         return np.asarray(perf["beats"][0], np.float64), np.asarray(perf["beats"][1], bool)
-    gt = perf["gt"]
-    bt, bd = noise(gt["t"], gt["down"], np.random.default_rng((seed, k)))
+    from src.meter import noisy_beats
+    bt, bd = noisy_beats(noise, perf["gt"], np.random.default_rng((seed, k)))
     return np.asarray(bt, np.float64), np.asarray(bd, bool)
 
 

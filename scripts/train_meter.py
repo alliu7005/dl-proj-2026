@@ -110,22 +110,24 @@ def load(data: Path, split: str) -> list:
     return perfs
 
 
-def mixed_weights(sources: dict, balance: str, shares: dict) -> np.ndarray:
+def mixed_weights(sources: dict, balance: str, shares: dict, compound_weight: float = 1.0) -> np.ndarray:
     """Sampling weights over the concatenated sources: each source named in ``shares`` gets that
     share of the draws (``weights`` within it), the others share the rest in proportion to their
-    own ``weights`` together, as without it. Empty sources take no share."""
+    own ``weights`` together, as without it. Empty sources take no share. ``compound_weight``: see
+    ``weights`` (within each source, so the sources' shares stay)."""
     parts, fixed = [], {k: v for k, v in shares.items() if sources.get(k)}
     rest = [k for k in sources if k not in fixed and sources[k]]
     rest_total = 1.0 - sum(fixed.values()) if rest else 0.0
     if not rest:
         fixed = {k: v / sum(fixed.values()) for k, v in fixed.items()}
-    rest_w = weights([p for k in rest for p in sources[k]], balance) * rest_total if rest else np.zeros(0)
+    rest_w = (weights([p for k in rest for p in sources[k]], balance, compound_weight) * rest_total if rest
+              else np.zeros(0))
     off = 0
     for k, v in sources.items():
         if not v:
             continue
         if k in fixed:
-            parts.append(weights(v, balance) * fixed[k])
+            parts.append(weights(v, balance, compound_weight) * fixed[k])
         else:
             parts.append(rest_w[off:off + len(v)])
             off += len(v)
@@ -133,14 +135,20 @@ def mixed_weights(sources: dict, balance: str, shares: dict) -> np.ndarray:
     return w / w.sum()
 
 
-def weights(perfs: list, balance: str) -> np.ndarray:
+def weights(perfs: list, balance: str, compound_weight: float = 1.0) -> np.ndarray:
     """Sampling weights: ``beats`` = each performance by its length; ``piece`` = each piece by its
     (mean performance) length, shared by its performances, so a piece played 20 times is not
-    drawn 20 times as often as one played once."""
+    drawn 20 times as often as one played once. ``compound_weight``: a performance mostly in a
+    compound meter (6/8, 9/8, 12/8, 6/4: src/beats.py piece_compound) counts that many times (1:
+    as before). They are rare (Gangqinpu: 6/8 4.5% of the pieces, 12/8 1.2%) and the meter model
+    reads them as 3/4 or 4/4 half of the time on real recordings."""
     n = np.array([len(p["gt"]["t"]) for p in perfs], float)
     if balance == "piece":
         count = Counter(p["piece"] for p in perfs)
         n = n / np.array([count[p["piece"]] for p in perfs], float)
+    if compound_weight != 1.0:
+        from src.beats import piece_compound
+        n = n * np.array([compound_weight if piece_compound(p["gt"]) else 1.0 for p in perfs])
     return n / n.sum()
 
 
@@ -278,6 +286,9 @@ def main(argv=None):
     ap.add_argument("--chunk", type=int, default=1024, help="most beats per training sample")
     ap.add_argument("--chunk-min", type=int, default=0, help="fewest beats per training sample (0 = chunk / 4)")
     ap.add_argument("--balance", choices=("piece", "beats"), default="piece")
+    ap.add_argument("--compound-weight", type=float, default=1.0,
+                    help="draw performances in a compound meter (6/8, 9/8, 12/8, 6/4) this many times as often "
+                         "(within each source; 1: as their length says)")
     ap.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True,
                     help="tempo stretch, transposition and velocity scaling of every training sample")
     ap.add_argument("--periscope", action=argparse.BooleanOptionalAction, default=True,
@@ -451,7 +462,8 @@ def main(argv=None):
         os.replace(st, run / "status.json")
 
     shares = {"gangqinpu": args.gangqinpu_share} if args.gangqinpu and args.gangqinpu_share > 0 else {}
-    stream = Stream(train, mixed_weights(sources, args.balance, shares), noise, note_noise, args.batch, args.chunk,
+    stream = Stream(train, mixed_weights(sources, args.balance, shares, args.compound_weight), noise, note_noise,
+                    args.batch, args.chunk,
                     args.chunk_min or max(args.chunk // 4, 2), args.seed * 100003 + step,
                     Augment() if args.augment else None,
                     tracked_share=args.tracked_share if (args.tracked != "none" or args.aux != "none") else 0.0,

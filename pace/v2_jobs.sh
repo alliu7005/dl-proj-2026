@@ -108,6 +108,14 @@ meter_flags() {
     meter_v4_gq_pmhs) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_hos.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
     # meter_v4_gq trained longer (its best checkpoint was at 56,000 of its 60,000 steps)
     meter_v4_gql) echo "--gangqinpu --gangqinpu-share 0.5 --steps 100000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
+    # compound meters (6/8: the user's "unlasting"; pace/v2_compound.sh): meter_v4_gq's recipe with
+    #   meter_v5_lv     the simulated tracker's level per stretch fitted and replayed (several switches
+    #                   a piece, the 2/3 level, by meter kind: configs/beat_noise*_levels.json)
+    #   meter_v5_cw     compound meters drawn 3 times as often (--compound-weight 3), the old noise
+    #   meter_v5_lvcw   both
+    meter_v5_lv) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise configs/beat_noise_levels.json --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu_levels.json" ;;
+    meter_v5_cw) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --compound-weight 3" ;;
+    meter_v5_lvcw) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise configs/beat_noise_levels.json --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu_levels.json --compound-weight 3" ;;
     # (earlier: meter_v3 fine-tuned on the Gangqinpu mix)
     meter_v3_gqft) echo "--init outputs/runs/meter_v3/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 16000 --lr 1e-4 --warmup 500 --eval-every 2000 --patience 4 --tracked beat_this --tracked-share 0.5" ;;
     *) echo "unknown meter run $1 (add it to meter_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
@@ -118,7 +126,7 @@ meter_eval_flags() {  # how a finished meter run is tuned before its evaluation
     # its bar / step / time-signature heads are meter_v3's: meter_v3_tp's decoder, the level tuned on top
     meter_v3_th) echo "--level --decode-from outputs/runs/meter_v3_tp/decode.json" ;;
     meter_v3_ft) echo "--tune --tempo-prior --level" ;;
-    meter_v4_gq|meter_v4_gq_both|meter_v3_gqft|meter_v4_gql) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
+    meter_v4_gq|meter_v4_gq_both|meter_v3_gqft|meter_v4_gql|meter_v5_lv|meter_v5_cw|meter_v5_lvcw) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
     # its decoder tuned for the tracker it was trained for (tested with it by the trackers task)
     meter_v4_gq_pm) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s.json" ;;
     meter_v4_gq_pmho) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_ho.json" ;;
