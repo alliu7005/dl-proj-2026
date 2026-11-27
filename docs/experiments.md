@@ -1662,6 +1662,47 @@ else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the releas
 the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
 the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
+**5. The piece's own tempo, and two voices to a staff** (`pace/v2_tempo.sh`).
+- **What the user's songs showed.** Beat This! switches tempo octaves inside a piece, and the meter
+  model follows each switch, so a stretch is written at double or half the note values of the rest
+  while the music keeps its tempo:
+  - "Unlasting" (6/8): the tracker's beat is a dotted quarter, then two-thirds of one, then an
+    eighth; the score's quarter lasted 1.04 s, 0.69 s and 0.33 s in turn (0.69 s is right).
+  - "Blue bird" (4/4): right at 0.80 s except 3:04-3:37, where the tracker went to double speed and
+    the model wrote the left hand's eighths as quarters (that part plays half as fast).
+  - On Gangqinpu's real recordings Beat This!'s beat F is 0.50 on 6/8 songs (0.74 on 4/4), and the
+    training noise only simulates whole-factor octave errors over one stretch of a piece.
+- **The decoding** (`src/meter.py piece_tempo_ref`, `piece_tempo_logprior`): the piece decoded once,
+  its most common written tempo (the peak of its steps' tempi, weighted by their seconds) taken
+  as the piece's, and the decoder run again with `piece_weight` x a log-normal (`piece_sigma`)
+  around it on every step. The local tempo term cannot do this: inside a stretch 40 beats long the
+  wrong tempo is the local one (on "unlasting" it changed nothing).
+  - On the two songs (weight 5): every stretch at the piece's tempo (0.63-0.72 s and 0.73-0.80 s a
+    quarter), 170 -> 137 and 150 -> 135 bars. It does not fix the time signatures (3/4 for 6/8,
+    2/4 for 4/4): the time-signature head prefers them, and bar lines follow the tracker's
+    downbeats. That is for training (simulated tracker noise with the 2/3 level and several
+    switches a piece, 6/8 weighted up).
+  - The risk: a piece that really changes tempo. "Blue bird"'s slower ending is rewritten at the
+    piece's tempo with sigma 0.25 and kept with 0.35, which in turn leaves "unlasting"'s intro
+    wrong. So it is tuned on validation (`eval_meter.py --piece-tempo`: ASAP, real, PERiScoPe,
+    Gangqinpu; the selection score, which sees a stretch's doubled bar lines in its downbeat F;
+    the right level and beat F on record) as `meter_v4_gq_pt` (the same checkpoint), then measured
+    on whole pieces: models alone, with the beat decoding, and in the demo's configuration.
+- **Two voices to a staff** (`_tv`, engraving): the writer had put each chord into the first voice
+  free, whatever its pitch (the user's bar 4: three treble voices, two stemmed down, the up-stem one
+  partly below them). Two voices at most, ordered by pitch, held notes tied, a pitch struck again
+  ending the held one; it sounds the same. Measured in the demo's configuration.
+
+| system | compared with |
+|---|---|
+| `nl_gq` + `meter_v4_gq_pt` | `nl_gq` + `meter_v4_gq` (models alone) |
+| ... `_bd` | `nl_gq` + `meter_v4_gq` `_bd` (`pace/v2_decode2.sh`) |
+| `nl_gq` + `meter_v4_gq` `_tc_tb_rd_jf_bd_tv` | the demo's configuration (`pace/v2_decode.sh`) |
+| `nl_gq` + `meter_v4_gq_pt` `_tc_tb_rd_jf_bd_tv` | the line above |
+
+The piece-tempo prior reaches the demo only by publishing `meter_v4_gq_pt` as the meter
+(`publish_model.py --run outputs/runs/meter_v4_gq_pt`) if the whole pieces say it helps.
+
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
 The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced

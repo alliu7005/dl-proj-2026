@@ -99,7 +99,8 @@ default in between jobs. When it is offline, it runs on what is there.
       bar 29, half-note chords under a melody looked like 32nd beams.
     - 114 bars of the song had this.
   - **Two voices to a staff at most, ordered by pitch** (`src/preprocessing/detokenize.py
-    _two_voices`). The writer used to put each chord into the first voice free when it started,
+    _two_voices`; its own switch, `src/release.py TWO_VOICES`, `--no-two-voices`, measured as the
+    `_tv` systems by `pace/v2_tempo.sh`). The writer used to put each chord into the first voice free when it started,
     whatever its pitch, so a held note under new chords opened a third voice, voice 1 could be
     lower than voice 3, and two voices could get stems down (the user's "unlasting" song, bar 4:
     three treble voices, the up-stem one partly below the two down-stem ones).

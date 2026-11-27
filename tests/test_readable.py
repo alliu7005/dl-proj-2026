@@ -6,7 +6,7 @@ fix_jumps: a step that packs three beats into one beat's time shortens its bar t
 everything after it back; a long gap at the usual tempo (the tracker missed beats) is no jump; a
 bar keeps two beats; a step that leaves its bar is left. readable_lengths: short rests closed,
 small overlaps trimmed, not across the bar line, not into an unwritable length or across grids,
-grace notes left. stem_voices: stems by voice (three: by height), the other voices' rests hidden.
+grace notes left. stem_voices: stems by voice, the other voices' rests hidden.
 two_voices (src/preprocessing/detokenize.py): the user's measure 4 in two voices, and random bars that
 sound the same in two voices at most. The pipeline's
 switches, the system names, the demo's, the CLI's and the jobs' switches.
@@ -210,23 +210,26 @@ def test_two_voices_sound_the_same():
             write_musicxml(new, str(Path(t) / "s.musicxml"))
 
 
-def test_stems_three_voices():
-    """Three voices (the writer without two_voices): the highest up, the lowest down, the middle
-    one by the side it is nearer."""
+def test_engrave_two_voices():
+    """engrave: two_voices writes the MusicXML with two voices to a staff, stems set; without, the
+    writer's voices as before (the queued batches' _rd systems); the score MIDI the same either way."""
     import music21 as m21
-    m = m21.stream.Measure(number=1)
-    vs = []
-    for k, ps in enumerate((["C6"], ["G5"], ["C3"])):
-        v = m21.stream.Voice(id=str(k + 1))
-        v.append(m21.note.Note(ps[0], quarterLength=4))
-        m.insert(0, v)
-        vs.append(v)
-    part = m21.stream.Part()
-    part.append(m)
-    s = m21.stream.Score()
-    s.append(part)
-    stem_voices(s)
-    assert [v.notes[0].stemDirection for v in vs] == ["up", "up", "down"]
+    import pretty_midi
+    from src.pipeline import Result, engrave
+    with tempfile.TemporaryDirectory() as t:
+        outs = {}
+        for tv in (False, True):
+            d = Path(t) / str(tv)
+            d.mkdir()
+            res = Result(M4)
+            rep = engrave(M4, d, res, 4.0, stems=True, two_voices=tv)
+            assert not res.errors and rep["stems_set"] >= 1, (res.errors, rep)
+            s = m21.converter.parse(str(d / "score.musicxml"))
+            outs[tv] = (max(len(list(m.voices)) for m in s.parts[0].getElementsByClass(m21.stream.Measure)),
+                        sorted((round(n.start, 3), n.pitch, round(n.end, 3)) for i in
+                               pretty_midi.PrettyMIDI(str(d / "score.mid")).instruments for n in i.notes))
+        assert outs[False][0] == 3 and outs[True][0] == 2
+        assert outs[False][1] == outs[True][1]
 
 
 def test_pipeline_and_switches():
@@ -241,6 +244,13 @@ def test_pipeline_and_switches():
         assert "--no-readable" in x and "--no-fix-jumps" in x, f
     jobs = (ROOT / "pace" / "v2_jobs.sh").read_text()
     assert 'rd) out="$out --readable" ;;' in jobs and 'jf) out="$out --fix-jumps" ;;' in jobs
+    # the two-voice writer: its own switch (_tv), the demo's default, --no-two-voices
+    from src.release import TWO_VOICES
+    assert TWO_VOICES is True and 'tv) out="$out --two-voices" ;;' in jobs
+    assert system_name(None, "", "", "nl+m", "synth", 0.95, True, "audio", readable=True, beat_decode=True,
+                       two_voices=True) == "v2_nl_m_d95_tidy_rd_bd_tv"
+    for f in ("demo/app.py", "scripts/audio_to_score.py"):
+        assert "--no-two-voices" in (ROOT / f).read_text(encoding="utf-8"), f
     if not V.exists():
         print("  (pipeline part skipped: no data/processed/vocab.json)")
         return

@@ -42,7 +42,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 
 from src.pipeline import AUDIO_EXT, MIDI_EXT, MODES, ScorePipeline, V2Pipeline  # noqa: E402
-from src.release import (BEAT_DECODE, FIX_JUMPS, GLISSANDO, READABLE, TIDY, TIMING_BEATS, TIMING_CHECK,  # noqa: E402
+from src.release import (BEAT_DECODE, FIX_JUMPS, GLISSANDO, READABLE, TIDY, TIMING_BEATS, TIMING_CHECK, TWO_VOICES,  # noqa: E402
                          default_path)  # the decided rules' defaults; their published verdict: rule_settings
 
 MAX_MB = 100
@@ -170,14 +170,14 @@ def create_app(pipes: dict, out_root: Path, default: str | None = None) -> FastA
 
 def load_pipes(paths: dict, vocab, device, tidy: bool, log=print, glissando: bool = GLISSANDO,
                timing_check: bool = TIMING_CHECK, readable: bool = READABLE, fix_jumps: bool = FIX_JUMPS,
-               timing_beats: bool = TIMING_BEATS, beat_decode: bool = BEAT_DECODE) -> dict:
+               timing_beats: bool = TIMING_BEATS, beat_decode: bool = BEAT_DECODE, two_voices: bool = TWO_VOICES) -> dict:
     """{"v2": V2Pipeline, "seq2seq": ScorePipeline} for the checkpoints that exist."""
     pipes = {}
     if Path(paths["labeller"]).exists() and Path(paths["meter"]).exists():
         log(f"loading v2: {paths['labeller']} + {paths['meter']} ...")
         pipes["v2"] = V2Pipeline(paths["labeller"], paths["meter"], vocab, device, tidy=tidy, glissando=glissando,
                                  timing_check=timing_check, readable=readable, fix_jumps=fix_jumps,
-                                 timing_beats=timing_beats, beat_decode=beat_decode)
+                                 timing_beats=timing_beats, beat_decode=beat_decode, two_voices=two_voices)
     else:
         log(f"no v2 ({paths['labeller']} / {paths['meter']} missing)")
     if Path(paths["ckpt"]).exists():
@@ -227,6 +227,7 @@ def main(argv=None):
     ap.add_argument("--no-timing-beats", action="store_true", help="v2: keep the labeller's triplets in beats whose timing fits straight sixteenths better (src/timing.py check_beats)")
     ap.add_argument("--no-readable", action="store_true", help="v2: keep rests of a 16th or less, overlaps of a 16th or less, and stems as written (src/readable.py)")
     ap.add_argument("--no-fix-jumps", action="store_true", help="v2: keep the meter model's stretched bars (a jump of beats in one beat's time) as decoded")
+    ap.add_argument("--no-two-voices", action="store_true", help="v2: each note into the first voice free when it starts, however many voices that takes (not two to a staff, ordered by pitch)")
     ap.add_argument("--system", default="v2", choices=list(SYSTEMS), help="the page's default system")
     ap.add_argument("--vocab", default=None, help="default: next to the checkpoint, else data/processed")
     ap.add_argument("--device", default="auto")
@@ -246,6 +247,7 @@ def main(argv=None):
     tidy = TIDY and not args.no_tidy
     gliss = GLISSANDO and not args.no_glissando
     rd = READABLE and not args.no_readable
+    tv = TWO_VOICES and not args.no_two_voices
 
     def rules():   # the benchmark's verdict (models/manifest.json, src/release.py rule_settings); --no-* still turn off
         from src.release import rule_settings
@@ -259,7 +261,7 @@ def main(argv=None):
 
     def paths():
         return {**default_paths(), **given}
-    pipes = load_pipes(paths(), args.vocab, args.device, tidy, log, gliss, readable=rd, **rules())
+    pipes = load_pipes(paths(), args.vocab, args.device, tidy, log, gliss, readable=rd, two_voices=tv, **rules())
     if not pipes:
         raise SystemExit("no checkpoints found: give --labeller and --meter (v2) and/or --ckpt (seq2seq)")
     for k, p in pipes.items():
@@ -267,7 +269,7 @@ def main(argv=None):
     app = create_app(pipes, Path(args.out), args.system)
     if not args.no_update and args.update_every > 0 and len(given) < 3:
         def reload():   # only the models not given on the command line come from the release
-            return load_pipes(paths(), args.vocab, args.device, tidy, log, gliss, readable=rd, **rules())
+            return load_pipes(paths(), args.vocab, args.device, tidy, log, gliss, readable=rd, two_voices=tv, **rules())
         threading.Thread(target=keep_updated, args=(pipes, args.update_every, reload), kwargs={"log": log},
                          daemon=True).start()
         log(f"checking for a newer release every {args.update_every:g} min (--update-every, --no-update)")

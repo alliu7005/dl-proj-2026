@@ -26,7 +26,7 @@
 #                          with both models finished and the meter model evaluated), with options
 #                          after a colon, comma-separated: tidy (--tidy), gl (--glissando), tc
 #                          (--timing-check), tb (--timing-beats), bd (--beat-decode), rd (--readable),
-#                          jf (--fix-jumps),
+#                          jf (--fix-jumps), tv (--two-voices),
 #                          d<percent> (--delete-above,
 #                          e.g. d95), keepall (--delete-above 1), missing (--only-missing: what an
 #                          earlier job wrote is kept), pm (PM2S's beats on clean MIDI: --clean-beats
@@ -62,6 +62,8 @@
 #                          evaluated with it (true grid, meter_v4_gq's grids: modes *_bd), published
 #   localtempo <meter>     <meter>_lt: the same checkpoint with the decoder's local tempo term
 #                          (src/meter.py local_tempo_logprior) tuned on validation and evaluated
+#   piecetempo <meter>     <meter>_pt: the same checkpoint with the decoder's piece-tempo prior
+#                          (src/meter.py piece_tempo_logprior) tuned on validation and evaluated
 #   gqbase <meter>...      these finished meter models evaluated on the Gangqinpu test set too
 #                          (eval_meter.py --conditions gangqinpu, their own decoders), so the new
 #                          models trained with it have something to beat
@@ -173,19 +175,20 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
       bd) out="$out --beat-decode" ;;
       rd) out="$out --readable" ;;
       jf) out="$out --fix-jumps" ;;
+      tv) out="$out --two-voices" ;;
       keepall) out="$out --delete-above 1" ;;
       missing) out="$out --only-missing" ;;
       pm) out="$out --clean-beats pm2s" ;;
       rpm) out="$out --real-beats pm2s" ;;
       rsb) out="$out --real-beats synth" ;;
       d[0-9]*) out="$out --delete-above 0.${o#d}" ;;
-      *) echo "unknown v2 option $o (tidy, gl, tc, tb, bd, rd, jf, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
+      *) echo "unknown v2 option $o (tidy, gl, tc, tb, bd, rd, jf, tv, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
     esac
   done
   echo "$out"
 }
 
-task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo, levelexp, refine, gqbase, trackers, beatdecode, localtempo}
+task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo, levelexp, refine, gqbase, trackers, beatdecode, localtempo, piecetempo}
 shift
 case "$task" in
   meters)
@@ -247,6 +250,15 @@ case "$task" in
     ln -sf "../$m/best.pt" "outputs/runs/$lt/best.pt"
     for f in config.json status.json decode.json; do cp "outputs/runs/$m/$f" "outputs/runs/$lt/$f"; done
     python scripts/eval_meter.py --run "$lt" --local-tempo || exit 1
+    exit 0 ;;
+  piecetempo)   # <meter>: a copy <meter>_pt (the same checkpoint) with the piece-tempo prior tuned, evaluated
+    m=${1:?piecetempo <meter>}
+    pt="${m}_pt"
+    if ! done_run "$m" || [ ! -f "outputs/runs/$m/decode.json" ]; then echo "$m: not finished or not tuned"; exit 1; fi
+    mkdir -p "outputs/runs/$pt"
+    ln -sf "../$m/best.pt" "outputs/runs/$pt/best.pt"
+    for f in config.json status.json decode.json; do cp "outputs/runs/$m/$f" "outputs/runs/$pt/$f"; done
+    python scripts/eval_meter.py --run "$pt" --piece-tempo || exit 1
     exit 0 ;;
   grids)
     ok=0

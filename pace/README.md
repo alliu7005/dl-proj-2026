@@ -846,6 +846,31 @@ To bring the results back:
 cd ~/scratch/dl-proj-2026 && tar czf v2_decode2.tgz outputs/rule_verdict.json outputs/rule_verdict.md outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md slurm-d2*.out 2>/dev/null; ls -la v2_decode2.tgz
 ```
 
+## 4v. The piece-tempo prior and two voices (after or alongside 4t / 4u)
+
+`pace/v2_tempo.sh` tunes the meter decoder's piece-tempo prior on validation (`meter_v4_gq_pt`,
+the same checkpoint) and measures it on whole pieces, with the two-voice score writer (`_tv`) in
+the demo's configuration. It waits for 4t's tuning and both earlier scoring jobs if still queued
+(5 jobs):
+
+```bash
+bash pace/v2_tempo.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `pttests` | the test suites (CPU) | - |
+| `pttune` | `piecetempo meter_v4_gq`: `eval_meter.py --piece-tempo`, then its evaluation | `pttests` |
+| `ptasap` | whole pieces on ASAP: `nl_gq+meter_v4_gq_pt` alone, `bd`; the demo's configuration with `tv`, on both meters | `pttune`; `dctune` if queued |
+| `ptgq` | the same on Gangqinpu's whole pieces | the same |
+| `ptfinal` | Beyer & Dai's metrics, both `paired.md` | `ptasap`, `ptgq`; `dcfinal`, `d2final` if queued |
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_tempo.tgz outputs/runs/meter_v4_gq_pt/decode.json outputs/runs/meter_v4_gq_pt/eval_meter.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md slurm-pt*.out 2>/dev/null; ls -la v2_tempo.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

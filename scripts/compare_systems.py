@@ -125,6 +125,13 @@ PAIRS = [  # (A, B, what A changes)
     ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_jf_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd", "nl_gq_mc + decoding: the short-bar fix"),
     ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd",
      "nl_gq_mc + decoding: every rule"),
+    # the second follow-up (pace/v2_tempo.sh): the meter decoder's piece-tempo prior, the two-voice writer
+    (GQ_NL + "_meter_v4_gq_pt_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "the piece-tempo prior, models alone"),
+    (GQ_NL + "_meter_v4_gq_pt_d95_tidy_bd", GQ_NL + "_meter_v4_gq_d95_tidy_bd", "the piece-tempo prior, with the beat decoding"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd_tv", GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd",
+     "two voices to a staff (the demo's configuration)"),
+    (GQ_NL + "_meter_v4_gq_pt_d95_tidy_tc_tb_rd_jf_bd_tv", GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd_tv",
+     "the piece-tempo prior in the demo's configuration"),
 ]
 
 

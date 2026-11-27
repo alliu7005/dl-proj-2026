@@ -106,7 +106,11 @@ LOCAL_SEARCH = {  # with --local-tempo: local tempo consistency (src/meter.py lo
     "local_weight": [0.0, 0.25, 0.5, 1.0, 2.0, 4.0],
     "local_sigma": [0.15, 0.25, 0.4],
 }
-VAL_GANGQINPU = {"gangqinpu": "val_gangqinpu"}   # --local-tempo also tunes on Gangqinpu's validation (when built)
+PIECE_SEARCH = {  # with --piece-tempo: the piece's own tempo (src/meter.py piece_tempo_logprior)
+    "piece_weight": [0.0, 0.5, 1.0, 2.0, 5.0, 10.0],
+    "piece_sigma": [0.1, 0.15, 0.25, 0.35, 0.5],
+}
+VAL_GANGQINPU = {"gangqinpu": "val_gangqinpu"}   # --local-tempo / --piece-tempo also tune on Gangqinpu's validation
 LEVEL_SEARCH = {  # with --level: the piece's note-value level (src/meter.py choose_level)
     "level_weight": [0.0, 0.25, 0.5, 1.0, 2.0],
     "level_model_weight": [0.0, 0.25, 0.5, 1.0, 2.0, 4.0],   # only with a tempo head
@@ -196,6 +200,38 @@ def tune_local(groups: list, cfg: DecodeConfig, rounds: int = 2) -> tuple[Decode
     return cur, info
 
 
+def tune_piece(groups: list, cfg: DecodeConfig, rounds: int = 2) -> tuple[DecodeConfig, dict]:
+    """Coordinate search of the piece-tempo prior (PIECE_SEARCH) on the validation performances,
+    every other setting kept as tuned. Scored by the selection score (a stretch written at double
+    the note values has twice the bar lines: downbeat F and time-signature accuracy see it); ties
+    go to the prior off. The right level (level_ok) and beat F on record, per source."""
+    cache = {}
+
+    def scores(c: DecodeConfig):
+        key = tuple(sorted(c.to_dict().items()))
+        if key not in cache:
+            cache[key] = [score(p, lp, b, c) for _, p, lp, b in groups]
+        return cache[key]
+
+    def value(c: DecodeConfig) -> float:
+        return select(scores(c))
+    off = DecodeConfig(**{**cfg.to_dict(), "piece_weight": 0.0})
+    cur = off
+    for _ in range(rounds):
+        for name, options in PIECE_SEARCH.items():
+            best = max(options, key=lambda v: (round(value(DecodeConfig(**{**cur.to_dict(), name: v})), 6),
+                                               -abs(v - getattr(DecodeConfig(), name))))
+            cur = DecodeConfig(**{**cur.to_dict(), name: best})
+
+    def summary(c):
+        return {name: {"select": select([s]), "level_ok": nanmean([x["level_ok"] for x in s]),
+                       "beat_f": nanmean([x["beat_f"] for x in s])}
+                for (name, *_), s in zip(groups, scores(c))}
+    info = {"piece_select_off": value(off), "piece_select_tuned": value(cur), "piece_configs_tried": len(cache),
+            "piece_per_source": {"off": summary(off), "tuned": summary(cur)}}
+    return cur, info
+
+
 def select(groups_scores: list) -> float:
     """The training script's selection score: mean over the sources of (downbeat F + ts acc) / 2."""
     vals = [(np.mean([s["downbeat_f"] for s in g]) + np.mean([s["ts_acc"] for s in g])) / 2 for g in groups_scores if g]
@@ -251,6 +287,9 @@ def main(argv=None):
     ap.add_argument("--local-tempo", action="store_true",
                     help="tune the local tempo consistency term (src/meter.py local_tempo_logprior) on validation, "
                          "Gangqinpu's included, on top of decode.json's settings (or --decode-from's)")
+    ap.add_argument("--piece-tempo", action="store_true",
+                    help="tune the piece-tempo prior (src/meter.py piece_tempo_logprior) on validation, Gangqinpu's "
+                         "included, on top of decode.json's settings (or --decode-from's)")
     ap.add_argument("--tune", action="store_true", help="tune the decoder on the validation performances first")
     ap.add_argument("--tempo-prior", action="store_true",
                     help="--tune also searches the written-tempo prior (src/meter.py tempo_logprior)")
@@ -315,11 +354,11 @@ def main(argv=None):
     dfile = run / "decode.json"
     if args.level and model is None:
         raise SystemExit("--level needs a model (the oracle's grids are at the right level already)")
-    if (args.tune or args.level or args.local_tempo) and model is None:
-        raise SystemExit("--tune, --level and --local-tempo need a model")
-    if args.tune or args.level or args.local_tempo:
+    if (args.tune or args.level or args.local_tempo or args.piece_tempo) and model is None:
+        raise SystemExit("--tune, --level, --local-tempo and --piece-tempo need a model")
+    if args.tune or args.level or args.local_tempo or args.piece_tempo:
         groups = val_groups(model, data, tune_noise, device, args.tune_periscope, max_perfs=args.tune_max, aux_of=aux_of,
-                            extra=VAL_GANGQINPU if args.local_tempo else None)
+                            extra=VAL_GANGQINPU if args.local_tempo or args.piece_tempo else None)
         if args.tune:
             cfg, info = tune(groups, tempo=args.tempo_prior)
             print(f"decoder tuned on validation ({info['validation']}): selection score {info['select_default']:.3f} "
@@ -327,8 +366,8 @@ def main(argv=None):
         else:
             src = Path(args.decode_from) if args.decode_from else dfile
             if not src.exists():
-                raise SystemExit(f"--level / --local-tempo without --tune start from a tuned decoder: {src} not found "
-                                 "(--decode-from)")
+                raise SystemExit(f"--level / --local-tempo / --piece-tempo without --tune start from a tuned decoder: "
+                                 f"{src} not found (--decode-from)")
             prev = json.loads(src.read_text())
             cfg, info = DecodeConfig.from_dict(prev["decode"]), {k: v for k, v in prev.items() if k != "decode"}
             info["decode_from"] = str(src)
@@ -347,6 +386,12 @@ def main(argv=None):
             print(f"local tempo tuned on validation ({ {n: len(p) for n, p, _, _ in groups} }): selection score "
                   f"{tinfo['local_select_off']:.4f} -> {tinfo['local_select_tuned']:.4f} (local_weight {cfg.local_weight}, "
                   f"local_sigma {cfg.local_sigma}); per source (off, on): {tinfo['local_per_source']}", flush=True)
+        if args.piece_tempo:
+            cfg, pinfo = tune_piece(groups, cfg)
+            info.update(pinfo)
+            print(f"piece tempo tuned on validation ({ {n: len(p) for n, p, _, _ in groups} }): selection score "
+                  f"{pinfo['piece_select_off']:.4f} -> {pinfo['piece_select_tuned']:.4f} (piece_weight {cfg.piece_weight}, "
+                  f"piece_sigma {cfg.piece_sigma}); per source: {pinfo['piece_per_source']}", flush=True)
         dfile.write_text(json.dumps({"decode": cfg.to_dict(), **info}, indent=1))
     elif args.decode_from:
         dfile.write_text(Path(args.decode_from).read_text())
