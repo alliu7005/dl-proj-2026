@@ -69,9 +69,12 @@ ID=""
 submit() {  # name, then sbatch options and --wrap: the job id in $ID, counted in $n
   local name=$1
   shift
-  local kill=()
+  local kill=() wait=()
   case " $* " in *" --dependency=afterok:"*) kill=(--kill-on-invalid-dep=yes) ;; esac
-  ID=$(sbatch --parsable -J "$name" -o "slurm-$name-%j.out" ${kill[@]+"${kill[@]}"} "$@")
+  # AFTER=<id:id...>: a job with no dependency of its own waits for those (pace/v2_round12.sh runs the rounds in turn)
+  case " $* " in *" --dependency="*) ;; *) [ -n "${AFTER:-}" ] && wait=("--dependency=afterany:$AFTER") ;; esac
+  ID=$(sbatch --parsable -J "$name" -o "slurm-$name-%j.out" ${kill[@]+"${kill[@]}"} ${wait[@]+"${wait[@]}"} "$@")
+  [ -n "${JOBLOG:-}" ] && echo "$ID" >> "$JOBLOG"
   n=$((n + 1))
 }
 

@@ -42,6 +42,21 @@ RELEASE = {
 # note unless the labeller is at least this sure it is not in the score, trim written lengths
 # that run just past the next onset (src/pipeline.py tidy_lengths), write glissandos as glissandos.
 DELETE_ABOVE = 0.95
+# MIDI input (no transcription errors to keep out): 0.8 (the pilot's D on the michael branch: -0.15
+# MUSTER on clean MIDI beyond chance, level on real audio, where 0.95 stays: by ear, leaving real notes
+# out of a recording's score was the problem)
+DELETE_ABOVE_MIDI = 0.8
+# one meter per piece (src/meter.py consistent_meter at this share of the piece): 2/4 bars of a 4/4 piece
+# paired into 4/4, 2/2 written as 4/4 (the pilot's F: whole pieces level, time-signature changes ~1 per
+# 100 bars instead of many, and Maple / Lemon written in one meter); a meter decode.json that sets
+# one_meter itself wins
+ONE_METER = 0.6
+# swung playing written straight under a swing marking (src/swing.py; the pilot's I: level on the
+# benchmark, Lemon bars 2-7 78% -> 96% of the sheet's onsets)
+SWING = True
+# each written length chosen among the labeller's top 4 from the notes placed around it
+# (src/dur_chooser.py; on only where a chooser was trained for the labeller, and the benchmark decides)
+DUR_CHOOSER = False
 TIDY = True
 # glissandos written as a "gliss." line between their first and last note (src/glissando.py)
 GLISSANDO = True

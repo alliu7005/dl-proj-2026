@@ -154,7 +154,8 @@ def keep_mask(keep_logits: torch.Tensor, delete_above: float = 0.5) -> torch.Ten
 
 
 def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, staves: int = 0,
-                 delete_above: float = 0.5, pos_est=None, beat_decode=None) -> list[Placed]:
+                 delete_above: float = 0.5, pos_est=None, beat_decode=None, dur_chooser=None,
+                 frame=None, perf=None) -> list[Placed]:
     """Item ``b`` of a batch's predictions -> the notes to render: every own note (window or
     carried, ``own`` mask over the item's notes; context notes belong to other windows) the keep
     head keeps, at its predicted bar (grid bar + correction, never before bar 0), position,
@@ -162,7 +163,10 @@ def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, st
     ``staves``: only the first that many staves (each note on its likeliest of them; 0 = all).
     ``delete_above``: see keep_mask. ``beat_decode`` (src/beat_decode.py BeatDecode) with
     ``pos_est`` (each note's position on the grid, quarters from its grid bar line): the splits of
-    the quarter decoded a beat at a time, fused with the timing, instead of each note's likeliest."""
+    the quarter decoded a beat at a time, fused with the timing, instead of each note's likeliest.
+    ``dur_chooser`` (src/dur_chooser.py DurChooser) with ``frame`` (the window's bars) and ``perf``
+    ((onsets, durations) in seconds per item note): each length chosen among the dur head's top
+    candidates from the placed notes around it (a length the beat decoding changed is kept)."""
     n = min(len(own), out["keep"].shape[1])  # the batch pads every item to its longest one
     keep = keep_mask(out["keep"][b, :n], delete_above).cpu().numpy()
     pick = {k: out[k][b, :n].argmax(-1).cpu().numpy() for k in ("delta", "pos", "sub", "dur")}
@@ -171,6 +175,7 @@ def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, st
         staff_logits = staff_logits[:, :staves]
     pick["staff"] = staff_logits.argmax(-1).cpu().numpy()
     flags = (out["flags"][b, :n] > 0).cpu().numpy()
+    first_dur = pick["dur"].copy()
     if beat_decode is not None and beat_decode.active and pos_est is not None:
         from .beat_decode import Families, decode_item
         fams = getattr(space, "_families", None)
@@ -185,7 +190,21 @@ def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, st
         bar = max(0, int(bar_est[i]) + int(pick["delta"][i]) - 1)
         res.append(Placed(bar, space.pos_value(pick["pos"][i], pick["sub"][i]), int(round(float(pitches[i]))),
                           space.dur_value(pick["dur"][i]), int(pick["staff"][i]), grace, arp, orns, int(i)))
+    if dur_chooser is not None and frame is not None and perf is not None and res:
+        dur_chooser.apply(res, frame, out["dur"][b, :n].float().cpu().numpy(), np.asarray(perf[0])[:n],
+                          np.asarray(perf[1])[:n], space, keep=np.asarray(pick["dur"] != first_dur))
     return res
+
+
+def performed(model_cfg, notes: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
+    """(onsets, durations) in seconds of an item's notes, from its standardised features
+    (src/dataset.py note_features: onset column 1, log duration column 3; cfg.feat_mean / feat_std
+    over columns 1-4)."""
+    f = notes.float().cpu().numpy()
+    mean, std = np.asarray(model_cfg.feat_mean, np.float64), np.asarray(model_cfg.feat_std, np.float64)
+    onset = f[:, 1] * std[0] + mean[0]
+    dur = np.exp(f[:, 3] * std[2] + mean[2])
+    return onset, dur
 
 
 def build_labeller(cfg: dict) -> NoteLabeller:
@@ -202,12 +221,13 @@ def load_labeller(path, device) -> NoteLabeller:
 @torch.no_grad()
 def predict_placed(model, items: list[dict], coll, device, amp: bool, space, batch_size: int = 32,
                    carried: bool = True, staves: int = 0, delete_above: float = 0.5,
-                   beat_decode=None) -> list[list[Placed]]:
+                   beat_decode=None, dur_chooser=None, frames: list | None = None) -> list[list[Placed]]:
     """Label dataset items (ScoreSegmentDataset(notelabels=True), or src/pipeline.py V2Pipeline's
     windows): the notes each keeps, placed in its window's bars. ``carried``: also the notes carried
     over from the window before (a window's target writes their continuation; a whole piece
     places each note once, in its own window). ``staves``, ``delete_above``, ``beat_decode`` (with
-    the items' "pos_est"): see placed_notes."""
+    the items' "pos_est"): see placed_notes. ``dur_chooser`` with ``frames`` (each item's window
+    bars): the lengths chosen by src/dur_chooser.py."""
     from .dataset import ROLE_CARRIED, ROLE_WINDOW
     model.eval()
     res = [None] * len(items)
@@ -222,8 +242,11 @@ def predict_placed(model, items: list[dict], coll, device, amp: bool, space, bat
             it = items[i]
             own = (it["roles"] <= (ROLE_CARRIED if carried else ROLE_WINDOW)).numpy()
             pe = it["pos_est"].numpy() if "pos_est" in it else None
+            ch = dur_chooser if dur_chooser is not None and frames is not None else None
             res[i] = placed_notes(out, r, it["notes"][:, 0].numpy(), it["bar_est"].numpy(), own, space, staves,
-                                  delete_above, pos_est=pe, beat_decode=beat_decode)
+                                  delete_above, pos_est=pe, beat_decode=beat_decode, dur_chooser=ch,
+                                  frame=frames[i] if ch is not None else None,
+                                  perf=performed(model.cfg, it["notes"]) if ch is not None else None)
     return res
 
 

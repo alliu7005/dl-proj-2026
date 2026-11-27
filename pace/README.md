@@ -942,6 +942,36 @@ git pull && bash pace/v2_headroom.sh       # 4 jobs, about an hour or two
 
 `outputs/headroom/report.md`; bring it back with `scp` (it is small).
 
+## 4aa. Twelfth round: everything the pilots said to scale, one stage after another
+
+The pilot (4w-4y) and the headroom tests (4z) left four things worth a full run. `pace/v2_round12.sh`
+submits them all at once, each stage waiting for every job of the one before (`afterany`), so they
+run in turn and never compete for the queue:
+1. **ensemble**: round 11 (4v, `pace/v2_ensemble.sh`). Averaging three seeds beat one seed by
+   0.5-0.7 MUSTER on real ASAP with the PM2S meters (the pilot's A); this is the same for the
+   release's Beat This! meter, which the pilot did not test.
+2. **chooser**: the duration chooser (`src/dur_chooser.py`): each note's written length picked among
+   the labeller's top 4 from the notes placed around it (`scripts/train_dur_chooser.py`, trained on
+   the validation windows, measured on the test windows). The headroom test found the right
+   length in the top 4 for 95% of notes, and a perfect pick would raise rendered duration accuracy
+   from 0.87 to 0.97. Whole pieces with it (`_dc`) and with the new defaults: one meter per piece
+   (`meter_v4_gq_om6`), swing (`_sw`), and d80, MIDI input's setting.
+3. **seq2seq**: the seq2seq recipe (`sf_base_reg_cab_c128`) retrained on the rebuilt data with 30% of
+   its windows from Gangqinpu (`train_model.py --gangqinpu-share 0.3`, run `sf_c128_gq30`; Gangqinpu
+   data was v2's biggest single gain, -1.93 MUSTER on pop). Up to 3 x 8 h jobs, each resuming the
+   last; whole pieces on ASAP and Gangqinpu.
+4. **pm2s**: round 9 (`pace/v2_pm2s2.sh`), PM2S retrained with stable settings (the pilot's C).
+
+```bash
+git pull && bash pace/v2_round12.sh                       # all four stages, ~27 jobs, 2-3 days
+STAGES="chooser seq2seq" bash pace/v2_round12.sh          # only some, in this order
+```
+
+Reports: `outputs/round11/report.md` (ensembles), `outputs/round12/report.md` (the chooser on the
+windows and on whole pieces, the new defaults, seq2seq with Gangqinpu against seq2seq before and
+against v2), and round 9's `outputs/compare` and `paired.md`. If `sf_c128_gq30` is not finished after
+its three jobs, `STAGES=seq2seq bash pace/v2_round12.sh` resumes it. Nothing is published (`PUBLISH=0`).
+
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 
 The grid is v2's bottleneck: the labeller's window onset F1 is 0.78-0.86 on the true grid and

@@ -58,7 +58,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import (SHOW, TokenBudgetBatches, TruncatingCollate, lower_priority,  # noqa: E402
                            pick_device, store_lengths)
 from src.beats import BeatNoise, beats_path  # noqa: E402
-from src.dataset import AugmentConfig, ContextNoise, MixedTrainDataset, ScoreSegmentDataset, n_features  # noqa: E402
+from src.dataset import (AugmentConfig, ContextNoise, MixedTrainDataset, ScoreSegmentDataset, ShareMixDataset,  # noqa: E402
+                         n_features)
 from src.eval.metrics import Accumulator  # noqa: E402
 from src.metrical import aux_counts, aux_loss, aux_scores  # noqa: E402
 from src.model import token_loss  # noqa: E402
@@ -93,8 +94,9 @@ class Evaluator:
     (ground-truth prompt, as in scripts/train.py). Sets with no data are left out."""
 
     def __init__(self, vocab_path, n_loss: int, n_decode: int, coll, seed: int = 0, beats=None,
-                 real_beats=None, **ctx):
-        """``beats`` / ``real_beats``: beat arguments of ScoreSegmentDataset for val / val_transcribed."""
+                 real_beats=None, gangqinpu: bool = False, **ctx):
+        """``beats`` / ``real_beats``: beat arguments of ScoreSegmentDataset for val / val_transcribed.
+        ``gangqinpu``: val_gangqinpu too ("val_gq"), in the mean the best checkpoint is chosen by."""
         rng = np.random.default_rng(seed)
         self.coll = coll
         self.sets = {}
@@ -113,6 +115,12 @@ class Evaluator:
             real = ScoreSegmentDataset(str(D / "val_transcribed"), vocab_path, **ctx,
                                        **(real_beats if real_beats is not None else beats or {}))
             self.sets["val_real"] = (real, sample(range(len(real)), n_loss), sample(range(len(real)), n_decode))
+        if gangqinpu and has_split("val_gangqinpu"):
+            if (beats or {}).get("beats") == "gt" and not beats_path(D / "val_gangqinpu", "gt").exists():
+                print(f"note: no {beats_path(D / 'val_gangqinpu', 'gt')}: validation without val_gangqinpu", flush=True)
+            else:
+                gq = ScoreSegmentDataset(str(D / "val_gangqinpu"), vocab_path, **ctx, **(beats or {}))
+                self.sets["val_gq"] = (gq, sample(range(len(gq)), n_loss), sample(range(len(gq)), n_decode))
         print("validation sets:", {k: len(v[1]) for k, v in self.sets.items()}, flush=True)
 
     @torch.no_grad()
@@ -206,6 +214,9 @@ def main():
                     help="beats of the real-transcription windows: the tracker's own (beats_tracked.npz), or the "
                          "ground truth with --beat-noise like the clean data (with --beat-noise none: exact "
                          "beats everywhere, the ceiling of what beats can give)")
+    ap.add_argument("--gangqinpu-share", type=float, default=0.0,
+                    help="share of training windows from train_gangqinpu (scripts/build_gangqinpu_windows.py; with "
+                         "--beats, scripts/build_beats.py --splits train_gangqinpu,val_gangqinpu); 0 = none")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--eval-every", type=int, default=2000)
     ap.add_argument("--eval-loss-windows", type=int, default=400)
@@ -314,6 +325,33 @@ def main():
                                     augment=AugmentConfig(), context_noise=ctx, **notes_ctx_m, **(beat_args or {}))
         sampler = train.sampler()
         tok_len, note_len = store_lengths(train.store, args.max_notes, args.max_tokens)
+    gq_n = 0
+    if args.gangqinpu_share > 0:   # as scripts/train_labeller.py: S of the samples, an epoch stays the usual data's
+        S = args.gangqinpu_share
+        if not 0 < S < 1:
+            raise SystemExit("--gangqinpu-share must be between 0 and 1")
+        if args.no_noise:
+            raise SystemExit("--gangqinpu-share: not with --no-noise (Gangqinpu's notes are transcriptions)")
+        if not has_split("train_gangqinpu"):
+            raise SystemExit(f"--gangqinpu-share: no {D / 'train_gangqinpu'} (scripts/build_gangqinpu_windows.py)")
+        if beats_on and not beats_path(D / "train_gangqinpu", "gt").exists():
+            raise SystemExit(f"{beats_path(D / 'train_gangqinpu', 'gt')} missing: "
+                             "python scripts/build_beats.py --splits train_gangqinpu,val_gangqinpu")
+        gq = ScoreSegmentDataset(str(D / "train_gangqinpu"), vocab_path, noise=NoiseModel.from_json(args.noise),
+                                 augment=AugmentConfig(), context_noise=ctx, seed=args.seed + 2, **notes_ctx_m,
+                                 **(beat_args or {}))
+        gq_n = len(gq)
+        if isinstance(train, MixedTrainDataset):
+            rf, n_old = train.real_fraction, len(train.synthetic)
+            parts, shares = [train.synthetic, train.real, gq], [(1 - S) * (1 - rf), (1 - S) * rf, S]
+        else:
+            n_old, parts, shares = len(train), [train, gq], [1 - S, S]
+        g_tok, g_note = store_lengths(gq.store, args.max_notes, args.max_tokens)
+        tok_len, note_len = np.concatenate([tok_len, g_tok]), np.concatenate([note_len, g_note])
+        train = ShareMixDataset(parts, shares, epoch_samples=int(round(n_old / (1 - S))))
+        sampler = train.sampler()
+        print(f"Gangqinpu: {gq_n} training windows, {S:.0%} of the samples; shares {np.round(shares, 3).tolist()}",
+              flush=True)
     vocab = train.vocab
     note_len = np.minimum(note_len + n_ctx, args.max_notes)  # batch budget includes the context notes
     coll = TruncatingCollate(args.max_notes, args.max_tokens)
@@ -398,7 +436,9 @@ def main():
     data = {"train_windows": len(train), "train_transcribed": bool(real_ok and not args.no_noise),
             "val_transcribed": has_split("val_transcribed"), "beats": beat_record,
             "train_periscope": any(m.get("dataset") == "pianocore" for m in
-                                   (train.synthetic if hasattr(train, "synthetic") else train).store.meta)}
+                                   (train.parts[0] if hasattr(train, "parts") else
+                                    train.synthetic if hasattr(train, "synthetic") else train).store.meta),
+            "gangqinpu_share": args.gangqinpu_share, "gangqinpu_windows": gq_n}
     if ck is not None and (run / "config.json").exists():  # a resumed run keeps its original record
         data = json.loads((run / "config.json").read_text()).get("data", data)
     json.dump({"args": vars(args), "arch": args.arch, "model": cfg, "params": n_params,
@@ -408,7 +448,7 @@ def main():
           f"{steps_per_epoch} steps/epoch, {total_steps} steps total | Ctrl+C saves and stops", flush=True)
 
     evaluator = Evaluator(vocab_path, args.eval_loss_windows, args.eval_decode_windows, coll, beats=val_beats,
-                          real_beats=val_real_beats, **notes_ctx_m)
+                          real_beats=val_real_beats, gangqinpu=args.gangqinpu_share > 0, **notes_ctx_m)
 
     def save(path):
         # atomic: a job killed mid-save (PACE's time limit) keeps the previous complete checkpoint

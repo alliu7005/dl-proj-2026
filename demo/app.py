@@ -42,8 +42,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse  # noqa: E402
 
 from src.pipeline import AUDIO_EXT, MIDI_EXT, MODES, ScorePipeline, V2Pipeline  # noqa: E402
-from src.release import (BEAT_DECODE, FIX_JUMPS, GLISSANDO, READABLE, TIDY, TIMING_BEATS, TIMING_CHECK,  # noqa: E402
-                         default_path)  # the decided rules' defaults; their published verdict: rule_settings
+from src.release import (BEAT_DECODE, DELETE_ABOVE_MIDI, DUR_CHOOSER, FIX_JUMPS, GLISSANDO, ONE_METER,  # noqa: E402
+                         READABLE, SWING, TIDY, TIMING_BEATS, TIMING_CHECK, default_path)  # the decided rules' defaults; their published verdict: rule_settings
 
 MAX_MB = 100
 STAGES = {"transcribe": (0.0, 0.45), "beats": (0.45, 0.5), "grid": (0.5, 0.55), "score": (0.55, 0.95),
@@ -86,7 +86,10 @@ def create_app(pipes: dict, out_root: Path, default: str | None = None) -> FastA
             try:
                 pipe = pipes[job["system"]]
                 if job["system"] == "v2":
-                    res = pipe.run(job["input"], job["dir"], progress=progress, delete_above=DELETE[job["delete"]])
+                    d = DELETE[job["delete"]]
+                    if job["delete"] == "sure" and job.get("is_midi"):   # no transcription errors to keep out
+                        d = DELETE_ABOVE_MIDI
+                    res = pipe.run(job["input"], job["dir"], progress=progress, delete_above=d)
                 else:
                     res = pipe.run(job["input"], job["dir"], mode=job["mode"], progress=progress)
                 update(jid, status="done", progress=1.0, stage="done", message="done", stats=res.stats,
@@ -170,14 +173,16 @@ def create_app(pipes: dict, out_root: Path, default: str | None = None) -> FastA
 
 def load_pipes(paths: dict, vocab, device, tidy: bool, log=print, glissando: bool = GLISSANDO,
                timing_check: bool = TIMING_CHECK, readable: bool = READABLE, fix_jumps: bool = FIX_JUMPS,
-               timing_beats: bool = TIMING_BEATS, beat_decode: bool = BEAT_DECODE) -> dict:
+               timing_beats: bool = TIMING_BEATS, beat_decode: bool = BEAT_DECODE, swing: bool = SWING,
+               one_meter: float | None = ONE_METER, dur_chooser: bool = DUR_CHOOSER) -> dict:
     """{"v2": V2Pipeline, "seq2seq": ScorePipeline} for the checkpoints that exist."""
     pipes = {}
     if Path(paths["labeller"]).exists() and Path(paths["meter"]).exists():
         log(f"loading v2: {paths['labeller']} + {paths['meter']} ...")
         pipes["v2"] = V2Pipeline(paths["labeller"], paths["meter"], vocab, device, tidy=tidy, glissando=glissando,
                                  timing_check=timing_check, readable=readable, fix_jumps=fix_jumps,
-                                 timing_beats=timing_beats, beat_decode=beat_decode)
+                                 timing_beats=timing_beats, beat_decode=beat_decode, swing=swing,
+                                 one_meter=one_meter, dur_chooser=dur_chooser)
     else:
         log(f"no v2 ({paths['labeller']} / {paths['meter']} missing)")
     if Path(paths["ckpt"]).exists():

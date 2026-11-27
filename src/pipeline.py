@@ -606,7 +606,8 @@ class V2Pipeline(_FrontEnd):
                  device: str = "auto", window_notes: int = 128, delete_above: float = DELETE_ABOVE,
                  tidy: bool = False, glissando: bool = False, timing_check: bool = False,
                  readable: bool = False, fix_jumps: bool = False, timing_beats: bool = False,
-                 beat_decode: bool = False, pkspell: bool = False, engraving: bool = False, swing: bool = False):
+                 beat_decode: bool = False, pkspell: bool = False, engraving: bool = False, swing: bool = False,
+                 dur_chooser: bool = False, one_meter: float | None = None):
         """``glissando``: find glissandos in the notes (src/glissando.py) and write each as its first
         and last note joined by a "gliss." line, not as the run of notes. ``timing_check``: a note
         written on a triplet position but played on a straight eighth or sixteenth is moved there
@@ -617,7 +618,11 @@ class V2Pipeline(_FrontEnd):
         straight (src/timing.py check_beats). ``beat_decode``: the labeller's splits of the quarter
         decoded a beat at a time, fused with the timing (src/beat_decode.py), with the parameters
         tuned for the checkpoint (beat_decode.json next to it; without one, each note's likeliest
-        split as before, and the stats say so). All off by default:
+        split as before, and the stats say so). ``dur_chooser``: each written length chosen among the
+        labeller's top candidates from the notes placed around it (src/dur_chooser.py, the chooser
+        saved next to the labeller; without one, the likeliest as before). ``one_meter``: one meter
+        per piece (src/meter.py consistent_meter) at this share, where the meter's decode.json has
+        none (None: as decode.json says). All off by default:
         the scoring script measures each as its own system."""
         from .labeller import load_labeller
         from .meter import DecodeConfig, load_meter
@@ -633,6 +638,8 @@ class V2Pipeline(_FrontEnd):
         dfile = meter_ckpt.parent / "decode.json"
         self.decode_cfg = (DecodeConfig.from_dict(json.loads(dfile.read_text())["decode"]) if dfile.exists()
                            else DecodeConfig())
+        if one_meter is not None and not self.decode_cfg.one_meter:
+            self.decode_cfg.one_meter = float(one_meter)
         vocab_path = ScorePipeline._find(vocab, labeller_ckpt, "vocab.json")
         self.vocab = Vocab.load(str(vocab_path))
         self.space = LabelSpace(self.vocab.itos)
@@ -659,6 +666,9 @@ class V2Pipeline(_FrontEnd):
         from .beat_decode import BeatDecode
         self.beat_params = BeatDecode.load(labeller_ckpt.parent)   # None: not tuned for this labeller
         self.beat_decode = bool(beat_decode)
+        from .dur_chooser import DurChooser
+        self.dur_chooser = DurChooser.load(labeller_ckpt.parent, self.device) if dur_chooser else None
+        self.dur_chooser_missing = bool(dur_chooser) and self.dur_chooser is None
         self.info = {"system": "v2", "labeller": str(labeller_ckpt), "meter": str(meter_ckpt),
                      "params_M": round((n_lab + n_met) / 1e6, 1), "device": str(self.device),
                      "decode": self.decode_cfg.to_dict()}
@@ -744,13 +754,14 @@ class V2Pipeline(_FrontEnd):
         coll = TruncatingCollate(self.cfg.max_notes, 10 ** 9)
         bd = self.beat_decode if beat_decode is None else bool(beat_decode)
         bparams = self.beat_params if bd else None   # None also when not tuned
+        dc = dict(dur_chooser=self.dur_chooser, frames=frames) if self.dur_chooser is not None else {}
         placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
-                                delete_above=delete_above, beat_decode=bparams)
+                                delete_above=delete_above, beat_decode=bparams, **dc)
         staves = piece_staves([p.staff for pl in placed for p in pl])
         folded = sum(p.staff >= staves for pl in placed for p in pl)
         if folded:  # a stray third / fourth staff: those notes on their likeliest of the staves kept
             placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
-                                    staves=staves, delete_above=delete_above, beat_decode=bparams)
+                                    staves=staves, delete_above=delete_above, beat_decode=bparams, **dc)
         notes_out = []
         skip = np.asarray(drop, bool) if drop is not None else np.zeros(len(notes), bool)
         for w, win, pl in zip(windows, frames, placed):
@@ -812,6 +823,7 @@ class V2Pipeline(_FrontEnd):
                                         else False),
                         "readable": rd, "rests_closed": closed, "overlaps_trimmed": trimmed,
                         "swing": swing_kind, "swing_written_straight": swung,
+                        "dur_chooser": self.dur_chooser is not None, "dur_chooser_missing": self.dur_chooser_missing,
                         "follow": follow_map(grid, notes_out)}
 
     # ------------------------------------------------------------------ all of it

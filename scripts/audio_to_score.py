@@ -20,7 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.pipeline import BEAT_SOURCES, GUARD_MARGIN, MODES, ScorePipeline, V2Pipeline  # noqa: E402
-from src.release import DELETE_ABOVE, GLISSANDO, READABLE, TIDY, default_path, rule_settings  # noqa: E402
+from src.release import (DELETE_ABOVE, DELETE_ABOVE_MIDI, DUR_CHOOSER, GLISSANDO, ONE_METER, READABLE, SWING,  # noqa: E402
+                         TIDY, default_path, rule_settings)
 
 
 def main():
@@ -38,9 +39,9 @@ def main():
                          "as context, degenerate windows redone without it; chained: previous output as context, "
                          "unguarded; none: no context")
     ap.add_argument("--guard-margin", type=float, default=GUARD_MARGIN)
-    ap.add_argument("--delete-above", type=float, default=DELETE_ABOVE,
+    ap.add_argument("--delete-above", type=float, default=None,
                     help="v2: leave a note out only when the labeller's p(delete) is above this (0.5: as "
-                         f"trained, 1: keep every note; default {DELETE_ABOVE}, as the demo)")
+                         f"trained, 1: keep every note; default {DELETE_ABOVE} for audio, {DELETE_ABOVE_MIDI} for MIDI, as the demo)")
     ap.add_argument("--beats", default="beat_this", choices=list(BEAT_SOURCES),
                     help="v2: where the beats come from: Beat This! (the recording; a MIDI file rendered to audio) "
                          "or PM2S on the notes (src/pm2s_beats.py)")
@@ -54,7 +55,10 @@ def main():
     ap.add_argument("--no-fix-jumps", action="store_true", help="v2: keep the meter model's stretched bars (a jump of beats in one beat's time) as decoded")
     ap.add_argument("--pkspell", action="store_true", help="v2: key signature and spellings from PKSpell (src/pkspell.py)")
     ap.add_argument("--engraving", action="store_true", help="v2: clefs from each staff's range, one-voice stems by the engraver's rule (src/readable.py engrave_score)")
-    ap.add_argument("--swing", action="store_true", help="v2: swung playing written straight under a swing marking (src/swing.py)")
+    ap.add_argument("--no-swing", action="store_true", help="v2: write swung playing as played (default: straight under a swing marking, src/swing.py)")
+    ap.add_argument("--no-one-meter", action="store_true", help="v2: keep the decoder's changes between 2/4 and 4/4 (default: one meter per piece, src/meter.py consistent_meter)")
+    ap.add_argument("--dur-chooser", action=argparse.BooleanOptionalAction, default=DUR_CHOOSER,
+                    help="v2: each written length chosen among the labeller's top 4 from the notes around it (src/dur_chooser.py; needs dur_chooser.pt next to the labeller)")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
@@ -66,7 +70,8 @@ def main():
                           readable=READABLE and not args.no_readable, fix_jumps=rules["fix_jumps"] and not args.no_fix_jumps,
                           timing_beats=rules["timing_beats"] and not args.no_timing_beats,
                           beat_decode=rules["beat_decode"] and not args.no_beat_decode,
-                          pkspell=args.pkspell, engraving=args.engraving, swing=args.swing)
+                          pkspell=args.pkspell, engraving=args.engraving, swing=SWING and not args.no_swing,
+                          dur_chooser=args.dur_chooser, one_meter=None if args.no_one_meter else ONE_METER)
     else:
         pipe = ScorePipeline(args.ckpt, args.vocab, args.device)
     print(f"model: {pipe.info}", flush=True)
@@ -76,7 +81,11 @@ def main():
         print(f"  [{stage}] {msg}", end="\r" if stage == "score" else "\n", flush=True)
 
     if args.v2:
-        res = pipe.run(args.input, out, progress=progress, delete_above=args.delete_above, beat_source=args.beats)
+        delete = args.delete_above
+        if delete is None:
+            from src.pipeline import MIDI_EXT
+            delete = DELETE_ABOVE_MIDI if Path(args.input).suffix.lower() in MIDI_EXT else DELETE_ABOVE
+        res = pipe.run(args.input, out, progress=progress, delete_above=delete, beat_source=args.beats)
     else:
         res = pipe.run(args.input, out, mode=args.mode, progress=progress, guard_margin=args.guard_margin)
     print()

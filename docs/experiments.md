@@ -1662,6 +1662,46 @@ else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the releas
 the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
 the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
+### Twelfth round: plan (2026-11-27)
+
+`pace/v2_round12.sh` (pace/README.md, 4aa), from the pilot's and the headroom tests' results
+(`outputs/pilot/report.md`, `outputs/headroom/report.md`):
+- **Pilot verdicts.** Go:
+  - meter ensembles: 3 seeds averaged beat one seed by 0.49-0.71 MUSTER on real ASAP, beyond
+    chance, with the PM2S meters; level with the other two seeds;
+  - PM2S retrained with stable settings: validation 0.705 at 16k steps and still rising;
+  - d80: -0.15 clean, level elsewhere;
+  - one meter per piece: MUSTER level, time-signature changes ~0-1.6 per 100 bars;
+  - swing: level.
+
+  No go: TTA, synthetic performances, repetition features, bar-length-tolerant training (downbeat
+  F -0.13 on Gangqinpu), engraving stems (ASAP 56% -> 47% but Gangqinpu 10% -> 30%: `nl_gq` had
+  learned Gangqinpu's stems), and a per-piece choice between seq2seq and v2 (ceiling 0.06-0.43).
+  PKSpell halved ASAP's spelling error (it trained on ASAP) and Gangqinpu's went 1.5% -> 1.3%, with
+  MUSTER +0.01: kept as an option, off by default.
+- **Headroom.**
+  - Labeller: the right length in the dur head's top 2 for ~90% of notes, top 4 for ~95%
+    (likeliest ~80%). A perfect pick among the top 4 lifts the rendered duration accuracy
+    0.866 -> 0.971 (clean), 0.862 -> 0.969 (real), 0.890 -> 0.971 (PERiScoPe); note F1 barely moves.
+    Worth a learned chooser.
+  - Meter: the best alternative per piece lifts (downbeat F + ts) / 2 from 0.63 to 0.78 (clean),
+    0.52 to 0.65 (real), 0.85 to 0.93 (Gangqinpu), "double" the most frequent winner after the
+    decoded grid. That is the note-value level problem of round 5, where tempo / density priors,
+    the labeller's confidence and a learned tempo head all failed. Not built again.
+- **Built for it.**
+  - `src/dur_chooser.py`: an MLP scoring each of the top 4 lengths from the labeller's
+    log-probability and rank, the written gap to the next onset on the staff and on any staff,
+    the performed duration against the performed gap, where the length ends (beat, bar line,
+    past it), and the chord's agreement. Trained on the validation windows (none of them the
+    labeller's training data), performances split 85 / 15 (`scripts/train_dur_chooser.py`).
+    It changes only lengths the beat decoding left alone.
+  - `train_model.py --gangqinpu-share` for seq2seq, as the labeller's. seq2seq never saw
+    Gangqinpu: 7.69 MUSTER on pop against v2's 4.13.
+  - The new defaults in `src/release.py` (the demo and `audio_to_score.py`): one meter per piece
+    (`ONE_METER` 0.6) and swing on; 0.8 for MIDI input, 0.95 kept for recordings (by ear, leaving
+    real notes out of a recording's score was the problem). The chooser stays off
+    (`DUR_CHOOSER`) until the benchmark decides.
+
 ### Headroom tests (2026-11-27)
 
 `pace/v2_headroom.sh` (pace/README.md, 4z) measures three proposed ideas before anyone builds them.
