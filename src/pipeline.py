@@ -145,9 +145,9 @@ def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None =
     to empty) and "playback_qpm". ``glissandi`` (src/glissando.py attach): a "gliss." line each in
     the MusicXML, the swept notes in the score MIDI ("glissandi_drawn": how many lines). The score
     MIDI plays grace notes and rolled chords as written (src/playback.py: "graces_played",
-    "rolled_chords_played"), which music21's MIDI export alone does not. ``stems``: the higher
-    voice's stems up, the others' down where a staff has two voices (src/readable.py stem_voices;
-    "stems_set": how many measures)."""
+    "rolled_chords_played"), which music21's MIDI export alone does not. ``stems``: two voices to a
+    staff at most, the upper one's stems up and the lower one's down (detokenize.py ``two_voices``,
+    src/readable.py stem_voices; "stems_set": how many measures)."""
     import music21 as m21
     from .preprocessing.detokenize import tokens_to_musicxml, tokens_to_score
     report = {}
@@ -162,9 +162,11 @@ def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None =
                 report["stems_set"] = stem_voices(score)
     try:
         res.files["musicxml"] = Path(tokens_to_musicxml(tokens, str(out / "score.musicxml"), report=report,
-                                                        decorate=deco))
+                                                        decorate=deco, two_voices=stems))
         for clip in (False, True):  # clip notes to their bars if the plain export fails
             try:
+                # the score MIDI from the one-voice-per-slot writer: it plays a held note once (music21's MIDI
+                # export would strike a note of a chord again where the two-voice writer ties it into the next)
                 score = tokens_to_score(tokens, clip=clip)
                 qpm = playback_qpm(score, seconds)
                 from .playback import realize   # grace notes and rolled chords as written (src/playback.py)

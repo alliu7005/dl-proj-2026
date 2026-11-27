@@ -26,7 +26,10 @@ such rests: closing them lowered duration accuracy against ASAP's scores by abou
 (src/pipeline.py tidy_lengths), so the scoring script measures this as its own system (_rd).
 
 ``stem_voices`` (the MusicXML): in a measure where a staff has two voices or more, the voice with
-the higher notes gets its stems up and the others down, as engravers write them; without, both
+the higher notes gets its stems up and the lower one down (of three, the middle one by the side it
+is nearer), as engravers write them. With ``readable`` the writer gives a staff two voices at most,
+ordered by pitch (src/preprocessing/detokenize.py ``_two_voices``: the user's "unlasting" song had
+three treble voices in bar 4, the up-stem one partly below two down-stem ones); without, both
 voices' stems point the same way and the demo's viewer draws them over each other (the user's
 bar 29: half-note chords under a melody looked like 32nd-beamed chords). The rests that fill the
 other voices out (all but the one with the most notes) are hidden (MusicXML print-object="no"), as
@@ -163,11 +166,14 @@ def stem_voices(score) -> int:
             def height(v):
                 ps = [p.midi for el in v.notes for p in el.pitches]
                 return sum(ps) / len(ps) if ps else -1
-            top = max(vs, key=height)
+            hs = [height(v) for v in vs if v.notes]
+            top, bottom = max(hs, default=0), min(hs, default=0)
             full = max(vs, key=lambda v: sum(float(el.quarterLength) for el in v.notes))
             for v in vs:
+                h = height(v)   # the highest voice up, the lowest down, one between by the side it is nearer
+                up = h == top if len(hs) < 3 else (h == top or (h != bottom and h - bottom > top - h))
                 for el in v.notes:
-                    el.stemDirection = "up" if v is top else "down"
+                    el.stemDirection = "up" if up else "down"
                 if v is not full:
                     for r in v.getElementsByClass(m21.note.Rest):
                         r.style.hideObjectOnPrint = True

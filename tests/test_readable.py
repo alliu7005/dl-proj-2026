@@ -6,7 +6,9 @@ fix_jumps: a step that packs three beats into one beat's time shortens its bar t
 everything after it back; a long gap at the usual tempo (the tracker missed beats) is no jump; a
 bar keeps two beats; a step that leaves its bar is left. readable_lengths: short rests closed,
 small overlaps trimmed, not across the bar line, not into an unwritable length or across grids,
-grace notes left. stem_voices: stems by voice, the other voices' rests hidden. The pipeline's
+grace notes left. stem_voices: stems by voice (three: by height), the other voices' rests hidden.
+two_voices (src/preprocessing/detokenize.py): the user's measure 4 in two voices, and random bars that
+sound the same in two voices at most. The pipeline's
 switches, the system names, the demo's, the CLI's and the jobs' switches.
 """
 from __future__ import annotations
@@ -114,6 +116,117 @@ def test_stem_voices():
     with tempfile.TemporaryDirectory() as t:
         x = s.write("musicxml", Path(t) / "s.musicxml").read_text(encoding="utf-8")
     assert 'print-object="no"' in x and "<stem>up</stem>" in x and "<stem>down</stem>" in x
+
+
+M4 = ("bar pos_0 p_55 d_1 p_58 d_1/2 p_60 d_1/2 p_65 d_1/2 staff_1 p_41 d_4 p_48 d_4 pos_0 sub_1/2 staff_0 p_62 "
+      "d_7/2 p_67 d_1/2 pos_1 p_58 d_1 p_60 d_1 p_65 d_1 staff_1 p_55 d_1 pos_2 staff_0 p_58 d_2 p_60 d_2 p_65 d_2 "
+      "p_67 d_2 staff_1 p_55 d_2 pos_2 sub_1/2 staff_0 p_58 d_3/2").split()   # the user's song, measure 4
+
+
+def sounding(score):
+    """{(staff, onset, pitch, length)} the score plays, ties joined per pitch (quarters from the
+    start). By hand: music21's stripTies does not join a tied note of a chord into the next chord
+    when the chords' other notes differ, as the two-voice writer writes held notes."""
+    import music21 as m21
+    out = set()
+    for si, part in enumerate(score.parts):
+        notes = []
+        for el in part.recurse().notes:
+            if el.duration.isGrace:
+                continue
+            on = Fraction(el.getOffsetInHierarchy(part)).limit_denominator(1000)
+            ln = Fraction(el.quarterLength).limit_denominator(1000)
+            for n in (el.notes if isinstance(el, m21.chord.Chord) else [el]):
+                notes.append((on, n.pitch.midi, ln, n.tie.type if n.tie is not None else None))
+        held = {}   # pitch -> [onset, end] of the note a tie can continue
+        for on, p, ln, tie in sorted(notes):
+            h = held.get(p)
+            if tie in ("continue", "stop") and h is not None and h[1] == on:
+                h[1] = on + ln
+            else:
+                if h is not None:
+                    out.add((si, h[0], p, h[1] - h[0]))
+                held[p] = [on, on + ln]
+        out |= {(si, h[0], p, h[1] - h[0]) for p, h in held.items()}
+    return out
+
+
+def voices_of(score):
+    import music21 as m21
+    return [[list(m.voices) for m in part.getElementsByClass(m21.stream.Measure)] for part in score.parts]
+
+
+def test_two_voices_measure_4():
+    """The user's measure 4: three voices in the treble, two of them with stems down, the up-stem
+    one partly below them, B-flat 3 struck while held. Written with two_voices: two voices, the
+    upper one higher, stems up / down; the held D4 tied on in the upper voice; B-flat 3 ends where
+    it is struck again; everything else sounds as before."""
+    from src.preprocessing.detokenize import tokens_to_score
+    old, new = tokens_to_score(M4), tokens_to_score(M4, two_voices=True)
+    assert len(voices_of(old)[0][0]) == 3 and len(voices_of(new)[0][0]) == 2
+    stem_voices(new)
+    up, down = voices_of(new)[0][0]
+
+    def pitches(v):
+        return [p.midi for el in v.notes for p in el.pitches]
+    assert sum(pitches(up)) / len(pitches(up)) > sum(pitches(down)) / len(pitches(down))
+    assert all(el.stemDirection == "up" for el in up.notes) and all(el.stemDirection == "down" for el in down.notes)
+    assert any(n.tie is not None for el in up.notes for n in getattr(el, "notes", [el]) if n.pitch.midi == 62)
+    a, b = sounding(old), sounding(new)
+    assert (0, Fraction(2), 58, Fraction(2)) in a and (0, Fraction(2), 58, Fraction(1, 2)) in b   # struck again at 2.5
+    assert a - {(0, Fraction(2), 58, Fraction(2))} == b - {(0, Fraction(2), 58, Fraction(1, 2))}
+
+
+def test_two_voices_sound_the_same():
+    """Random dense bars (held notes, chords of different lengths, notes between held ones,
+    tuplets, a note across the bar line): at most two voices per staff with two_voices, and the
+    score sounds the same as the one-voice-per-free-slot writer's once a pitch struck while it is
+    held is ended there (detokenize.py _one_key_one_note). Both write MusicXML."""
+    import random
+    from src.preprocessing.detokenize import (_carry_overflow, _one_key_one_note, bars_to_score, parse_tokens,
+                                              write_musicxml)
+    rng = random.Random(3)
+    lengths = ("1/2", "1", "3/2", "2", "1/4", "1/3", "3", "7/2")
+    for trial in range(25):
+        toks = []
+        for bar in range(3):
+            toks.append("bar")
+            if bar == 0:
+                toks.append("ts_3/4" if trial % 3 == 0 else "ts_4/4")
+            for pos in range(4):
+                toks.append(f"pos_{pos}")
+                for staff in (0, 1):
+                    toks.append(f"staff_{staff}")
+                    for _ in range(rng.randint(0, 3)):
+                        toks += [f"p_{rng.randint(36, 60) + 24 * (1 - staff)}", f"d_{rng.choice(lengths)}"]
+        bars = parse_tokens(toks)
+        cut = _carry_overflow(parse_tokens(toks))   # notes held over a bar line are in the next bar, as the writer has them
+        for b in cut:   # the reference: the old writer on the notes with one key, one note
+            b.notes = [n for s in (0, 1) for n in _one_key_one_note([n for n in b.notes if n.staff == s])] +                       [n for n in b.notes if n.staff > 1]
+        new, ref = bars_to_score(bars, two_voices=True), bars_to_score(cut)
+        assert sounding(new) == sounding(ref), trial
+        assert all(len(vs) <= 2 for staff in voices_of(new) for vs in staff), trial
+        with tempfile.TemporaryDirectory() as t:
+            write_musicxml(new, str(Path(t) / "s.musicxml"))
+
+
+def test_stems_three_voices():
+    """Three voices (the writer without two_voices): the highest up, the lowest down, the middle
+    one by the side it is nearer."""
+    import music21 as m21
+    m = m21.stream.Measure(number=1)
+    vs = []
+    for k, ps in enumerate((["C6"], ["G5"], ["C3"])):
+        v = m21.stream.Voice(id=str(k + 1))
+        v.append(m21.note.Note(ps[0], quarterLength=4))
+        m.insert(0, v)
+        vs.append(v)
+    part = m21.stream.Part()
+    part.append(m)
+    s = m21.stream.Score()
+    s.append(part)
+    stem_voices(s)
+    assert [v.notes[0].stemDirection for v in vs] == ["up", "up", "down"]
 
 
 def test_pipeline_and_switches():

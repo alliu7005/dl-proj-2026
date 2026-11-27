@@ -186,10 +186,11 @@ def _clip_to_bars(bars: list[_Bar]) -> list[_Bar]:
 
 
 def tokens_to_score(tokens: list[str], min_staves: int = 2, grid: int | None = None,
-                    clip: bool = False) -> m21.stream.Score:
+                    clip: bool = False, two_voices: bool = False) -> m21.stream.Score:
     """``grid``: optionally snap positions/durations to 1/grid quarter (fallback for export).
-    ``clip``: keep notes inside their bars (fallback for malformed model output, see _clip_to_bars)."""
-    return bars_to_score(parse_tokens(tokens), min_staves, grid, clip)
+    ``clip``: keep notes inside their bars (fallback for malformed model output, see _clip_to_bars).
+    ``two_voices``: see bars_to_score."""
+    return bars_to_score(parse_tokens(tokens), min_staves, grid, clip, two_voices)
 
 
 def _bar_length(ts: str) -> Fraction:
@@ -290,11 +291,108 @@ def _standard_rests(v):
             v.insert(float(p), nr)
 
 
+def _mean_pitch(notes) -> float:
+    return sum(n.pitch for n in notes) / len(notes)
+
+
+def _one_key_one_note(notes: list[_Note]) -> list[_Note]:
+    """A staff's notes in one bar with no pitch sounding twice: a pitch struck again while it is
+    held ends where it is struck again (one key cannot sound twice), and the same pitch twice at
+    once is one note: the one struck there rather than one tied on from before (a note held over
+    the bar line and struck again on the downbeat), else the longer. Grace notes are left alone."""
+    out, last = [], {}
+    for n in sorted(notes, key=lambda n: (n.pos, n.tie, -n.dur)):
+        if n.grace:
+            out.append(n)
+            continue
+        prev = last.get(n.pitch)
+        if prev is not None and prev.pos == n.pos:
+            continue                                  # a doubled unison: the longer one stays
+        if prev is not None and prev.pos + prev.dur > n.pos:
+            prev.dur = n.pos - prev.pos
+        last[n.pitch] = n
+        out.append(n)
+    return out
+
+
+def _two_voices(notes: list[_Note]) -> list[list[tuple[Fraction, Fraction, list[_Note]]]]:
+    """A staff's non-grace notes in one bar -> at most two voices, the upper one first, each a list
+    of (pos, dur, notes) that follow one another (a chord per position, rests between them).
+
+    The notes are taken by position, the higher chord first at the same position. A chord goes into
+    a voice that is free (its last chord has ended): of two, the one nearer in pitch, unless that
+    would put it on the wrong side of the other voice's sounding notes (the upper voice's lowest
+    note below the lower voice's highest, or the other way round). A second voice is opened for a
+    chord wholly above or below the notes held in the first; one that starts among them (a note
+    between two held ones) joins them instead. When no free voice fits, it shares a voice with
+    the notes still sounding there (the nearer in pitch): that voice is then written as chords at
+    every onset and end, the held notes split and tied (``tie``), so a staff never needs a third
+    voice and its stems seldom cross. Engravers write two voices to a staff at most in piano music."""
+    groups = defaultdict(list)
+    for n in notes:
+        groups[(n.pos, n.dur)].append(n)
+    order = sorted(groups.items(), key=lambda kv: (kv[0][0], -max(x.pitch for x in kv[1])))
+    voices: list[dict] = []   # {"notes": [...], "end": Fraction}
+
+    def sounding(v, pos):   # the voice's notes sounding at pos (started there or held over it)
+        return [x for x in v["notes"] if x.pos <= pos < x.pos + x.dur]
+
+    def height(v):
+        return _mean_pitch(v["notes"])
+    for (pos, dur), group in order:
+        m = _mean_pitch(group)
+        if not voices:
+            voices.append({"notes": list(group), "end": pos + dur})
+            continue
+        free = [v for v in voices if v["end"] <= pos]
+        busy = [v for v in voices if v["end"] > pos]
+        target = None
+        if len(voices) == 1:   # None: a second voice, when the chord is above or below the notes held
+            s = sounding(voices[0], pos)
+            inside = bool(s) and not (min(x.pitch for x in group) > max(x.pitch for x in s)
+                                      or max(x.pitch for x in group) < min(x.pitch for x in s))
+            target = voices[0] if free or inside else None
+        elif len(free) == 2:
+            target = min(free, key=lambda v: abs(_mean_pitch(v["notes"][-1:]) - m))
+        elif len(free) == 1:
+            f, b = free[0], busy[0]
+            s = sounding(b, pos)
+            upper = height(f) >= height(b)
+            lo, hi = min(x.pitch for x in group), max(x.pitch for x in group)
+            # in the upper voice its lowest note below the lower voice's highest, or the other way round
+            crosses = bool(s) and ((upper and lo < max(x.pitch for x in s)) or (not upper and hi > min(x.pitch for x in s)))
+            target = b if crosses else f
+        else:
+            target = min(voices, key=lambda v: min(abs(x.pitch - m) for x in sounding(v, pos) or v["notes"]))
+        if target is None:
+            voices.append({"notes": list(group), "end": pos + dur})
+        else:
+            target["notes"].extend(group)
+            target["end"] = max(target["end"], pos + dur)
+    voices.sort(key=height, reverse=True)
+    out = []
+    for v in voices:   # chords at every onset and end in the voice; a note held across one is tied on
+        cuts = sorted({x.pos for x in v["notes"]} | {x.pos + x.dur for x in v["notes"]})
+        parts = defaultdict(list)
+        for x in v["notes"]:
+            inner = [c for c in cuts if x.pos < c < x.pos + x.dur]
+            starts = [x.pos] + inner
+            ends = inner + [x.pos + x.dur]
+            for k, (a, b) in enumerate(zip(starts, ends)):
+                parts[(a, b - a)].append(x if len(starts) == 1 else _Note(
+                    a, x.staff, x.pitch, b - a, False, x.tie if k == 0 else True,
+                    x.arp if k == 0 else False, list(x.orns) if k == 0 else []))
+        out.append(sorted(((p, d, g) for (p, d), g in parts.items()), key=lambda t: t[0]))
+    return out
+
+
 def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None,
-                  clip: bool = False) -> m21.stream.Score:
+                  clip: bool = False, two_voices: bool = False) -> m21.stream.Score:
     """``tokens_to_score`` from parsed bars (changed in place by ``grid`` / ``clip``). Notes past
     their bar's end are carried into the next bar at the same time (``_carry_overflow``) unless
-    ``clip``."""
+    ``clip``. ``two_voices``: a staff gets two voices at most, the upper one first, with no pitch
+    sounding twice (``_two_voices``, ``_one_key_one_note``); without, a note goes into the first
+    voice free when it starts, however many that takes."""
     if grid:
         bars = _regrid(bars, grid)
     bars = _clip_to_bars(bars) if clip else _carry_overflow(bars)
@@ -320,18 +418,38 @@ def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None
                 meas.clef = m21.clef.TrebleClef() if s == 0 else m21.clef.BassClef()
             groups = defaultdict(list)
             run = defaultdict(int)  # grace notes before one position: a run, each its own note, in order
-            for n in bar.notes:
-                if n.staff == s:
-                    if n.grace:
-                        groups[(n.pos, True, n.dur, run[n.pos])].append(n)
+            staff_notes = [n for n in bar.notes if n.staff == s]
+            plan = None
+            if two_voices:   # (pos, grace?, voice, run index, notes), in the order they are written
+                staff_notes = _one_key_one_note(staff_notes)
+                vs = _two_voices([n for n in staff_notes if not n.grace])
+                plan = [(p, False, vi, 0, g) for vi, v in enumerate(vs) for p, d, g in v]
+                for n in staff_notes:
+                    if n.grace:   # into the voice whose chord at that position is nearest in pitch
+                        here = [(abs(_mean_pitch(g) - n.pitch), vi) for p, gr, vi, _, g in plan
+                                if not gr and p == n.pos]
+                        vi = min(here)[1] if here else 0
+                        plan.append((n.pos, True, vi, run[n.pos], [n]))
                         run[n.pos] += 1
-                        continue
-                    k = 0  # a doubled unison (same pitch twice) goes into a separate element/voice
-                    while any(x.pitch == n.pitch for x in groups[(n.pos, n.grace, n.dur, k)]):
-                        k += 1
-                    groups[(n.pos, n.grace, n.dur, k)].append(n)
+                plan.sort(key=lambda t: (t[0], not t[1], t[2], t[3]))
+                staff_notes = []
+            for n in staff_notes:
+                if n.grace:
+                    groups[(n.pos, True, n.dur, run[n.pos])].append(n)
+                    run[n.pos] += 1
+                    continue
+                k = 0  # a doubled unison (same pitch twice) goes into a separate element/voice
+                while any(x.pitch == n.pitch for x in groups[(n.pos, n.grace, n.dur, k)]):
+                    k += 1
+                groups[(n.pos, n.grace, n.dur, k)].append(n)
             voices: list[list] = []  # each: list of (pos, end, element)
-            for (pos, grace, dur, _), group in sorted(groups.items(), key=lambda kv: (kv[0][0], not kv[0][1], kv[0][3])):
+            if plan is not None:
+                items = [((pos, grace, g[0].dur, k), g, vi) for pos, grace, vi, k, g in plan]
+                voices = [[] for _ in range(1 + max((vi for *_, vi in items), default=-1))]
+            else:
+                items = [(key, g, None) for key, g in sorted(groups.items(),
+                                                           key=lambda kv: (kv[0][0], not kv[0][1], kv[0][3]))]
+            for (pos, grace, dur, _), group, fixed_voice in items:
                 el, tied = _make_element(group, bar.key, run=run[pos] if grace else 0)
                 for p in tied:  # continuation of a tie from an earlier note
                     prev = last_el[s].get(p)
@@ -343,6 +461,14 @@ def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None
                     target = el if isinstance(el, m21.note.Note) else next(x for x in el.notes if x.pitch.midi == p)
                     target.tie = m21.tie.Tie("stop")
                 end = pos + dur  # a grace note: pos (no length); its main note then joins its voice
+                if grace:
+                    end = pos
+                if fixed_voice is not None:
+                    voices[fixed_voice].append((pos, end, el))
+                    if not grace:
+                        for p in {n.pitch for n in group}:
+                            last_el[s][p] = el
+                    continue
                 for v in voices:
                     # a voice free at this position; also for a grace note: put into a voice still
                     # sounding a longer note, it overlapped that note and shifted everything the
@@ -355,6 +481,7 @@ def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None
                 if not grace:
                     for p in {n.pitch for n in group}:
                         last_el[s][p] = el
+            voices = [v for v in voices if v]
             if not voices:
                 r = m21.note.Rest()
                 r.duration = m21.duration.Duration(bar_len)
@@ -440,18 +567,19 @@ def _exports(bars: list[_Bar], **kw) -> bool:
             pass
 
 
-def _fix_bars(bars: list[_Bar], fallback_grid: int) -> tuple[list[_Bar], dict]:
+def _fix_bars(bars: list[_Bar], fallback_grid: int, two_voices: bool = False) -> tuple[list[_Bar], dict]:
     """Only the bars that cannot be exported exactly on their own, snapped to 1/``fallback_grid``
     quarter, clipped to the bar, or both (the first that exports): every other bar stays exact.
     Returns the bars (copies) and {bar index: "grid" | "clip" | "clip+grid" | "empty"}."""
     out, fixed = copy.deepcopy(bars), {}
+    tv = {"two_voices": two_voices}
     levels = (("grid", {"grid": fallback_grid}), ("clip", {"clip": True}),
               ("clip+grid", {"clip": True, "grid": fallback_grid}))
     for j, b in enumerate(bars):
-        if _exports([b]):
+        if _exports([b], **tv):
             continue
         for name, kw in levels:
-            if _exports([b], **kw):
+            if _exports([b], **kw, **tv):
                 one = copy.deepcopy(b)
                 if "grid" in kw:
                     _regrid([one], fallback_grid)
@@ -466,7 +594,7 @@ def _fix_bars(bars: list[_Bar], fallback_grid: int) -> tuple[list[_Bar], dict]:
 
 
 def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, report: dict | None = None,
-                       decorate=None) -> str:
+                       decorate=None, two_voices: bool = False) -> str:
     """Tokens -> MusicXML file, as exact as the notation allows. Exact rendering first. If that
     fails (mixed tuplet grids making some duration inexpressible, a zero-length note, overfull
     model output), only the bars that fail on their own are snapped to 1/``fallback_grid``
@@ -476,27 +604,29 @@ def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, re
     exported even on their own (clipped and snapped) are emptied, so the rest of the score is
     still written. ``report`` (a dict) gets "attempt" (0: exact; 1: per bar, "fixed_bars" saying
     which bars and how; 2-4: the whole score snapped / clipped / both; 5: bars emptied) and
-    "emptied_bars" (their indices). ``decorate``: see write_musicxml (applied to every attempt's score)."""
+    "emptied_bars" (their indices). ``decorate``: see write_musicxml (applied to every attempt's score).
+    ``two_voices``: see bars_to_score (every attempt)."""
     report = {} if report is None else report
     report["emptied_bars"] = []
 
     def write(score):   # write_musicxml looked up at call time (tests stand in for it); decorate only if given
         return write_musicxml(score, path) if decorate is None else write_musicxml(score, path, decorate)
+    tv = {"two_voices": two_voices}
     try:
-        out = write(tokens_to_score(tokens))
+        out = write(tokens_to_score(tokens, **tv))
         report["attempt"] = 0
         return out
     except Exception as e:  # noqa: BLE001
         last = e
-    fixed_bars, fixed = _fix_bars(parse_tokens(tokens), fallback_grid)
+    fixed_bars, fixed = _fix_bars(parse_tokens(tokens), fallback_grid, two_voices)
     try:
-        out = write(bars_to_score(fixed_bars))
+        out = write(bars_to_score(fixed_bars, **tv))
         report.update(attempt=1, fixed_bars={int(k): v for k, v in fixed.items()},
                       emptied_bars=sorted(k for k, v in fixed.items() if v == "empty"))
         return out
     except Exception as e:  # noqa: BLE001
         last = e
-    attempts = [{"grid": fallback_grid}, {"clip": True}, {"clip": True, "grid": fallback_grid}]
+    attempts = [{"grid": fallback_grid, **tv}, {"clip": True, **tv}, {"clip": True, "grid": fallback_grid, **tv}]
     for k, kw in enumerate(attempts, start=2):
         try:
             out = write(tokens_to_score(tokens, **kw))

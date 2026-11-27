@@ -98,6 +98,19 @@ default in between jobs. When it is offline, it runs on what is there.
     - Before, both voices' stems pointed the same way and the viewer drew them over each other: in
       bar 29, half-note chords under a melody looked like 32nd beams.
     - 114 bars of the song had this.
+  - **Two voices to a staff at most, ordered by pitch** (`src/preprocessing/detokenize.py
+    _two_voices`). The writer used to put each chord into the first voice free when it started,
+    whatever its pitch, so a held note under new chords opened a third voice, voice 1 could be
+    lower than voice 3, and two voices could get stems down (the user's "unlasting" song, bar 4:
+    three treble voices, the up-stem one partly below the two down-stem ones).
+    - Now a chord goes into the free voice nearer in pitch unless that crosses the other voice; a
+      chord that starts among held notes joins them, and when no voice is free it shares the
+      nearer one, the held notes split and tied. The upper voice's stems go up, the lower's down.
+    - A pitch struck again while it is held ends there (one key cannot sound twice).
+    - On that song: bars with three or four voices 17 -> 0, two voices stemmed the same way
+      17 -> 0, stems crossing 47 -> 6, a pitch struck while held 19 -> 0; it sounds the same
+      (`tests/test_readable.py`). The score MIDI comes from the old writer, which plays a tied
+      note of a chord once (music21's MIDI export strikes it again).
   - Closing rests had cost duration accuracy against ASAP's scores before (`tidy_lengths`), so the
     benchmark measures both rules (`pace/v2_decode.sh`) before they count as more than a demo
     default.
