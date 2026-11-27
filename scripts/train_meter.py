@@ -89,7 +89,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import lower_priority, pick_device  # noqa: E402
 from scripts.train_model import learning_rate  # noqa: E402
 from src.beats import BeatNoise, f_measure, load_beats  # noqa: E402
-from src.meter import (N_ALL_FEATURES, N_BAR_POS, N_BEAT_FEATURES, N_NOTE_FEATURES, Augment, DecodeConfig, MeterConfig,  # noqa: E402
+from src.meter import (N_ALL_FEATURES, N_BAR_POS, N_BEAT_FEATURES, N_NOTE_FEATURES, N_REP_FEATURES, Augment, DecodeConfig, MeterConfig,  # noqa: E402
                        build_meter_model, choose_level, collate, grid_from_logp, grid_scores, logp_of, meter_loss,
                        perf_key, sample)
 from src.pm2s_beats import weights_tag  # noqa: E402
@@ -171,8 +171,9 @@ class Stream(torch.utils.data.IterableDataset):
     """Endless training batches (collated on the CPU), each worker with its own random stream."""
 
     def __init__(self, perfs, w, noise, note_noise, batch, chunk, chunk_min, seed, augment=None, tracked_share=0.0,
-                 by_dataset=None, aux_noise=None):
+                 by_dataset=None, aux_noise=None, tolerant=False):
         self.perfs, self.w, self.noise, self.note_noise, self.augment = perfs, w, noise, note_noise, augment
+        self.tolerant = tolerant
         self.batch, self.chunk, self.chunk_min, self.seed = batch, chunk, chunk_min, seed
         self.tracked_share, self.by_dataset, self.aux_noise = tracked_share, by_dataset, aux_noise
 
@@ -184,7 +185,7 @@ class Stream(torch.utils.data.IterableDataset):
             idx = rng.choice(len(self.perfs), self.batch, p=self.w)
             drawn = [with_tracked(self.perfs[i], rng, self.tracked_share) for i in idx]
             yield collate([sample(p, rng, noise_for(p, self.noise, self.by_dataset), length, self.note_noise,
-                                  self.augment, self.aux_noise) for p in drawn])
+                                  self.augment, self.aux_noise, self.tolerant) for p in drawn])
 
 
 def noise_for(perf: dict, noise, by_dataset: dict | None):
@@ -288,6 +289,12 @@ def main(argv=None):
     ap.add_argument("--gangqinpu-share", type=float, default=0.5,
                     help="share of every batch drawn from Gangqinpu (0 = in proportion to its size, like the others)")
     ap.add_argument("--val-gangqinpu", type=int, default=150, help="Gangqinpu validation performances (fixed draw)")
+    ap.add_argument("--rep-features", action="store_true",
+                    help="also read how much the music repeats at 1-8 beats (src/meter.py rep_features): the cue for "
+                         "how many beats a bar has (2/4 against 4/4)")
+    ap.add_argument("--tolerant", action="store_true",
+                    help="bar-length-tolerant targets (src/meter.py TS_EQUIV): 2/4 = 4/4 = 2/2 and 6/8 = 12/8 for the "
+                         "time-signature head, the middle of a 4/4 bar not counted against a bar line there")
     ap.add_argument("--synthetic", action=argparse.BooleanOptionalAction, default=False,
                     help="also train on synthetic performances of written scores (scripts/build_synthetic_meter.py: "
                          "meter/train_synthetic.pkl; src/synthetic.py)")
@@ -402,7 +409,8 @@ def main(argv=None):
                       if args.beat_features == "all" else FIRST_FEATURES,
                       d_model=args.d_model, layers=args.layers, dropout=args.dropout,
                       n_heads=max(4, args.d_model // 32), ff=4 * args.d_model,
-                      n_note_features=N_NOTE_FEATURES if args.note_encoder else 0, d_note=args.d_note).to_dict()
+                      n_note_features=N_NOTE_FEATURES if args.note_encoder else 0, d_note=args.d_note,
+                      n_rep=N_REP_FEATURES if args.rep_features else 0).to_dict()
     if args.freeze_trunk and not (args.init and args.tempo_head):
         raise SystemExit("--freeze-trunk trains only the tempo head: give --init <checkpoint> and --tempo-head")
     if args.select != "meter" and not args.tempo_head:
@@ -471,7 +479,7 @@ def main(argv=None):
                     args.chunk_min or max(args.chunk // 4, 2), args.seed * 100003 + step,
                     Augment() if args.augment else None,
                     tracked_share=args.tracked_share if (args.tracked != "none" or args.aux != "none") else 0.0,
-                    by_dataset=by_dataset, aux_noise=aux_noise)
+                    by_dataset=by_dataset, aux_noise=aux_noise, tolerant=args.tolerant)
     loader = torch.utils.data.DataLoader(stream, batch_size=None, num_workers=args.workers,
                                          prefetch_factor=4 if args.workers else None,
                                          persistent_workers=bool(args.workers))
@@ -487,7 +495,7 @@ def main(argv=None):
             for g in opt.param_groups:
                 g["lr"] = learning_rate(step, lr=args.lr, warmup=args.warmup, total_steps=args.steps,
                                         min_lr_frac=args.min_lr_frac)
-            loss, parts = meter_loss(model(x, mask, notes), tg, args.tempo_loss)
+            loss, parts = meter_loss(model(x, mask, notes), tg, args.tempo_loss, tolerant=args.tolerant)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable, 1.0)

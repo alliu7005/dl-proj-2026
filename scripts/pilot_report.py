@@ -17,6 +17,9 @@ C. PM2S retrained with stable optimisation (the ninth round's settings) for 16k 
 D. The deletion threshold at 0.8 on the release (round 7, michael: small but sure).
 E. Per-piece choice between seq2seq and v2: its ceiling (the better of the two on every
    performance, known only with the reference) against the better system alone.
+F-H (pace/v2_pilot2.sh). The 2/4-against-4/4 problem: F one meter per piece after decoding (no
+   training: meter_v4_gq_om5 / _om6); G the repetition features (meter_v4_gq_rep_p12k); H
+   bar-length-tolerant training (meter_v4_gq_tol_p12k), each against meter_v4_gq_p12k.
 
 Standard library only.
 """
@@ -50,6 +53,8 @@ def sel(r):
 
 def meter_table(runs, names):
     cs = [c for c in CONDS if any(c in meter(runs, m) for m in names)]
+    if not cs:
+        return ["Not evaluated (" + ", ".join(f"`{m}`" for m in names) + ")."]
     lines = ["| meter | " + " | ".join(cs) + " |", "|---|" + "---|" * len(cs)]
     for m in names:
         sc = meter(runs, m)
@@ -182,6 +187,60 @@ def main(argv=None):
     rows, vD = piece_rows(res, [("v2_nl_gq_meter_v4_gq_d80_tidy", "v2_nl_gq_meter_v4_gq_d95_tidy")])
     L += rows + [""]
     go["D_d80"] = list(vD.values())[0]["verdict"] == "**better**"
+
+    # F-H. bar length (pace/v2_pilot2.sh)
+    def bar_table(names):
+        cs = [c for c in CONDS if any(c in meter(runs, m) for m in names)]
+        if not cs:
+            return ["Not evaluated (" + ", ".join(f"`{m}`" for m in names) + ")."]
+        rows = ["| meter | " + " | ".join(cs) + " |", "|---|" + "---|" * len(cs)]
+        for m in names:
+            sc = meter(runs, m)
+            rows.append(f"| `{m}` | " + " | ".join(
+                f"{sc[c]['grid_downbeat_f']:.3f} / {sc[c]['grid_ts_acc']:.3f} / {sc[c].get('grid_ts_acc_equiv', float('nan')):.3f}"
+                f" / {sc[c].get('grid_ts_changes_per_100_bars', float('nan')):.1f}" if c in sc else "-" for c in cs) + " |")
+        return rows
+    L += ["## F. One meter per piece (no training)", "",
+          "Downbeat F / time signature / time signature with 2/4 = 4/4 = 2/2 / time-signature changes per 100 bars.", ""]
+    L += bar_table(["meter_v4_gq", "meter_v4_gq_om5", "meter_v4_gq_om6"]) + [""]
+    rows, vF = piece_rows(res, [("v2_nl_gq_meter_v4_gq_om5_d95_tidy", "v2_nl_gq_meter_v4_gq_d95_tidy"),
+                                ("v2_nl_gq_meter_v4_gq_om6_d95_tidy", "v2_nl_gq_meter_v4_gq_d95_tidy")])
+    L += rows + [""]
+    base_m = meter(runs, "meter_v4_gq")
+    goF = {}
+    for om in ("meter_v4_gq_om5", "meter_v4_gq_om6"):
+        sc = meter(runs, om)
+        common = [c for c in REAL_DATA + ("clean",) if c in sc and c in base_m]
+        if not common:
+            continue
+        d_ts = [sc[c]["grid_ts_acc"] - base_m[c]["grid_ts_acc"] for c in common]
+        d_db = [sc[c]["grid_downbeat_f"] - base_m[c]["grid_downbeat_f"] for c in common]
+        whole = vF.get((f"v2_nl_gq_{om}_d95_tidy", "v2_nl_gq_meter_v4_gq_d95_tidy"), {})
+        goF[om] = (sum(d_ts) / len(d_ts) > 0 and min(d_db) > -0.01 and whole.get("verdict") not in ("worse", "mixed"))
+        L.append(f"- `{om}`: time signature {sum(d_ts) / len(d_ts):+.3f} on average (worst {min(d_ts):+.3f}), downbeat F "
+                 f"worst {min(d_db):+.3f}, whole pieces {whole.get('verdict', 'not measured')}: "
+                 f"{'**go**' if goF[om] else 'no go'}")
+    go["F_one_meter"] = any(goF.values())
+    L += ["", "Go: time signature better on average, downbeat F not down by more than 0.01 anywhere, whole pieces not "
+          "worse beyond chance. MUSTER barely sees bar lines; this rule is about the written score.", ""]
+    for key, run, what in (("G_rep_features", "meter_v4_gq_rep_p12k", "G. Repetition features (12k steps)"),
+                           ("H_tolerant", "meter_v4_gq_tol_p12k", "H. Bar-length-tolerant training (12k steps)")):
+        L += [f"## {what}", ""] + bar_table(["meter_v4_gq_p12k", run]) + [""]
+        b0, b1 = meter(runs, "meter_v4_gq_p12k"), meter(runs, run)
+        common = [c for c in REAL_DATA if c in b0 and c in b1]
+        if not common:
+            L += ["Not trained (slurm-r2train-*.out).", ""]
+            go[key] = False
+            continue
+        if key == "H_tolerant":   # judged on what it is for: the bar length, the other reading allowed
+            d = [b1[c]["grid_ts_acc_equiv"] - b0[c]["grid_ts_acc_equiv"] for c in common]
+        else:
+            d = [sel(b1[c]) - sel(b0[c]) for c in common]
+        d_db = [b1[c]["grid_downbeat_f"] - b0[c]["grid_downbeat_f"] for c in common]
+        go[key] = sum(d) / len(d) >= 0.01 and min(d_db) > -0.02
+        L += [f"- {'time signature (2/4 = 4/4)' if key == 'H_tolerant' else '(downbeat F + ts) / 2'} with minus without: "
+              + ", ".join(f"{c} {x:+.3f}" for c, x in zip(common, d)) + f"; downbeat F worst {min(d_db):+.3f}: "
+              f"{'**go**' if go[key] else 'no go'} (go: mean >= +0.01, downbeat F not down by more than 0.02)", ""]
 
     # E. per-piece choice
     L += ["## E. Per-piece choice between seq2seq and v2 (its ceiling)", ""]

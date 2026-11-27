@@ -1662,6 +1662,32 @@ else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the releas
 the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
 the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
+### Pilot, part 2: 2/4 against 4/4 (2026-11-27)
+
+`pace/v2_pilot2.sh` (pace/README.md, 4x). Most wrong bars are a bar length the scores themselves
+write either way (2/4 or 4/4, 2/2 for 4/4), and the demo mixes them within one piece. The demo on
+public-domain pieces, before: Maple Leaf Rag 46 bars of 2/4 and 19 of 4/4; Lemon (a recording)
+45 of 4/4 and 23 of 2/2.
+- **F: one meter per piece** (`src/meter.py consistent_meter`, `DecodeConfig.one_meter`), after
+  decoding:
+  - 2/2 and 4/4 (one bar, another beat unit) become the piece's more common one;
+  - when the 4/4-length bars hold at least the share, each run of 2/4 bars is paired into 4/4
+    bars. The pairing is the one whose kept bar lines the bar head favours over the ones removed;
+    an odd run keeps one 2/4 bar. When the 2/4 bars hold the share, the others are split.
+  - No beat moves.
+  - Locally at 0.5: Maple Leaf Rag became 84 bars of 2/4 (the score's 84), and Lemon 66 of 4/4.
+- **G: repetition features** (`rep_features`). Each beat's pitch-class and onset-phase
+  similarity with the beats 1, 2, 3, 4, 6 and 8 back, and the 2 and 4 beats ahead against those
+  before: the period a bar repeats at. Autocorrelation and self-similarity are the classic cues
+  for meter in symbolic music (Brown 1993; de Haas & Volk 2016, inner metric analysis), and
+  hypermeter models (Jiang et al. 2022) group bars by them. Old checkpoints are unaffected
+  (`MeterConfig.n_rep` 0).
+- **H: bar-length-tolerant training** (`--tolerant`, `TS_EQUIV`):
+  - the time-signature head's loss counts any time signature of the target's group (2/4, 4/4,
+    2/2; 6/8, 12/8) as right;
+  - a beat in the middle of a 4/4, 2/2 or 12/8 bar is not counted against a bar line there.
+  - Judged on `ts_acc_equiv`.
+
 ### Pilot design: every idea at small scale (2026-11-26)
 
 `pace/v2_pilot.sh` (pace/README.md, 4w) runs before any full-scale run.

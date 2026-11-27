@@ -103,7 +103,21 @@ N_BAR_POS = 16      # the position-in-bar head: eighth notes from the bar line (
 POS_TOL = 0.3       # eighths: a beat further than this from an eighth-note position has no target
 
 
-def targets(beat_t: np.ndarray, gt: dict) -> dict:
+# Bar lengths the scores themselves write either way (the same music in 2/4 or 4/4, 2/2 for 4/4,
+# 6/8 or 12/8): ``targets(..., tolerant=True)`` and ``meter_loss(..., tolerant=True)`` do not punish
+# the other reading (train_meter.py --tolerant).
+TS_EQUIV = (("2/4", "4/4", "2/2"), ("6/8", "12/8"))
+
+
+def ts_class(ts: str) -> str:
+    """The time signature a bar-length-tolerant comparison sees (the first of its TS_EQUIV group)."""
+    for g in TS_EQUIV:
+        if ts in g:
+            return g[0]
+    return ts
+
+
+def targets(beat_t: np.ndarray, gt: dict, tolerant: bool = False) -> dict:
     """Per tracked beat: bar (1 / 0; -1 outside the annotated span), step (Q_STEPS index; -1 when
     the true length is no Q_STEPS value within STEP_TOL), ts (TS_CLASSES index of the nearest
     annotated beat's bar; -1 outside), pos (eighth notes from the annotated bar line before it,
@@ -136,6 +150,12 @@ def targets(beat_t: np.ndarray, gt: dict) -> dict:
         r = np.round(e)
         ok = inside & (j >= 0) & (np.abs(e - r) <= POS_TOL) & (r >= 0) & (r < N_BAR_POS)
         pos = np.where(ok, r, IGNORE)
+    if tolerant and k and len(bq):   # the middle of a 4/4, 2/2 or 12/8 bar is a bar line in the 2/4 / 6/8 reading
+        jb = np.clip(np.searchsorted(bq, q + POS_TOL / 2, side="right") - 1, 0, None)
+        names = np.asarray(gt["ts_names"], object)[np.asarray(gt["down"], bool)]
+        half = np.array([float(bar_quarters(x)) / 2 if x in ("4/4", "2/2", "12/8") else np.nan for x in names])
+        mid = inside & (np.abs(q - bq[jb] - half[jb]) <= 0.1)
+        bar = np.where(mid, IGNORE, bar)
     return {"bar": bar.astype(np.int64), "step": step.astype(np.int64), "ts": ts.astype(np.int64),
             "pos": pos.astype(np.int64), "tempo": np.array([tempo], np.float32)}
 
@@ -251,9 +271,49 @@ def aux_features(beat_t: np.ndarray, aux) -> np.ndarray:
     return f
 
 
+REP_LAGS = (1, 2, 3, 4, 6, 8)      # beats back: the periods a bar (2, 3, 4 beats) or two bars repeat at
+N_REP_FEATURES = 2 * len(REP_LAGS) + 2
+N_FEATURE_COLUMNS = N_ALL_FEATURES + N_REP_FEATURES   # what beat_features returns: beat, aux, repetition
+
+
+def rep_features(f: np.ndarray) -> np.ndarray:
+    """[K, N_REP_FEATURES] from the beat features: how much the music repeats at each period, the cue
+    for how many beats a bar has (2/4 and 4/4 group the same beats; their bars repeat at 2 and 4
+    beats: autocorrelation / self-similarity in the meter-detection literature, Brown 1993; de Haas &
+    Volk 2016's inner metric analysis). Per beat: the cosine similarity of its pitch-class profile with
+    the beat REP_LAGS back, the same for where in the beat its notes start; then the pitch classes of
+    the 2 beats from here against the 2 before, and of the 4 from here against the 4 before (0
+    where the music is silent or the beats before do not exist)."""
+    k = len(f)
+    out = np.zeros((k, N_REP_FEATURES), np.float32)
+    if k < 2:
+        return out
+    chroma = f[:, 27:39].astype(np.float64)
+    phase = f[:, 5:5 + N_PHASE_BINS].astype(np.float64)
+
+    def cos(a, b):
+        na, nb = np.linalg.norm(a, axis=1), np.linalg.norm(b, axis=1)
+        ok = (na > 0) & (nb > 0)
+        r = np.zeros(len(a))
+        r[ok] = (a[ok] * b[ok]).sum(1) / (na[ok] * nb[ok])
+        return r
+    for i, lag in enumerate(REP_LAGS):
+        if lag < k:
+            out[lag:, i] = cos(chroma[lag:], chroma[:-lag])
+            out[lag:, len(REP_LAGS) + i] = cos(phase[lag:], phase[:-lag])
+    c = np.vstack([np.zeros((1, 12)), np.cumsum(chroma, 0)])
+    for i, w in enumerate((2, 4)):
+        if 2 * w <= k:
+            j = np.arange(w, k - w + 1)
+            ahead, back = c[j + w] - c[j], c[j] - c[j - w]
+            out[j, 2 * len(REP_LAGS) + i] = cos(ahead, back)
+    return out
+
+
 def beat_features(notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, aux=None) -> np.ndarray:
-    """[K, N_ALL_FEATURES] for K tracked beats (the last N_AUX_FEATURES: ``aux_features`` of a
-    second tracker's beats ``aux``, zeros without one; a model reads the first n_features). ``notes``: [N, 4] pitch, onset, offset, velocity
+    """[K, N_FEATURE_COLUMNS] for K tracked beats: N_BEAT_FEATURES, then N_AUX_FEATURES (``aux_features`` of a
+    second tracker's beats ``aux``, zeros without one; a model reads the first n_features), then
+    N_REP_FEATURES (``rep_features``; a model with n_rep reads them too). ``notes``: [N, 4] pitch, onset, offset, velocity
     (load_performance's columns), ``beat_d``: the tracker's downbeat flags. Per beat (its interval
     = up to the next beat; the last one repeats the previous length):
       beat length (log2 s / 0.5), log ratio to the previous and next beat, tracker downbeat, 1
@@ -264,10 +324,10 @@ def beat_features(notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, aux
         the previous one), lowest pitch of the beat's notes
       the beat's pitch-class profile (12, weighted by duration up to 2 s, summing to 1)"""
     k = len(beat_t)
-    f = np.zeros((k, N_ALL_FEATURES), np.float32)
+    f = np.zeros((k, N_FEATURE_COLUMNS), np.float32)
     if k == 0:
         return f
-    f[:, N_BEAT_FEATURES:] = aux_features(beat_t, aux)
+    f[:, N_BEAT_FEATURES:N_ALL_FEATURES] = aux_features(beat_t, aux)
     t = np.asarray(beat_t, np.float64)
     ln = np.diff(t)
     ln = np.concatenate([ln, ln[-1:]]) if k > 1 else np.array([0.5])
@@ -306,6 +366,7 @@ def beat_features(notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, aux
             w = np.bincount(pitch[lo:hi] % 12, weights=np.minimum(dur[lo:hi], 2.0), minlength=12)
             f[j, 27:39] = w / max(w.sum(), 1e-9)  # (index 26 is unused: always 0, as before)
         prev_chroma = chroma
+    f[:, N_ALL_FEATURES:] = rep_features(f)
     return f
 
 
@@ -416,6 +477,11 @@ class DecodeConfig:
     # scripts/eval_meter.py --local-tempo tunes it on validation (ASAP, real, PERiScoPe, Gangqinpu).
     local_weight: float = 0.0
     local_sigma: float = 0.25
+    # one meter per piece (consistent_meter), after decoding: 2/2 and 4/4 bars (the same bar) all written
+    # as the piece's more common one, and with one_meter > 0, 2/4 bars paired into 4/4 bars (or 4/4 bars
+    # split into 2/4 pairs) when the longer (shorter) reading holds at least that share of the piece's
+    # duple time. 0 (the default): the grid as decoded.
+    one_meter: float = 0.0
 
     def to_dict(self):
         return asdict(self)
@@ -734,7 +800,7 @@ class Augment:
 
 
 def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, note_noise=None, augment=None,
-           aux_noise=None):
+           aux_noise=None, tolerant: bool = False):
     """One training / validation sample of a performance: its tracked beats (the real tracker's if
     it has them, else the annotated beats corrupted by ``noise``, a src/beats.py BeatNoise; exact
     without), their features and targets, cut to a random ``chunk`` of beats (0 = all).
@@ -764,7 +830,7 @@ def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, not
     if chunk and len(bt) > chunk:
         a = int(rng.integers(0, len(bt) - chunk + 1))
         bt, bd = bt[a:a + chunk], bd[a:a + chunk]
-    return beat_features(notes, bt, bd, aux), targets(bt, gt), bt, note_inputs(notes, bt)
+    return beat_features(notes, bt, bd, aux), targets(bt, gt, tolerant), bt, note_inputs(notes, bt)
 
 
 def collate(samples: list, device="cpu"):
@@ -812,6 +878,7 @@ class MeterConfig:
     d_note: int = 64
     tempo_head: bool = False     # a piece-level head: this piece's written tempo (log quarters per minute)
     n_pos: int = 0               # a position-in-bar head (N_BAR_POS classes), scored by the decoder; 0 = none
+    n_rep: int = 0               # the repetition features (rep_features, N_REP_FEATURES) read too; 0 = none
 
     def to_dict(self):
         return asdict(self)
@@ -848,7 +915,7 @@ def build_meter_model(cfg: dict):
                 self.pitch = nn.Embedding(128, c.d_note)
                 self.note_mlp = nn.Sequential(nn.GELU(), nn.Linear(c.d_note, c.d_note), nn.GELU(),
                                               nn.Linear(c.d_note, c.d_note))
-            self.inp = nn.Sequential(nn.Linear(c.n_features + extra, c.d_model), nn.LayerNorm(c.d_model),
+            self.inp = nn.Sequential(nn.Linear(c.n_features + c.n_rep + extra, c.d_model), nn.LayerNorm(c.d_model),
                                      nn.Dropout(c.dropout))
             self.layers = nn.ModuleList(EncoderLayer(enc) for _ in range(c.layers))
             self.norm = nn.LayerNorm(c.d_model)
@@ -878,7 +945,8 @@ def build_meter_model(cfg: dict):
         def forward(self, x, mask, notes=None):
             pos = torch.arange(x.shape[1], device=x.device)[None].expand(x.shape[0], -1)
             cos, sin = rope_angles(pos, self.freq)
-            x = x[..., :c.n_features]
+            x = (torch.cat([x[..., :c.n_features], x[..., N_ALL_FEATURES:N_ALL_FEATURES + c.n_rep]], -1)
+                 if c.n_rep else x[..., :c.n_features])
             if c.n_note_features:
                 if notes is None:
                     raise ValueError("this meter model has a note encoder: pass the note inputs")
@@ -901,7 +969,7 @@ def build_meter_model(cfg: dict):
     return MeterModel()
 
 
-def meter_loss(out: dict, tg: dict, tempo_weight: float = 1.0):
+def meter_loss(out: dict, tg: dict, tempo_weight: float = 1.0, tolerant: bool = False):
     """Cross-entropy of the three heads over the beats each has a target for; with a tempo head,
     plus ``tempo_weight`` x its Gaussian negative log-likelihood of the piece's written tempo (log
     quarters per minute) over the samples that have one."""
@@ -911,7 +979,11 @@ def meter_loss(out: dict, tg: dict, tempo_weight: float = 1.0):
     for k in [h for h in ("bar", "step", "ts", "pos") if h in out and h in tg]:
         y = tg[k]
         m = y >= 0
-        loss = F.cross_entropy(out[k][m].float(), y[m]) if m.any() else out[k].sum() * 0.0
+        if k == "ts" and tolerant and m.any():   # any time signature of the target's TS_EQUIV group is right
+            lp = torch.log_softmax(out[k][m].float(), -1)
+            loss = -(torch.logsumexp(lp + _equiv_mask(lp.device)[y[m]], -1)).mean()
+        else:
+            loss = F.cross_entropy(out[k][m].float(), y[m]) if m.any() else out[k].sum() * 0.0
         parts[k] = float(loss.detach())
         total = total + loss
     if "tempo" in out and "tempo" in tg:
@@ -922,6 +994,18 @@ def meter_loss(out: dict, tg: dict, tempo_weight: float = 1.0):
         parts["tempo"] = float(nll.detach())
         total = total + tempo_weight * nll
     return total, parts
+
+
+def _equiv_mask(device):
+    """[n_ts, n_ts]: 0 where two time signatures share a TS_EQUIV group (or are one), -inf elsewhere."""
+    import torch
+    n = len(TS_CLASSES)
+    m = torch.full((n, n), float("-inf"), device=device)
+    for a in range(n):
+        for b in range(n):
+            if ts_class(TS_CLASSES[a]) == ts_class(TS_CLASSES[b]):
+                m[a, b] = 0.0
+    return m
 
 
 def predict_logp(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarray, device="cpu",
@@ -1132,6 +1216,87 @@ def local_tempo_logprior(beat_t: np.ndarray, q: np.ndarray, cfg: DecodeConfig, w
     return out
 
 
+def _bar_evidence(grid: dict, lp: dict | None):
+    """A function: bar line q -> the bar head's log-odds at the tracked beat on it (0 between beats)."""
+    if not lp or "bar" not in lp or not len(grid["q"]):
+        return lambda x: 0.0
+    q = np.asarray(grid["q"], np.float64)
+    odds = lp["bar"][:, 1] - lp["bar"][:, 0]
+
+    def ev(x):
+        j = int(np.searchsorted(q, x - 1e-6))
+        return float(odds[j]) if j < len(q) and abs(q[j] - x) < 1e-6 and j < len(odds) else 0.0
+    return ev
+
+
+def consistent_meter(grid: dict, lp: dict | None, share: float) -> dict:
+    """One meter where the decoder wrote two readings of the same music (DecodeConfig.one_meter):
+      * 2/2 and 4/4 (the same bar, another beat unit): every such bar becomes the more common one;
+      * with ``share`` > 0, 2/4 against 4/4 (two bars or one): when the 4/4-length bars hold at least
+        ``share`` of the piece's duple quarters, each run of 2/4 bars is paired into 4/4 bars, the
+        pairing (which bar starts a pair) the one whose bar lines the meter model's bar head finds
+        likelier (an odd run keeps one 2/4 bar); when the 2/4 bars hold that share, each 4/4-length bar
+        is split into two 2/4 bars.
+    Only bar lines and time signatures change: no beat moves, every note keeps its quarter position.
+    "meter_fixed" counts the bars changed."""
+    from collections import Counter
+    bars, bq = list(grid["bars"]), [float(x) for x in grid["bar_q"]]
+    if len(bars) < 2:
+        return dict(grid, meter_fixed=0)
+    before = list(zip(bq, bars))
+    w = Counter()
+    for b in bars:
+        w[b] += float(bar_quarters(b))
+    if w["2/2"] and w["4/4"]:
+        long_ts = "4/4" if w["4/4"] >= w["2/2"] else "2/2"
+        bars = [long_ts if b in ("2/2", "4/4") else b for b in bars]
+    else:
+        long_ts = "2/2" if w["2/2"] > w["4/4"] else "4/4"
+    long_w, short_w = w["4/4"] + w["2/2"], w["2/4"]
+    if share > 0 and long_w and short_w:
+        ev = _bar_evidence(grid, lp)
+        nb, nq = [], []
+        if long_w / (long_w + short_w) >= share:          # pair the 2/4 bars
+            i = 0
+            while i < len(bars):
+                if bars[i] != "2/4":
+                    nb.append(bars[i]); nq.append(bq[i]); i += 1
+                    continue
+                j = i
+                while j < len(bars) and bars[j] == "2/4" and (j == i or abs(bq[j] - bq[j - 1] - 2) < 1e-6):
+                    j += 1
+                run = list(range(i, j))
+                best = None
+                for phase in (0, 1):   # each pair scored by its bar line's evidence over the one it removes
+                    starts = sorted(set([run[0]] * (phase == 1 and len(run) > 1) + run[phase::2]))
+                    pairs = [r for r in starts if r + 1 < j and r + 1 not in starts]
+                    score = sum(ev(bq[r]) - ev(bq[r + 1]) for r in pairs)
+                    if best is None or score > best[0] + 1e-9:   # a tie keeps phase 0 (fewer lone 2/4 bars)
+                        best = (score, starts)
+                starts = best[1]
+                for r in starts:
+                    nxt = next((x for x in starts if x > r), j)
+                    nb.append(long_ts if nxt - r == 2 else "2/4")
+                    nq.append(bq[r])
+                i = j
+        elif short_w / (long_w + short_w) >= share:       # split the 4/4-length bars
+            for b, x in zip(bars, bq):
+                if b in ("4/4", "2/2"):
+                    nb += ["2/4", "2/4"]; nq += [x, x + 2.0]
+                else:
+                    nb.append(b); nq.append(x)
+        if nb:
+            bars, bq = nb, nq
+    q, t = np.asarray(grid["q"], np.float64), np.asarray(grid["t"], np.float64)
+    bqa = np.asarray(bq, np.float64)
+    bar_t = np.interp(bqa, q, t) if len(t) > 1 else np.zeros(len(bqa))
+    if len(t) > 1:
+        s0 = (t[1] - t[0]) / max(q[1] - q[0], 1e-6)
+        bar_t = np.where(bqa < q[0], t[0] + (bqa - q[0]) * s0, bar_t)
+    after = set(zip(bq, bars))
+    return dict(grid, bars=bars, bar_q=bqa, bar_t=bar_t, meter_fixed=len(set(before) ^ after) // 2 + abs(len(before) - len(after)))
+
+
 def grid_from_logp(beat_t: np.ndarray, lp: dict | None, cfg: DecodeConfig = DecodeConfig()) -> dict:
     """``predict_logp``'s output decoded into a grid (a single bar without it), with cfg's tempo
     prior added to the step head's log-probabilities when its weight is above 0 (and with
@@ -1146,7 +1311,8 @@ def grid_from_logp(beat_t: np.ndarray, lp: dict | None, cfg: DecodeConfig = Deco
         first = grid_from_states(beat_t, states, steps)
         step = step + local_tempo_logprior(beat_t, first["q"], cfg)
         states, steps = decode(lp["bar"], step, lp["ts"], cfg, return_steps=True, logp_pos=lp.get("pos"))
-    return choose_level(grid_from_states(beat_t, states, steps), cfg, lp.get("tempo"))
+    g = choose_level(grid_from_states(beat_t, states, steps), cfg, lp.get("tempo"))
+    return consistent_meter(g, lp, cfg.one_meter) if cfg.one_meter > 0 else g
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1290,7 +1456,15 @@ def grid_scores(grid: dict, gt: dict) -> dict:
             ts_ok += grid["bars"][j] == gt["ts_names"][k]
         n += 1
     r = level_ratio(grid, gt)
+    # the same with 2/4 = 4/4 = 2/2 and 6/8 = 12/8 (TS_EQUIV), and how often the decoded meter changes
+    eq = 0
+    for k in np.nonzero(gt["down"])[0]:
+        j = int(np.searchsorted(bar_t, gt["t"][k] + MATCH_TOL)) - 1
+        if 0 <= j < len(grid["bars"]):
+            eq += ts_class(grid["bars"][j]) == ts_class(gt["ts_names"][k])
+    changes = sum(a != b for a, b in zip(grid["bars"], grid["bars"][1:]))
     return {"beat_f": f_measure(gt["t"], bt), "downbeat_f": f_measure(downs, bt[bd]),
-            "ts_acc": ts_ok / max(n, 1),
+            "ts_acc": ts_ok / max(n, 1), "ts_acc_equiv": eq / max(n, 1),
+            "ts_changes_per_100_bars": 100.0 * changes / max(len(grid["bars"]), 1),
             # the note-value level (level_ratio): 1 right, 0 halved or doubled, nan when it cannot be told
             "level_ok": float(abs(math.log2(r)) <= LEVEL_TOL) if r and r > 0 else float("nan")}

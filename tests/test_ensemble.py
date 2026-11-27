@@ -237,7 +237,7 @@ def test_job_library():
         ev = subprocess.run(["bash", "-c", f'eval "$(sed -n "/^meter_eval_flags()/,/^}}/p" pace/v2_jobs.sh)"; meter_eval_flags {m}'],
                             cwd=ROOT, capture_output=True, text=True)
         assert ev.stdout.strip() == "--tune --tempo-prior", ev.stdout
-    assert "  ensemble)" in src and "localtempo, ensemble}" in src
+    assert "  ensemble)" in src and "  onemeter)" in src and "localtempo, ensemble, onemeter}" in src
 
 
 def test_install_run():

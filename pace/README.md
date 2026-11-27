@@ -874,12 +874,32 @@ About 4-6 hours; `q1final` writes the report.
 To bring the results back:
 
 ```bash
-cd ~/scratch/dl-proj-2026 && tar czf v2_pilot.tgz outputs/pilot outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/runs/meter_v4_gq*/eval_meter.json outputs/runs/meter_v4_gq*/decode.json outputs/runs/meter_v4_gq_*p12k/log.csv outputs/runs/pm2s_pilot*/log.csv data/processed/meter/synthetic_report.json slurm-q1*.out slurm-met_meter_v4_gq_*p12k*.log slurm-pm2s_pilot*.log 2>/dev/null; ls -la v2_pilot.tgz
+cd ~/scratch/dl-proj-2026 && tar czf v2_pilot.tgz outputs/pilot outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/runs/meter_v4_gq*/eval_meter.json outputs/runs/meter_v4_gq*/decode.json outputs/runs/meter_v4_gq_*p12k/log.csv outputs/runs/pm2s_pilot*/log.csv slurm-r2*.out data/processed/meter/synthetic_report.json slurm-q1*.out slurm-met_meter_v4_gq_*p12k*.log slurm-pm2s_pilot*.log 2>/dev/null; ls -la v2_pilot.tgz
 ```
 
 ```bash
 scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_pilot.tgz . && tar xzf v2_pilot.tgz
 ```
+
+## 4x. The pilot, part 2: 2/4 against 4/4 (alongside 4w)
+
+The demo writes one piece in two bar lengths (Lemon: 45 bars of 4/4 and 23 of 2/2; Maple Leaf Rag:
+46 of 2/4 and 19 of 4/4). `pace/v2_pilot2.sh` tries three fixes at small scale; its jobs wait for
+4w's still queued, so both fit the queue:
+
+| | fix | at pilot scale |
+|---|---|---|
+| F | one meter per piece after decoding (`src/meter.py consistent_meter`, `decode.json` `one_meter`) | no training: the release's meter model with the rule at 0.5 and 0.6 (`meter_v4_gq_om5`, `_om6`), meter scores and whole pieces |
+| G | the repetition features (`rep_features`, `train_meter.py --rep-features`) | 12k steps against 4w's `meter_v4_gq_p12k` |
+| H | bar-length-tolerant training (`--tolerant`) | 12k steps, judged on the time signature with 2/4 = 4/4 = 2/2 |
+
+```bash
+git pull && bash pace/v2_pilot2.sh
+```
+
+Every meter evaluation now also reports `ts_acc_equiv` (2/4 = 4/4 = 2/2, 6/8 = 12/8) and
+`ts_changes_per_100_bars`. `outputs/pilot/report.md` gets sections F-H. Bring the results back with
+4w's command (it includes them).
 
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 

@@ -272,6 +272,10 @@ def main(argv=None):
                          "that have them only: <condition>_real")
     ap.add_argument("--snap", type=float, default=None,
                     help="move each grid anchor onto a chord onset within this many seconds (saved in decode.json)")
+    ap.add_argument("--one-meter", type=float, default=None,
+                    help="one meter per piece after decoding (src/meter.py consistent_meter): 2/2 = 4/4 written as the "
+                         "piece's more common one, 2/4 bars paired into 4/4 (or split) when that reading holds this share "
+                         "of the piece's duple time; 0 off (saved in decode.json)")
     ap.add_argument("--fill", type=float, default=None,
                     help="add notated beats the tracker missed at chord onsets within this many beats (saved in decode.json)")
     ap.add_argument("--oracle", action="store_true",
@@ -349,9 +353,10 @@ def main(argv=None):
     elif args.decode_from:
         dfile.write_text(Path(args.decode_from).read_text())
     cfg = DecodeConfig.from_dict(json.loads(dfile.read_text())["decode"]) if dfile.exists() else DecodeConfig()
-    if args.snap is not None or args.fill is not None:
+    if args.snap is not None or args.fill is not None or args.one_meter is not None:
         cfg.snap_s = cfg.snap_s if args.snap is None else float(args.snap)
         cfg.fill_tol = cfg.fill_tol if args.fill is None else float(args.fill)
+        cfg.one_meter = cfg.one_meter if args.one_meter is None else float(args.one_meter)
         saved = json.loads(dfile.read_text()) if dfile.exists() else {}
         dfile.write_text(json.dumps({**saved, "decode": cfg.to_dict()}, indent=1))
     out_file = run / "eval_meter.json"

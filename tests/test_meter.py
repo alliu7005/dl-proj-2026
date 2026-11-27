@@ -177,9 +177,10 @@ def test_beat_features_and_key():
     t = 0.5 * np.arange(8)
     notes = np.array([[36, 0.0, 0.4, 100], [60, 0.0, 0.4, 70], [64, 0.25, 0.4, 50], [67, 1.0, 1.4, 90]], np.float32)
     f = beat_features(notes, t, np.arange(8) % 4 == 0)
-    from src.meter import N_ALL_FEATURES
-    assert f.shape == (8, N_ALL_FEATURES) and np.isfinite(f).all()
-    assert (f[:, N_BEAT_FEATURES:] == 0).all()                # no second tracker: its features all 0
+    from src.meter import N_FEATURE_COLUMNS
+    assert f.shape == (8, N_FEATURE_COLUMNS) and np.isfinite(f).all()
+    from src.meter import N_ALL_FEATURES as N_AUX_END
+    assert (f[:, N_BEAT_FEATURES:N_AUX_END] == 0).all()       # no second tracker: its features all 0
     assert f[0, 3] == 1 and f[1, 3] == 0                      # the tracker's downbeat flag
     assert f[0, 5 + 6] > 0                                    # a note half way through beat 0
     assert (f[:, 26] == 0).all()                              # unused, as in the first meter model
@@ -348,7 +349,8 @@ def test_long_steps_and_pickup_bars():
         g = grid_from_logp(t, oracle_logp(t, gt))
         assert np.allclose(g["q"], q_beats), (ts, g["q"])
         assert np.allclose(g["bar_q"], np.arange(0, 13, L)) and g["bars"] == [ts] * len(g["bar_q"]), (ts, g["bar_q"])
-        assert grid_scores(g, gt) == {"beat_f": 1.0, "downbeat_f": 1.0, "ts_acc": 1.0, "level_ok": 1.0}
+        assert {k: v for k, v in grid_scores(g, gt).items() if k in ("beat_f", "downbeat_f", "ts_acc", "level_ok")} == \
+        {"beat_f": 1.0, "downbeat_f": 1.0, "ts_acc": 1.0, "level_ok": 1.0} and grid_scores(g, gt)["ts_acc_equiv"] == 1.0
     g = grid_from_states(np.array([1.5, 2.0, 2.5, 3.0, 3.5]), [(0, 0), (0, 12), (0, 24), (0, 36), (0, 0)])  # 4/4 from 1.5 s
     assert cover_notes(g, 1.5) is g and cover_notes(g, 1.49) is g      # within 1/24 quarter: no bar added
     c = cover_notes(g, 1.0)                                             # one quarter (0.5 s) early: a pickup
@@ -403,7 +405,8 @@ def test_level_choice():
     assert grid_scores(half, true)["level_ok"] == 0.0 and grid_scores(half, true)["ts_acc"] == 0.0
     up = scale_grid(half, 2)
     assert up["bars"] == ["3/4"] * len(half["bars"]) and np.allclose(up["bar_t"], half["bar_t"]) and up["level"] == 2.0
-    assert grid_scores(up, true) == {"beat_f": 1.0, "downbeat_f": 1.0, "ts_acc": 1.0, "level_ok": 1.0}
+    assert {k: v for k, v in grid_scores(up, true).items() if k in ("beat_f", "downbeat_f", "ts_acc", "level_ok")} == \
+        {"beat_f": 1.0, "downbeat_f": 1.0, "ts_acc": 1.0, "level_ok": 1.0} and grid_scores(up, true)["ts_acc_equiv"] == 1.0
     assert scale_grid(half, 1) is half and scale_grid(dict(half, bars=["9/8"]), 2) is None
     assert choose_level(half, DecodeConfig())["level"] == 1.0                      # off by default
     prior = DecodeConfig(level_weight=1.0)                                          # 60 qpm is far from 116, 120 is near
