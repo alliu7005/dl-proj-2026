@@ -1662,6 +1662,44 @@ else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the releas
 the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
 the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
+### Pilot, part 3: spelling, stems and swing (2026-11-27)
+
+`pace/v2_pilot3.sh` (pace/README.md, 4y). On the whole-piece benchmark v2 is level with Beyer &
+Dai on MUSTER but behind on score similarity: stems ~51% against 25%, spelling ~12% against 8.6%.
+The demo on public-domain pieces and a Lemon recording showed why.
+- **`_ps` PKSpell** (`src/pkspell.py`, vendored, MIT).
+  - Two GRUs over each note's pitch class and written length (in 4 classes per piece: an exact
+    1-D k-means, as their kmeans1d).
+  - v2 spelled from one key signature with no context, the key from a pitch-class profile.
+  - On 8 music21 corpus pieces with their spellings scrambled (7,848 notes): 97.5% right against
+    84.9%. Chopin's Mazurka op. 6 no. 2 comes out in its four sharps, not four flats (13.8% -> 83.8%).
+  - Its released model trained on ASAP's scores, our ASAP test pieces included, so Gangqinpu
+    is its honest test.
+- **`_eg` engraving** (`src/readable.py engrave_score`).
+  - The stem: down above the middle line, up below, down on it, the chord's farthest note
+    deciding; the notes shorter than the beat inside one beat share a direction.
+  - Measures with two voices keep `stem_voices`.
+  - The clef of each staff from its median pitch.
+- **`_sw` swing** (`src/swing.py`).
+  - Swung sixteenths: second notes at 1/3 and 5/6 dominating the straight ones, the other triplet
+    positions rare.
+  - The swing's leftovers: most sixteenths straight already, the rest at 1/3, 5/6 or late 32nds at
+    3/8 and 7/8, outnumbering the 32nds at 1/8 and 5/8 that real runs fill.
+  - Swung eighths: 2/3 off-beats.
+  - All written straight under a swing marking.
+  - Lemon (a recording): 130 notes, 78% -> 96% of the sheet's right-hand onsets in bars 2-7. Maple
+    Leaf Rag, the Chopin mazurka and a Bach chorale are untouched.
+- **Not run, and why:**
+  - **Pretraining on Aria-MIDI** (Bradshaw & Colton, ICLR 2025: 1.19M piano transcriptions,
+    CC BY-NC-SA). It has no beat or score labels, so it needs a self-supervised objective and a
+    pseudo-grid pipeline (PM2S beats, the meter model) before the labeller can read it: a
+    multi-day build. Decide after pilot B: if synthetic score data helps the meter model, more
+    data is the lever, and this is the next scale.
+  - **End-to-end audio-to-score** (Zeng et al., IJCAI 2024). Its code says it is not ready for
+    real use: 12-second clips at most, 5 bars.
+  - **The 2025 MIDI beat-tracking transformer** (Murgul & Heizmann): no code released. PM2S
+    retrained stably (pilot C) is the path for MIDI input.
+
 ### Pilot, part 2: 2/4 against 4/4 (2026-11-27)
 
 `pace/v2_pilot2.sh` (pace/README.md, 4x). Most wrong bars are a bar length the scores themselves

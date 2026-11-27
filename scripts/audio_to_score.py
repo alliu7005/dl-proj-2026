@@ -52,6 +52,9 @@ def main():
     ap.add_argument("--no-timing-beats", action="store_true", help="v2: keep the labeller's triplets in beats whose timing fits straight sixteenths better (src/timing.py check_beats)")
     ap.add_argument("--no-readable", action="store_true", help="v2: keep rests of a 16th or less, overlaps of a 16th or less, and stems as written (src/readable.py)")
     ap.add_argument("--no-fix-jumps", action="store_true", help="v2: keep the meter model's stretched bars (a jump of beats in one beat's time) as decoded")
+    ap.add_argument("--pkspell", action="store_true", help="v2: key signature and spellings from PKSpell (src/pkspell.py)")
+    ap.add_argument("--engraving", action="store_true", help="v2: clefs from each staff's range, one-voice stems by the engraver's rule (src/readable.py engrave_score)")
+    ap.add_argument("--swing", action="store_true", help="v2: swung playing written straight under a swing marking (src/swing.py)")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
@@ -62,7 +65,8 @@ def main():
                           timing_check=rules["timing_check"] and not args.no_timing_check,
                           readable=READABLE and not args.no_readable, fix_jumps=rules["fix_jumps"] and not args.no_fix_jumps,
                           timing_beats=rules["timing_beats"] and not args.no_timing_beats,
-                          beat_decode=rules["beat_decode"] and not args.no_beat_decode)
+                          beat_decode=rules["beat_decode"] and not args.no_beat_decode,
+                          pkspell=args.pkspell, engraving=args.engraving, swing=args.swing)
     else:
         pipe = ScorePipeline(args.ckpt, args.vocab, args.device)
     print(f"model: {pipe.info}", flush=True)

@@ -68,9 +68,12 @@ scripts/fetch_gangqinpu.py       v2: download the Gangqinpu release's Parquet (g
 scripts/compare_beats.py         PM2S against Beat This! on the whole-piece test inputs, scored against the ASAP beat annotations
 scripts/fit_pm2s_noise.py        PM2S's beat-tracking errors fitted on Gangqinpu -> configs/beat_noise_pm2s.json (training a meter model for PM2S)
 scripts/train_pm2s.py            PM2S's beat model retrained from scratch on our training splits only (pm2s_ho; PM2S_WEIGHTS / PM2S_TAG use it); --betas/--eps/--clip/--schedule cosine/--warmup: the stable settings
+src/pkspell.py                   PKSpell (Foscarin et al., ISMIR 2021, MIT; vendored): key signature and every note's spelling from pitch classes and written lengths (respell a music21 score)
+src/swing.py                     swung pairs written straight under a swing marking (the labelled notes, before rendering)
 src/synthetic.py                 v2: synthetic performances of written scores for the meter model (tempo, rubato, timing, articulation, velocity; exact grids)
 scripts/fetch_pdmx.py            PDMX's public-domain MusicXML scores from Zenodo -> data/raw/pdmx/mxl (resumable; login node)
 scripts/build_synthetic_meter.py v2: piano scores rendered (src/synthetic.py) -> data/processed/meter/{train,val}_synthetic.pkl + synthetic_report.json
+scripts/postprocess_scores.py    PKSpell (_ps) and / or the engraving rules (_eg) on a system's scores as written already: a new system folder
 scripts/pilot_report.py          the pilot's report: each idea at small scale with a go / no go -> outputs/pilot/report.md
 scripts/make_ensemble.py         v2: a meter run that is several meter models (and / or views of the performance) averaged before the decoder (src/meter.py MeterEnsemble)
 scripts/install_run.py           a run published to the model repo installed as a finished run under outputs/runs (a model trained on another account)
@@ -100,6 +103,7 @@ pace/v2_level.sh                 v2 fifth round: the written-tempo head for the 
 pace/v2_gangqinpu.sh             v2 sixth round: meter models trained with Gangqinpu; the grid's beat times taken from the notes
 pace/v2_pm2s.sh                  v2 seventh round: PM2S retrained without our test pieces, its beats on whole pieces, a meter model for it
 pace/v2_pilot.sh                 v2 pilot: ensembles of trained models, synthetic data (12k steps), stable PM2S (16k steps), d80, per-piece choice: go / no go (8 jobs)
+pace/v2_pilot3.sh                v2 pilot part 3: PKSpell, engraving (clefs, stems), swing on the whole-piece benchmark (4 jobs)
 pace/v2_pilot2.sh                v2 pilot part 2: 2/4 against 4/4: one meter per piece (no training), repetition features, tolerant training (12k steps) (6 jobs)
 pace/v2_ensemble.sh              v2 eleventh round: two more meter_v4_gq seeds, meter ensembles (seeds, test-time views), whole pieces against the release (7 jobs)
 pace/v2_decode2.sh               v2 tenth round follow-up: each correction rule added to the models alone (nl_gq, nl_gq_mc), the rule verdict published (4 jobs)
@@ -124,6 +128,7 @@ tests/test_pm2s.py               PM2S: post-processing, the tracker on random we
 tests/test_publish.py            publishing: archive, the gate, --force, refusals, the demo's update + swap, the batch jobs' hook
 tests/test_readable.py           the readability rules: jumps (and what is no jump), lengths (and what is left), stems and hidden rests, the switches
 tests/test_synthetic.py          synthetic performances: rendering a written score, the build script, the PDMX unpacking, pace/v2_pilot.sh
+tests/test_score_rules.py        PKSpell (exact 1-D k-means, respelling), engraving, swing, their system options, postprocess_scores.py, pace/v2_pilot3.sh
 tests/test_bar_length.py         2/4 against 4/4: consistent_meter, rep_features, tolerant targets / loss, the new grid scores, pace/v2_pilot2.sh
 tests/test_ensemble.py           meter ensembles: views, the probability mixture, ensemble runs loading like trained ones, make_ensemble.py, pace/v2_ensemble.sh
 tests/test_rule_verdict.py       the rule verdict: its decisions, publishing it, the demo following it, pace/v2_decode2.sh

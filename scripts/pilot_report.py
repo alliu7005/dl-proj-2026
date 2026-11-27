@@ -17,6 +17,8 @@ C. PM2S retrained with stable optimisation (the ninth round's settings) for 16k 
 D. The deletion threshold at 0.8 on the release (round 7, michael: small but sure).
 E. Per-piece choice between seq2seq and v2: its ceiling (the better of the two on every
    performance, known only with the reference) against the better system alone.
+I (pace/v2_pilot3.sh). Score-level rules: PKSpell's key and spellings (_ps), engraving (_eg: clefs,
+   one-voice stems), swing written straight (_sw), and all three, against the release.
 F-H (pace/v2_pilot2.sh). The 2/4-against-4/4 problem: F one meter per piece after decoding (no
    training: meter_v4_gq_om5 / _om6); G the repetition features (meter_v4_gq_rep_p12k); H
    bar-length-tolerant training (meter_v4_gq_tol_p12k), each against meter_v4_gq_p12k.
@@ -241,6 +243,53 @@ def main(argv=None):
         L += [f"- {'time signature (2/4 = 4/4)' if key == 'H_tolerant' else '(downbeat F + ts) / 2'} with minus without: "
               + ", ".join(f"{c} {x:+.3f}" for c, x in zip(common, d)) + f"; downbeat F worst {min(d_db):+.3f}: "
               f"{'**go**' if go[key] else 'no go'} (go: mean >= +0.01, downbeat F not down by more than 0.02)", ""]
+
+    # I. score-level rules (pace/v2_pilot3.sh)
+    L += ["## I. Spelling (PKSpell), engraving (clefs, stems), swing", "",
+          "Mean over performances: MUSTER mean error, and score similarity's spelling, stem and staff errors (%). "
+          "PKSpell was trained on ASAP's scores (our ASAP test pieces included): Gangqinpu is its honest test.", ""]
+    base_sys = "v2_nl_gq_meter_v4_gq_d95_tidy"
+    variants = [base_sys] + [base_sys + x for x in ("_ps", "_eg", "_ps_eg", "_sw", "_ps_eg_sw")]
+    tables = {"asap": json.loads(Path(args.asap).read_text())["results"] if Path(args.asap).exists() else {},
+              "gq": json.loads(Path(args.gq).read_text())["results"] if Path(args.gq).exists() else {}}
+    L += ["| system | " + " | ".join(f"{c}: MUSTER / spelling / stem / staff" for c, _ in PIECES) + " |",
+          "|---|" + "---|" * len(PIECES)]
+    metric = {}
+    for v in variants:
+        cells = []
+        for cond, key in PIECES:
+            r = tables[key].get(cond, {}).get(v, {}).get("all")
+            if not r:
+                cells.append("-")
+                continue
+            sim, mu = r.get("sim", {}), r.get("muster", {})
+            metric[(v, cond)] = sim
+            cells.append(f"{mu.get('MeanER', float('nan')):.2f} / {sim.get('NoteSpelling', float('nan')):.1f} / "
+                         f"{sim.get('StemDirection', float('nan')):.1f} / {sim.get('StaffAssignment', float('nan')):.1f}")
+        L.append(f"| `{v}` | " + " | ".join(cells) + " |")
+    L.append("")
+    rows, vI = piece_rows(res, [(v, base_sys) for v in variants[1:]])
+    L += ["MUSTER, paired against the release:", ""] + rows + [""]
+
+    def drop(v, field, conds):
+        d = [metric[(v, c)][field] - metric[(base_sys, c)][field] for c in conds
+             if (v, c) in metric and (base_sys, c) in metric and field in metric[(v, c)]]
+        return sum(d) / len(d) if d else None
+    for key, v, field, conds in (("I_pkspell", base_sys + "_ps", "NoteSpelling", ("gangqinpu_real", "gangqinpu")),
+                                 ("I_engraving", base_sys + "_eg", "StemDirection", tuple(c for c, _ in PIECES)),
+                                 ("I_swing", base_sys + "_sw", None, ())):
+        verdict = vI.get((v, base_sys), {}).get("verdict", "not measured")
+        if field:
+            dd = drop(v, field, conds)
+            go[key] = dd is not None and dd < 0 and verdict not in ("worse", "mixed")
+            L.append(f"- `{v}`: {field} {'n/a' if dd is None else f'{dd:+.2f}'} points on {', '.join(conds)}; "
+                     f"MUSTER {verdict}: {'**go**' if go[key] else 'no go'}")
+        else:
+            go[key] = verdict not in ("worse", "mixed", "not measured")
+            L.append(f"- `{v}`: MUSTER {verdict} (it changes only swung pieces; Lemon: 78% -> 96% of the "
+                     f"sheet's onsets in bars 2-7): {'**go**' if go[key] else 'no go'} (go: not worse anywhere)")
+    L += ["", "Go: PKSpell lowers the spelling error on Gangqinpu, engraving the stem error, neither makes MUSTER "
+          "worse beyond chance; swing must not make anything worse.", ""]
 
     # E. per-piece choice
     L += ["## E. Per-piece choice between seq2seq and v2 (its ceiling)", ""]

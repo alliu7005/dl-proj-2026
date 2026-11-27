@@ -874,7 +874,7 @@ About 4-6 hours; `q1final` writes the report.
 To bring the results back:
 
 ```bash
-cd ~/scratch/dl-proj-2026 && tar czf v2_pilot.tgz outputs/pilot outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/runs/meter_v4_gq*/eval_meter.json outputs/runs/meter_v4_gq*/decode.json outputs/runs/meter_v4_gq_*p12k/log.csv outputs/runs/pm2s_pilot*/log.csv slurm-r2*.out data/processed/meter/synthetic_report.json slurm-q1*.out slurm-met_meter_v4_gq_*p12k*.log slurm-pm2s_pilot*.log 2>/dev/null; ls -la v2_pilot.tgz
+cd ~/scratch/dl-proj-2026 && tar czf v2_pilot.tgz outputs/pilot outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/runs/meter_v4_gq*/eval_meter.json outputs/runs/meter_v4_gq*/decode.json outputs/runs/meter_v4_gq_*p12k/log.csv outputs/runs/pm2s_pilot*/log.csv slurm-r2*.out slurm-p3*.out data/processed/meter/synthetic_report.json slurm-q1*.out slurm-met_meter_v4_gq_*p12k*.log slurm-pm2s_pilot*.log 2>/dev/null; ls -la v2_pilot.tgz
 ```
 
 ```bash
@@ -900,6 +900,28 @@ git pull && bash pace/v2_pilot2.sh
 Every meter evaluation now also reports `ts_acc_equiv` (2/4 = 4/4 = 2/2, 6/8 = 12/8) and
 `ts_changes_per_100_bars`. `outputs/pilot/report.md` gets sections F-H. Bring the results back with
 4w's command (it includes them).
+
+## 4y. The pilot, part 3: spelling, stems and swing (alongside 4w, 4x)
+
+Three rules on the written score, each its own system against the release (`nl_gq` + `meter_v4_gq`,
+`tidy,d95`). `pace/v2_pilot3.sh` waits for 4w's and 4x's jobs still queued:
+
+| suffix | rule | why |
+|---|---|---|
+| `_ps` | PKSpell's key signature and spellings (`src/pkspell.py`; Foscarin et al., ISMIR 2021, MIT) | spelling error ~12% against Beyer & Dai's 8.6%; on music21's corpus it spells 97.5% of notes right against v2's 84.9% |
+| `_eg` | clefs from each staff's range, one-voice stems by the engraver's rule (`src/readable.py engrave_score`) | stem error ~51% against 25%: v2 set stems only where a staff has two voices |
+| `_sw` | swung pairs written straight under a swing marking (`src/swing.py`) | Lemon: 78% -> 96% of the sheet's right-hand onsets in bars 2-7 |
+
+```bash
+module load anaconda3 && conda activate dl-proj    # the login node fetches PKSpell's weights
+git pull && bash pace/v2_pilot3.sh
+```
+
+`_ps` and `_eg` are applied to the release's scores as written already
+(`scripts/postprocess_scores.py`); `_sw` and all three together run through the pipeline. Section I
+of `outputs/pilot/report.md` has the MUSTER and the score-similarity spelling, stem and staff
+errors, with a go / no go. PKSpell was trained on ASAP's scores, our ASAP test pieces included:
+Gangqinpu is its honest test.
 
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 

@@ -137,7 +137,8 @@ def playback_qpm(score, seconds: float | None) -> float | None:
 
 
 def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None = None,
-            glissandi: list | None = None, stems: bool = False) -> dict:
+            glissandi: list | None = None, stems: bool = False, pkspell: bool = False,
+            engraving: bool = False, swing: str | None = None) -> dict:
     """Tokens -> ``out``/score.musicxml and score.mid (``res.files``; failures in ``res.errors``).
     ``seconds``: the performance's length, which sets the score MIDI's tempo (``playback_qpm``; the
     MusicXML carries no tempo, as the scores the comparison rates). Returns how the export went
@@ -147,12 +148,15 @@ def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None =
     MIDI plays grace notes and rolled chords as written (src/playback.py: "graces_played",
     "rolled_chords_played"), which music21's MIDI export alone does not. ``stems``: the higher
     voice's stems up, the others' down where a staff has two voices (src/readable.py stem_voices;
-    "stems_set": how many measures)."""
+    "stems_set": how many measures). ``pkspell``: the key signature and every note's spelling from
+    PKSpell (src/pkspell.py respell). ``engraving``: clefs from each staff's range and every
+    one-voice note's stem by the engraver's rule (src/readable.py engrave_score). ``swing``: the
+    piece was written straight from swung playing (src/swing.py): its marking over the first bar."""
     import music21 as m21
     from .preprocessing.detokenize import tokens_to_musicxml, tokens_to_score
     report = {}
     deco = None
-    if glissandi or stems:
+    if glissandi or stems or pkspell or engraving or swing:
         def deco(score):
             if glissandi:
                 from .glissando import decorate
@@ -160,6 +164,17 @@ def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None =
             if stems:
                 from .readable import stem_voices
                 report["stems_set"] = stem_voices(score)
+            if pkspell:   # before the stems: a respelled note can sit on another staff line
+                from .pkspell import respell
+                report["pkspell"] = respell(score)
+            if engraving:
+                from .readable import engrave_score
+                report.update(engrave_score(score))
+            if swing:
+                from .swing import MARKINGS
+                first = next(iter(score.parts[0].getElementsByClass(m21.stream.Measure)), None)
+                if first is not None:
+                    first.insert(0, m21.expressions.TextExpression(MARKINGS.get(swing, "Swing")))
     try:
         res.files["musicxml"] = Path(tokens_to_musicxml(tokens, str(out / "score.musicxml"), report=report,
                                                         decorate=deco))
@@ -591,7 +606,7 @@ class V2Pipeline(_FrontEnd):
                  device: str = "auto", window_notes: int = 128, delete_above: float = DELETE_ABOVE,
                  tidy: bool = False, glissando: bool = False, timing_check: bool = False,
                  readable: bool = False, fix_jumps: bool = False, timing_beats: bool = False,
-                 beat_decode: bool = False):
+                 beat_decode: bool = False, pkspell: bool = False, engraving: bool = False, swing: bool = False):
         """``glissando``: find glissandos in the notes (src/glissando.py) and write each as its first
         and last note joined by a "gliss." line, not as the run of notes. ``timing_check``: a note
         written on a triplet position but played on a straight eighth or sixteenth is moved there
@@ -638,6 +653,9 @@ class V2Pipeline(_FrontEnd):
         self.readable = bool(readable)
         self.timing_beats = bool(timing_beats)
         self.fix_jumps = bool(fix_jumps)
+        self.pkspell = bool(pkspell)       # key and spellings from PKSpell (src/pkspell.py)
+        self.engraving = bool(engraving)   # clefs by range, one-voice stems by the engraver's rule (src/readable.py)
+        self.swing = bool(swing)           # swung playing written straight under a swing marking (src/swing.py)
         from .beat_decode import BeatDecode
         self.beat_params = BeatDecode.load(labeller_ckpt.parent)   # None: not tuned for this labeller
         self.beat_decode = bool(beat_decode)
@@ -760,6 +778,10 @@ class V2Pipeline(_FrontEnd):
         if rd:   # short rests closed, small overlaps trimmed (before a glissando's start is set to reach its end)
             from .readable import readable_lengths
             closed, trimmed = readable_lengths(notes_out, list(grid["bars"]))
+        swung, swing_kind = 0, None
+        if self.swing:   # swung pairs written straight (after the lengths are tidied: it moves starts and ends alike)
+            from .swing import write_swing
+            swung, swing_kind = write_swing(notes_out, list(grid["bars"]))
         key = int(grid.get("key", 0))
         bars = [(ts, key) for ts in grid["bars"]] or [("4/4", key)]
         opens = True
@@ -789,6 +811,7 @@ class V2Pipeline(_FrontEnd):
                         "beat_decode": ((self.beat_params.to_dict() if self.beat_params else "not tuned") if bd
                                         else False),
                         "readable": rd, "rests_closed": closed, "overlaps_trimmed": trimmed,
+                        "swing": swing_kind, "swing_written_straight": swung,
                         "follow": follow_map(grid, notes_out)}
 
     # ------------------------------------------------------------------ all of it
@@ -874,7 +897,8 @@ class V2Pipeline(_FrontEnd):
         files["tokens"] = out / "tokens.txt"
         progress("engrave", 0.0, "writing MusicXML")
         export = engrave(tokens, out, res, float(notes[:, OFFSET].max() - notes[:, ONSET].min()), glissandi=gl,
-                         stems=counts["readable"])
+                         stems=counts["readable"], pkspell=self.pkspell, engraving=self.engraving,
+                         swing=counts.get("swing"))
         written = counts.pop("bar_ts")  # the score's bars (the grid's, up to the bar the music ends in)
         ts = Counter(written)
         dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())

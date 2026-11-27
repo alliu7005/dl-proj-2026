@@ -173,3 +173,83 @@ def stem_voices(score) -> int:
                         r.style.hideObjectOnPrint = True
             n += 1
     return n
+
+
+# ---------------------------------------------------------------------------------------------
+# engraving: clefs from each staff's range, stems from where the notes sit (engrave_score)
+# ---------------------------------------------------------------------------------------------
+# The whole-piece benchmark rates stem direction (Beyer & Dai's score similarity): v2's error was
+# ~51% against Beyer & Dai's 25%, because v2 set stems only where a staff has two voices
+# (stem_voices) and left every other note's to the viewer, while engraved scores (the references)
+# give each one. The engraver's rule for one voice: a stem goes down when the note (the chord's
+# note farthest from the middle line) is above the staff's middle line, up when below, down on the
+# line; notes beamed together share one direction, decided by the note farthest from the line.
+# Beams are not made yet when this runs, so a beam group is approximated by the notes shorter than
+# the beat inside one beat. The clef: v2 wrote treble over bass always; a lower staff that lies
+# mostly above middle C (the left hand in Lemon's opening) is written in treble, an upper staff
+# mostly below the G under middle C in bass.
+
+TREBLE_MID, BASS_MID = 35, 23      # diatonic note numbers (music21) of B4 and D3, the middle lines
+LOW_TREBLE, HIGH_BASS = 60, 55     # median MIDI pitch for a lower staff in treble / upper staff in bass
+
+
+def choose_clefs(score) -> int:
+    """Each staff's clef from its notes' median pitch (only the first two staves; module comment);
+    returns how many staves changed clef."""
+    import music21 as m21
+    changed = 0
+    for i, part in enumerate(list(score.parts)[:2]):
+        ps = [p.midi for n in part.flatten().notes for p in n.pitches]
+        if not ps:
+            continue
+        med = float(np.median(ps))
+        want = ("treble" if i == 0 and med >= HIGH_BASS or i == 1 and med >= LOW_TREBLE else "bass")
+        first = next(iter(part.getElementsByClass(m21.stream.Measure)), None)
+        if first is None:
+            continue
+        cur = first.clef or next(iter(first.recurse().getElementsByClass(m21.clef.Clef)), None)
+        cur_name = "treble" if isinstance(cur, m21.clef.TrebleClef) else "bass" if isinstance(cur, m21.clef.BassClef) else None
+        if cur_name != want:
+            first.clef = m21.clef.TrebleClef() if want == "treble" else m21.clef.BassClef()
+            changed += 1
+    return changed
+
+
+def _middle(part) -> int:
+    import music21 as m21
+    c = next(iter(part.recurse().getElementsByClass(m21.clef.Clef)), None)
+    return BASS_MID if isinstance(c, m21.clef.BassClef) else TREBLE_MID
+
+
+def engrave_stems(score) -> int:
+    """Stems of every note in a one-voice measure, by the engraver's rule (module comment); measures
+    with two voices or more keep stem_voices's. Returns how many notes got a stem direction."""
+    import music21 as m21
+    n = 0
+    for part in score.parts:
+        mid = _middle(part)
+        for meas in part.getElementsByClass(m21.stream.Measure):
+            if len(list(meas.voices)) >= 2:
+                continue
+            ts = meas.getContextByClass(m21.meter.TimeSignature)
+            beat = float(ts.beatDuration.quarterLength) if ts is not None else 1.0
+            groups = {}
+            for el in meas.flatten().notes:
+                if el.duration.isGrace or float(el.quarterLength) >= 4.0:   # whole notes have no stem
+                    continue
+                short = float(el.quarterLength) < beat
+                key = ("beat", int(float(el.offset) // beat)) if short else ("own", id(el))
+                groups.setdefault(key, []).append(el)
+            for els in groups.values():
+                d = [p.diatonicNoteNum - mid for el in els for p in el.pitches]
+                up_far, down_far = max(d), -min(d)
+                direction = "down" if up_far >= down_far else "up"
+                for el in els:
+                    el.stemDirection = direction
+                    n += 1
+    return n
+
+
+def engrave_score(score) -> dict:
+    """The clefs, then the one-voice stems (the middle line depends on the clef)."""
+    return {"clefs_changed": choose_clefs(score), "stems_engraved": engrave_stems(score)}
