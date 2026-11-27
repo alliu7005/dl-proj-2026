@@ -7,8 +7,10 @@ everything after it back; a long gap at the usual tempo (the tracker missed beat
 bar keeps two beats; a step that leaves its bar is left. readable_lengths: short rests closed,
 small overlaps trimmed, not across the bar line, not into an unwritable length or across grids,
 grace notes left. stem_voices: stems by voice, the other voices' rests hidden.
-two_voices (src/preprocessing/detokenize.py): the user's measure 4 in two voices, and random bars that
-sound the same in two voices at most. The pipeline's
+two_voices (src/preprocessing/detokenize.py): the user's measure 4 in two voices, random bars that
+sound the same in three voices at most, and random bars with triplets, quintuplets and septuplets
+written so a reader rebuilds every voice exactly (types, dots, tuplet ratios, complete brackets:
+what MuseScore needs not to call a file corrupted). The pipeline's
 switches, the system names, the demo's, the CLI's and the jobs' switches.
 """
 from __future__ import annotations
@@ -205,9 +207,123 @@ def test_two_voices_sound_the_same():
             b.notes = [n for s in (0, 1) for n in _one_key_one_note([n for n in b.notes if n.staff == s])] +                       [n for n in b.notes if n.staff > 1]
         new, ref = bars_to_score(bars, two_voices=True), bars_to_score(cut)
         assert sounding(new) == sounding(ref), trial
-        assert all(len(vs) <= 2 for staff in voices_of(new) for vs in staff), trial
+        from src.preprocessing.detokenize import MAX_VOICES
+        assert all(len(vs) <= MAX_VOICES for staff in voices_of(new) for vs in staff), trial
         with tempfile.TemporaryDirectory() as t:
             write_musicxml(new, str(Path(t) / "s.musicxml"))
+            assert not rebuilt_wrong(Path(t) / "s.musicxml"), (trial, rebuilt_wrong(Path(t) / "s.musicxml"))
+
+
+NOMINAL = {"whole": Fraction(4), "half": Fraction(2), "quarter": Fraction(1), "eighth": Fraction(1, 2),
+           "16th": Fraction(1, 4), "32nd": Fraction(1, 8), "64th": Fraction(1, 16), "128th": Fraction(1, 32)}
+
+
+def rebuilt_wrong(path) -> list:
+    """The measures of a MusicXML file whose voices do not fill the bar when every note's length is
+    rebuilt from its written type, dots and tuplet ratio, as MuseScore does on import ("voice too
+    long", "incomplete measure": it then rejects the file as corrupted), or whose written duration
+    differs from that rebuilt length. [(measure, staff, voice, total)]."""
+    import xml.etree.ElementTree as ET
+    from collections import defaultdict
+    bad = []
+    for part in ET.parse(path).getroot().iter("part"):
+        div, beats, btype = 1, 4, 4
+        for m in part.iter("measure"):
+            a = m.find("attributes")
+            if a is not None:
+                if a.find("divisions") is not None:
+                    div = int(a.find("divisions").text)
+                t = a.find("time")
+                if t is not None:
+                    beats, btype = int(t.find("beats").text), int(t.find("beat-type").text)
+            bar = Fraction(4 * beats, btype)
+            tot = defaultdict(Fraction)
+            for el in m:
+                if el.tag != "note" or el.find("grace") is not None or el.find("chord") is not None:
+                    continue
+                key = (el.findtext("staff", "1"), el.findtext("voice", "1"))
+                if el.find("rest") is not None and el.findtext("type") is None:   # a whole-bar rest
+                    tot[key] += Fraction(int(el.find("duration").text), div)
+                    continue
+                q = NOMINAL[el.findtext("type")]
+                q = q * (2 - Fraction(1, 2 ** len(el.findall("dot"))))
+                tm = el.find("time-modification")
+                if tm is not None:
+                    q = q * int(tm.findtext("normal-notes")) / int(tm.findtext("actual-notes"))
+                if q != Fraction(int(el.find("duration").text), div):
+                    bad.append((int(m.get("number")), key, "duration", str(q)))
+                tot[key] += q
+            bad += [(int(m.get("number")), k, "total", str(v)) for k, v in tot.items() if v != bar]
+            bad += [(int(m.get("number")), k, "tuplet", why) for k, why in tuplet_groups_wrong(m, div)]
+    return bad
+
+
+def tuplet_groups_wrong(m, div) -> list:
+    """A measure's tuplet notes that a reader has to group by guessing: outside an explicit bracket
+    (tuplet start .. stop in their voice), in a bracket with another ratio or note value, or in a
+    bracket that does not add up to its ratio's span (k notes of the note value in the time of n).
+    MuseScore guesses wrongly for such notes and rejects the measure; the two-voice writer brackets
+    every tuplet beat itself (detokenize.py _beat_tuplets)."""
+    out, open_ = [], {}
+    for el in m:
+        if el.tag != "note" or el.find("grace") is not None or el.find("chord") is not None:
+            continue
+        key = (el.findtext("staff", "1"), el.findtext("voice", "1"))
+        tm = el.find("time-modification")
+        starts = [t for t in el.iter("tuplet") if t.get("type") == "start"]
+        stops = [t for t in el.iter("tuplet") if t.get("type") == "stop"]
+        if starts:
+            open_[key] = {"ratio": None, "total": Fraction(0)}
+        g = open_.get(key)
+        if tm is not None:
+            ratio = (tm.findtext("actual-notes"), tm.findtext("normal-notes"), tm.findtext("normal-type"))
+            if g is None:
+                out.append((key, "a tuplet note outside a bracket"))
+            else:
+                if g["ratio"] not in (None, ratio):
+                    out.append((key, f"mixed ratios {g['ratio']} {ratio}"))
+                g["ratio"] = ratio
+                g["total"] += Fraction(int(el.find("duration").text), div)
+        if stops and g is not None:
+            act, nor, typ = g["ratio"] or ("1", "1", "quarter")
+            span = int(nor) * NOMINAL.get(typ, Fraction(1, 2))
+            if g["total"] != span:
+                out.append((key, f"bracket of {g['total']} for a span of {span}"))
+            open_.pop(key)
+    return out
+
+
+def test_tuplet_beats_rebuild():
+    """Random dense bars with triplets, quintuplets and septuplets mixed with straight notes, written
+    with two_voices: every voice fills its bar when rebuilt from types and tuplets (MuseScore's
+    check), three voices to a staff at most, and every note is written within one tuplet unit of
+    where it was (exact for straight notes and triplets: tests above)."""
+    import random
+    from src.preprocessing.detokenize import MAX_VOICES, bars_to_score, parse_tokens, write_musicxml
+    rng = random.Random(11)
+    subs = ("1/3", "1/5", "2/5", "1/7", "3/7", "1/2", "1/4", "2/3", "1/6")
+    lengths = ("1/3", "1/5", "1/7", "1/2", "1/4", "1", "2/7", "3/5", "3/2")
+    for trial in range(20):
+        toks = []
+        for bar in range(3):
+            toks.append("bar")
+            if bar == 0:
+                toks.append("ts_4/4")
+            for pos in range(4):
+                toks.append(f"pos_{pos}")
+                for k in range(rng.randint(1, 3)):
+                    if k:
+                        toks.append(f"sub_{rng.choice(subs)}")
+                    for staff in (0, 1):
+                        toks.append(f"staff_{staff}")
+                        for _ in range(rng.randint(0, 2)):
+                            toks += [f"p_{rng.randint(36, 60) + 24 * (1 - staff)}", f"d_{rng.choice(lengths)}"]
+        s = bars_to_score(parse_tokens(toks), two_voices=True)
+        assert all(len(vs) <= MAX_VOICES for staff in voices_of(s) for vs in staff), trial
+        with tempfile.TemporaryDirectory() as t:
+            f = Path(t) / "s.musicxml"
+            write_musicxml(s, str(f))
+            assert not rebuilt_wrong(f), (trial, rebuilt_wrong(f)[:5])
 
 
 def test_engrave_two_voices():

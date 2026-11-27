@@ -112,6 +112,19 @@ default in between jobs. When it is offline, it runs on what is there.
       17 -> 0, stems crossing 47 -> 6, a pitch struck while held 19 -> 0; it sounds the same
       (`tests/test_readable.py`). The score MIDI comes from the old writer, which plays a tied
       note of a chord once (music21's MIDI export strikes it again).
+    - **Files MuseScore opens** (2026-11-27). MuseScore called the user's "cruel angel" file
+      corrupted (bars 64 and 65 boxed red); checked measure by measure with MuseScore's own
+      converter, both writers produced such measures (old: 7 of 152, two-voice: 6). Its log said
+      why: "voice too long" / "incomplete measure", from tuplets it cannot rebuild (a straight note
+      among triplets in one voice, cut into triplet sixteenths; septuplets beside triplets; a gap
+      written as one 6:5 rest; five voices in a staff, where it reads four). The two-voice writer
+      now keeps one rhythm grid per beat in a voice (a third voice for a note on another grid,
+      three at most), cuts notes and rests at the line of a tuplet beat, and writes every tuplet
+      beat itself (`_beat_tuplets`: its boundaries on the beat's one tuplet grid, writable tied
+      pieces, one explicit bracket). On "cruel angel" (both runs), "unlasting" and "blue bird":
+      0 measures rejected, every file opens; 0.04-0.2% of the notes sound differently (snapped
+      where a beat mixed septuplets or quintuplets with triplets). `tests/test_readable.py`
+      checks it without MuseScore: every tuplet note in a complete, single-ratio bracket.
   - Closing rests had cost duration accuracy against ASAP's scores before (`tidy_lengths`), so the
     benchmark measures both rules (`pace/v2_decode.sh`) before they count as more than a demo
     default.

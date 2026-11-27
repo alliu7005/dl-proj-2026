@@ -272,6 +272,203 @@ def _split_rest(pos: Fraction, length: Fraction) -> list[tuple[Fraction, Fractio
     return out
 
 
+def _grid_rests(v):
+    """Rests off the plain grid (a gap that ends on a triplet or quintuplet note) split at the beats
+    and into the beat's own units (1/3 for triplets, 1/5 for quintuplets, 1/6 for sixths, ...): music21
+    otherwise writes one rest over the gap as an irregular tuplet (5/3 of a quarter as a 6:5 half),
+    which MuseScore rejects as corrupted. Rests on the plain grid stay (``_standard_rests``)."""
+    import math
+    for r in [e for e in v.notesAndRests if isinstance(e, m21.note.Rest)]:
+        off = Fraction(r.offset).limit_denominator(10 ** 6)
+        end = off + Fraction(r.quarterLength).limit_denominator(10 ** 6)
+        if all(_grid_kind(x) <= 1 for x in (off, end)) and not r.duration.tuplets:
+            continue
+        cuts = [off] + [Fraction(i) for i in range(math.ceil(off), math.floor(end) + 1) if off < i < end] + [end]
+        pieces = []
+        for a, b in zip(cuts, cuts[1:]):
+            dens = [x.denominator for x in (a % 1, b % 1) if x]
+            den = math.lcm(*dens) if dens else 1
+            k = den
+            while k % 2 == 0:
+                k //= 2
+            if k == 1:
+                pieces += _split_rest(a, b - a)
+                continue
+            unit = Fraction(1, k) if (a * k).denominator == 1 and (b * k).denominator == 1 else Fraction(1, den)
+            x = a
+            while x < b:
+                pieces.append((x, min(unit, b - x)))
+                x += unit
+        hidden = r.style.hideObjectOnPrint
+        v.remove(r)
+        for p, d in pieces:
+            nr = m21.note.Rest()
+            nr.duration = m21.duration.Duration(d)
+            nr.style.hideObjectOnPrint = hidden
+            v.insert(float(p), nr)
+
+
+TUPLET_SUB = 4      # _beat_tuplets: a tuplet beat's finest unit is a quarter of one tuplet note (32nd triplets)
+TUPLETS = (3, 5, 7)  # the tuplets a beat can take (triplets, quintuplets, septuplets)
+MAX_VOICES = 3       # _two_voices: a third voice only for a note on another grid; MuseScore reads four at most
+WRITABLE = (16, 12, 8, 6, 4, 3, 2, 1)   # lengths in those units one note can take: plain or dotted values
+TYPE_OF = {Fraction(1): "quarter", Fraction(1, 2): "eighth", Fraction(1, 4): "16th", Fraction(1, 8): "32nd",
+           Fraction(1, 16): "64th"}
+
+
+def _tie_pieces(tie: str | None, n: int) -> list:
+    """The tie types of n tied pieces replacing one element whose tie was ``tie``."""
+    if n == 1:
+        return [tie]
+    first = "continue" if tie in ("stop", "continue") else "start"
+    last = "continue" if tie in ("start", "continue") else "stop"
+    return [first] + ["continue"] * (n - 2) + [last]
+
+
+def _beat_tuplets(v, bar_len: Fraction) -> int:
+    """Every beat of a voice that holds a tuplet (a boundary on a triplet, quintuplet, ... grid)
+    rewritten in a form notation programs read back exactly: its boundaries snapped to the grid of
+    its tuplet (the most common one there; down to a quarter of one tuplet note), each element as
+    writable pieces of that grid (a plain or dotted value, tied where it takes more than one), every
+    piece carrying the beat's one tuplet (k notes in the time of n, n the power of two below k) with
+    the bracket started on the beat's first piece and stopped on its last. Without it music21 writes
+    lengths such as 7/12 as 12:7 tuplets, quintuplets beside triplets as 15:8, and slivers of 1/96,
+    which MuseScore rebuilds to a different total and rejects ("voice too long", "incomplete
+    measure"). A beat on the plain grid is left as it is. Changes the voice in place; returns how
+    many beats it rewrote. Beats are quarters (the last one of a bar of eighths a half)."""
+    import copy
+    import math
+    eps = Fraction(1, 10 ** 6)
+
+    def span(el):
+        a = Fraction(el.offset).limit_denominator(10 ** 6)
+        return a, a + Fraction(el.quarterLength).limit_denominator(10 ** 6)
+
+    def lines():   # the beat lines of the bar
+        out, x = [], Fraction(0)
+        while x < bar_len:
+            out.append(x)
+            x += 1
+        return out + [bar_len]
+
+    def tuplet_beats():   # the beats holding a boundary on a tuplet grid
+        bl = lines()
+        out = set()
+        for el in v.notesAndRests:
+            if el.duration.isGrace:
+                continue
+            for p in span(el):
+                for s_, e_ in zip(bl, bl[1:]):
+                    if s_ < p < e_ and _grid_kind((p - s_) / (e_ - s_)) > 1:
+                        out.add(s_)
+        return out
+    # an element across the line of a tuplet beat (a long rest, or a plain note running into one)
+    # is cut there first: a rest in two rests, a note in two tied ones
+    tb = tuplet_beats()
+    cut_at = sorted({x for s_ in tb for x in (s_, min(s_ + 1, bar_len))})
+    for el in [e for e in v.notesAndRests if not e.duration.isGrace]:
+        a, z = span(el)
+        xs = [x for x in cut_at if a < x < z]
+        if not xs:
+            continue
+        ties = {} if el.isRest else {p.pitch.midi: (p.tie.type if p.tie is not None else None) for p in
+                                     (el.notes if isinstance(el, m21.chord.Chord) else [el])}
+        bounds = [a] + xs + [z]
+        v.remove(el)
+        for pi, (p0, p1) in enumerate(zip(bounds, bounds[1:])):
+            c = copy.deepcopy(el)
+            c.duration = m21.duration.Duration(float(p1 - p0))
+            if not el.isRest:
+                for note in (c.notes if isinstance(c, m21.chord.Chord) else [c]):
+                    t = _tie_pieces(ties.get(note.pitch.midi), len(bounds) - 1)[pi]
+                    note.tie = m21.tie.Tie(t) if t else None
+                if pi > 0:
+                    c.expressions = []
+            v.insert(float(p0), c)
+    els = sorted([e for e in v.notesAndRests if not e.duration.isGrace], key=lambda e: e.offset)
+    rewritten = 0
+    b = Fraction(0)
+    while b < bar_len:
+        e_ = min(b + 1, bar_len)
+        L = e_ - b
+        seg = []
+        for el in els:
+            a = Fraction(el.offset).limit_denominator(10 ** 6)
+            z = a + Fraction(el.quarterLength).limit_denominator(10 ** 6)
+            if a >= b - eps and z <= e_ + eps and z > a:
+                seg.append([el, a, z])
+            elif a < e_ and z > b:   # an element across the beat line: this beat is left as it is
+                seg = None
+                break
+        b_next = e_
+        if not seg:
+            b = b_next
+            continue
+        pts = [p for _, a, z in seg for p in (a, z) if b < p < e_]
+        kinds = [_grid_kind((p - b) / L) for p in pts]
+        kinds = [k for k in kinds if k > 1]
+        if not kinds:
+            b = b_next
+            continue
+        # the beat's one tuplet: triplets, quintuplets or septuplets, the one most points are on (a
+        # point on a mixed grid, 1/21 or 1/15, counts for each it divides by); the others are snapped
+        k = max(TUPLETS, key=lambda c: (sum(x == c for x in kinds), sum(x % c == 0 for x in kinds), -c))
+        n = 2 ** int(math.log2(k))
+        unit = L / (k * TUPLET_SUB)               # the beat's finest unit
+        nominal_unit = L / (n * TUPLET_SUB)       # the plain value one unit stands for
+        if L / n not in TYPE_OF:
+            b = b_next
+            continue
+        snap = lambda p: b + round((p - b) / unit) * unit  # noqa: E731
+        edges = sorted({snap(a) for _, a, _ in seg} | {e_})
+        starts = {}
+        for el, a, _ in seg:                      # each element from its snapped start to the next one's
+            sa = snap(a)
+            if sa not in starts or isinstance(starts[sa], m21.note.Rest):
+                starts[sa] = el
+        new = []
+        for i, sa in enumerate(sorted(starts)):
+            if sa >= e_:
+                continue
+            nxt = next((x for x in edges if x > sa), e_)
+            j = round((nxt - sa) / unit)
+            pieces = []
+            while j > 0:
+                w = next(x for x in WRITABLE if x <= j)
+                pieces.append(w)
+                j -= w
+            new.append((starts[sa], sa, pieces))
+        for el, _, _ in seg:
+            v.remove(el)
+        made = []
+        for el, sa, pieces in new:
+            ties = {p.pitch.midi: (p.tie.type if p.tie is not None else None) for p in
+                    (el.notes if isinstance(el, m21.chord.Chord) else [el])} if not el.isRest else {}
+            pos = sa
+            for pi, w in enumerate(pieces):
+                c = copy.deepcopy(el)
+                d = m21.duration.Duration(float(w * nominal_unit))
+                d.appendTuplet(m21.duration.Tuplet(k, n, durationActual=TYPE_OF[L / n], durationNormal=TYPE_OF[L / n]))
+                c.duration = d
+                if not el.isRest:
+                    for note in (c.notes if isinstance(c, m21.chord.Chord) else [c]):
+                        t = _tie_pieces(ties.get(note.pitch.midi), len(pieces))[pi]
+                        note.tie = m21.tie.Tie(t) if t else None
+                    if pi > 0:   # an arpeggio or ornament belongs to the first piece only
+                        c.expressions = []
+                v.insert(float(pos), c)
+                made.append(c)
+                pos += w * unit
+        if made:
+            made[0].duration.tuplets[0].type = "start" if len(made) > 1 else "startStop"
+            if len(made) > 1:
+                made[-1].duration.tuplets[0].type = "stop"
+        rewritten += 1
+        els = sorted([e for e in v.notesAndRests if not e.duration.isGrace], key=lambda e: e.offset)
+        b = b_next
+    return rewritten
+
+
 def _standard_rests(v):
     """Rests music21 wrote with two or more dots (a 3.875-quarter rest as a quadruple-dotted half)
     split into standard rests; others (single-dotted, tuplet) stay."""
@@ -315,6 +512,28 @@ def _one_key_one_note(notes: list[_Note]) -> list[_Note]:
     return out
 
 
+def _grid_kind(x) -> int:
+    """The rhythm grid a time point (quarters) is on: 0 on the beat, 1 straight (halves, quarters,
+    ... of the beat), else the odd part of its denominator (3: triplets, 5: quintuplets)."""
+    f = Fraction(x) % 1
+    if f == 0:
+        return 0
+    d = f.denominator
+    while d % 2 == 0:
+        d //= 2
+    return d
+
+
+def _beat_kinds(points) -> dict:
+    """{beat: {grid kinds}} of these time points (on-the-beat points count for no beat)."""
+    out = defaultdict(set)
+    for x in points:
+        k = _grid_kind(x)
+        if k:
+            out[int(Fraction(x) // 1)].add(k)
+    return out
+
+
 def _two_voices(notes: list[_Note]) -> list[list[tuple[Fraction, Fraction, list[_Note]]]]:
     """A staff's non-grace notes in one bar -> at most two voices, the upper one first, each a list
     of (pos, dur, notes) that follow one another (a chord per position, rests between them).
@@ -326,8 +545,14 @@ def _two_voices(notes: list[_Note]) -> list[list[tuple[Fraction, Fraction, list[
     chord wholly above or below the notes held in the first; one that starts among them (a note
     between two held ones) joins them instead. When no free voice fits, it shares a voice with
     the notes still sounding there (the nearer in pitch): that voice is then written as chords at
-    every onset and end, the held notes split and tied (``tie``), so a staff never needs a third
-    voice and its stems seldom cross. Engravers write two voices to a staff at most in piano music."""
+    every onset and end, the held notes split and tied (``tie``), so a staff seldom needs a third
+    voice and its stems seldom cross. Engravers write two voices to a staff at most in piano music.
+
+    One rhythm grid per beat in a voice: a chord whose onset or end is on another grid than the
+    voice's notes in that beat (a straight eighth among triplets, a triplet among quintuplets) goes
+    into the other voice if that one fits, else into a third voice. Mixed in one voice, the cuts make
+    tuplets no notation program can group (triplet sixteenths around a straight onset, 15:8, 12:7):
+    MuseScore rejected those measures as corrupted (the user's song, bars 64 and 65)."""
     groups = defaultdict(list)
     for n in notes:
         groups[(n.pos, n.dur)].append(n)
@@ -339,19 +564,27 @@ def _two_voices(notes: list[_Note]) -> list[list[tuple[Fraction, Fraction, list[
 
     def height(v):
         return _mean_pitch(v["notes"])
+
+    def fits(v, pos, end):   # the chord's onset and end on the grid of the voice's notes in their beats
+        g = _beat_kinds((pos, end))
+        return all(len(v["kinds"].get(b, set()) | ks) <= 1 for b, ks in g.items())
+
+    def new_voice(group, pos, end):
+        voices.append({"notes": list(group), "end": end, "kinds": _beat_kinds((pos, end))})
     for (pos, dur), group in order:
         m = _mean_pitch(group)
         if not voices:
-            voices.append({"notes": list(group), "end": pos + dur})
+            new_voice(group, pos, pos + dur)
             continue
-        free = [v for v in voices if v["end"] <= pos]
-        busy = [v for v in voices if v["end"] > pos]
+        main = voices[:2]
+        free = [v for v in main if v["end"] <= pos]
+        busy = [v for v in main if v["end"] > pos]
         target = None
-        if len(voices) == 1:   # None: a second voice, when the chord is above or below the notes held
-            s = sounding(voices[0], pos)
+        if len(main) == 1:   # None: a second voice, when the chord is above or below the notes held
+            s = sounding(main[0], pos)
             inside = bool(s) and not (min(x.pitch for x in group) > max(x.pitch for x in s)
                                       or max(x.pitch for x in group) < min(x.pitch for x in s))
-            target = voices[0] if free or inside else None
+            target = main[0] if free or inside else None
         elif len(free) == 2:
             target = min(free, key=lambda v: abs(_mean_pitch(v["notes"][-1:]) - m))
         elif len(free) == 1:
@@ -363,12 +596,23 @@ def _two_voices(notes: list[_Note]) -> list[list[tuple[Fraction, Fraction, list[
             crosses = bool(s) and ((upper and lo < max(x.pitch for x in s)) or (not upper and hi > min(x.pitch for x in s)))
             target = b if crosses else f
         else:
-            target = min(voices, key=lambda v: min(abs(x.pitch - m) for x in sounding(v, pos) or v["notes"]))
+            target = min(main, key=lambda v: min(abs(x.pitch - m) for x in sounding(v, pos) or v["notes"]))
+        if target is not None and not fits(target, pos, pos + dur):   # another grid in that beat
+            pick = target
+            alt = [v for v in main if v is not target and fits(v, pos, pos + dur)]
+            target = alt[0] if alt else None
+            if target is None and len(main) == 2:   # neither fits: a free third voice of its grid, else a new one
+                extra = [v for v in voices[2:] if v["end"] <= pos and fits(v, pos, pos + dur)]
+                target = extra[0] if extra else None
+                if target is None and len(voices) >= MAX_VOICES:   # no more voices: it shares the nearer one
+                    target = pick   # (_beat_tuplets writes the beat on one tuplet grid, straight points exactly)
         if target is None:
-            voices.append({"notes": list(group), "end": pos + dur})
+            new_voice(group, pos, pos + dur)
         else:
             target["notes"].extend(group)
             target["end"] = max(target["end"], pos + dur)
+            for b, ks in _beat_kinds((pos, pos + dur)).items():
+                target["kinds"].setdefault(b, set()).update(ks)
     voices.sort(key=height, reverse=True)
     out = []
     for v in voices:   # chords at every onset and end in the voice; a note held across one is tied on
@@ -376,6 +620,16 @@ def _two_voices(notes: list[_Note]) -> list[list[tuple[Fraction, Fraction, list[
         parts = defaultdict(list)
         for x in v["notes"]:
             inner = [c for c in cuts if x.pos < c < x.pos + x.dur]
+            # a piece on a tuplet grid (an end off the plain grid) that crosses a beat line is cut there
+            # too, so every tuplet stays inside its beat: an eighth from the last triplet of a beat would
+            # otherwise be split by music21 itself, which then splits the next notes to complete tuplets
+            # (12:7, triplet sixteenths) and MuseScore rejects the measure
+            edges = [x.pos] + inner + [x.pos + x.dur]
+            extra = []
+            for a, b in zip(edges, edges[1:]):
+                if _grid_kind(a) > 1 or _grid_kind(b) > 1:
+                    extra += [Fraction(i) for i in range(int(a // 1) + 1, int(-(-b // 1))) if a < i < b]
+            inner = sorted(set(inner) | set(extra))
             starts = [x.pos] + inner
             ends = inner + [x.pos + x.dur]
             for k, (a, b) in enumerate(zip(starts, ends)):
@@ -505,6 +759,9 @@ def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None
                             prev.quarterLength = prev.quarterLength + r.quarterLength
                         v.remove(r)
                 _standard_rests(v)
+                if two_voices:
+                    _grid_rests(v)
+                    _beat_tuplets(v, Fraction(bar_len))
             if bar.ts == prev_ts:  # written only where it changes
                 meas.timeSignature = None
             part.append(meas)
