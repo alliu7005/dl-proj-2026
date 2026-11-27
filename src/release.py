@@ -61,6 +61,9 @@ TIMING_BEATS = True
 # the parameters tuned on validation windows, beat_decode.json next to the labeller)
 BEAT_DECODE = True
 FIX_JUMPS = True
+# two voices to a staff at most, ordered by pitch, held notes tied, a pitch struck again ending the
+# held one (src/preprocessing/detokenize.py _two_voices); engraving, not a model correction
+TWO_VOICES = True
 
 # The rules that correct a model's output (as opposed to how a rhythm is engraved) are decided by the
 # benchmark (scripts/rule_verdict.py: on only when they make the whole system significantly better;

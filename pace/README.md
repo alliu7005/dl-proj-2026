@@ -846,40 +846,59 @@ To bring the results back:
 cd ~/scratch/dl-proj-2026 && tar czf v2_decode2.tgz outputs/rule_verdict.json outputs/rule_verdict.md outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md slurm-d2*.out 2>/dev/null; ls -la v2_decode2.tgz
 ```
 
-## 4x. v5 data: a larger, balanced classical side, and the models retrained (larger ones too)
+## 4v. The piece-tempo prior and two voices (after or alongside 4t / 4u)
 
-`pace/v2_data.sh` grows the classical half of the training data without overfitting by work or by
-performance, then retrains the labeller and meter model on it, base and large, two seeds for the
-meter model. Run it before 4w (`pace/v2_btft.sh`), whose export then takes the downloaded classical
-recordings as real classical audio. Once, on the login node: `pip install yt-dlp`.
+`pace/v2_tempo.sh` tunes the meter decoder's piece-tempo prior on validation (`meter_v4_gq_pt`,
+the same checkpoint) and measures it on whole pieces, with the two-voice score writer (`_tv`) in
+the demo's configuration. It waits for 4t's tuning and both earlier scoring jobs if still queued
+(5 jobs):
 
 ```bash
-bash pace/v2_data.sh                  # stage 1, fetch (7 jobs)
-STAGE=build bash pace/v2_data.sh      # stage 2, re-transcription and the rebuild (4 jobs)
-STAGE=train bash pace/v2_data.sh      # stage 3, the v5 models and whole pieces (8 jobs)
-COOKIES=cookies.txt bash pace/v2_data.sh   # if YouTube asks PACE to confirm it is not a bot
+bash pace/v2_tempo.sh
 ```
 
-- **More classical data** (PianoCoRe, best-aligned, never a Beyer & Dai test work): PERiScoPe up to 30
-  performances per work (`periscope_more`, ~10,400 more, 776 h); ATEPP and GiantMIDI-Piano (`atepp`,
-  ~4,700, 390 h, 794 works), their recordings fetched from YouTube (`scripts/fetch_pianocore_audio.py`)
-  and re-transcribed with Transkun V2 (`scripts/retranscribe_pianocore.py`: the original transcription
-  keeps giving the score map, ours becomes the input; a recording that does not match is dropped).
-- **Every Gangqinpu training recording** (17.6k; 3,000 before): real tracked beats, real pop audio.
-- **Against overfitting:** splits by work across every source, and the new sources never add to
-  `test_periscope`; at most 30 performances per work over all sources, different pianists first;
-  every work weighed as one performance in training (meter `--balance piece`, labeller `--piece-balance`).
-- **Models:** `nl_v5`, `nl_v5_large`; `meter_v5` (+ `_s1`), `meter_v5_large` (+ `_s1`), `meter_v5_ne`
-  (note encoder). Not published (`PUBLISH=0`) until compared: whole pieces against `nl_gq_mc + meter_v4_gq`.
-- The current `data/processed` is kept as `data/processed_pre_v5`.
+| job | what | waits for |
+|---|---|---|
+| `pttests` | the test suites (CPU) | - |
+| `pttune` | `piecetempo meter_v4_gq`: `eval_meter.py --piece-tempo`, then its evaluation | `pttests` |
+| `ptasap` | whole pieces on ASAP: `nl_gq+meter_v4_gq_pt` alone, `bd`; the demo's configuration with `tv`, on both meters | `pttune`; `dctune` if queued |
+| `ptgq` | the same on Gangqinpu's whole pieces | the same |
+| `ptfinal` | Beyer & Dai's metrics, both `paired.md` | `ptasap`, `ptgq`; `dcfinal`, `d2final` if queued |
 
 To bring the results back:
 
 ```bash
-cd ~/scratch/dl-proj-2026 && tar czf v2_data.tgz data/raw/pianocore/atepp/audio/fetch_report.json data/raw/pianocore/atepp_tk/retranscribe_report.json data/processed/report.json data/processed/meter/*report*.json outputs/runs/*_v5*/config.json outputs/runs/*_v5*/log.csv outputs/runs/*_v5*/eval_*.json outputs/system_eval/results.md outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/paired.md slurm-d*.out slurm-m*.out 2>/dev/null; ls -la v2_data.tgz
+cd ~/scratch/dl-proj-2026 && tar czf v2_tempo.tgz outputs/runs/meter_v4_gq_pt/decode.json outputs/runs/meter_v4_gq_pt/eval_meter.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md slurm-pt*.out 2>/dev/null; ls -la v2_tempo.tgz
 ```
 
-## 4v. Rendered beats: Beat This! on renders of every training performance
+## 4w. Compound meters in the meter's training (eleventh round)
+
+`pace/v2_compound.sh` fits the tracker's level per stretch on the real tracked beats (ASAP and
+Gangqinpu), trains `meter_v5_lv` (those levels replayed), `meter_v5_cw` (compound meters weighted
+x3) and `meter_v5_lvcw` (both), evaluates them (also on the real recordings), measures them on
+whole pieces with `nl_gq`, and reports them per true time signature (`outputs/meter_ts.md`). It
+waits for the earlier batches' scoring jobs if still queued (6 jobs):
+
+```bash
+bash pace/v2_compound.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `cmfit` | tests; `fit_beat_noise.py --levels`, `fit_pm2s_noise.py --from-stored beat_this --levels` (CPU) | - |
+| `cmtrain` | the three meters on one GPU | `cmfit` |
+| `cmtrain2` | resumes them if needed, tunes, evaluates, publishes a better one; `trackers` (the real recordings) | `cmtrain` |
+| `cmasap` | whole pieces on ASAP: `nl_gq` + each new meter | `cmtrain2` |
+| `cmgq` | the same on Gangqinpu's whole pieces | the same |
+| `cmfinal` | Beyer & Dai's metrics, both `paired.md`, `outputs/meter_ts.md` | `cmasap`, `cmgq`; `dcfinal`, `d2final`, `ptfinal` if queued |
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_compound.tgz configs/beat_noise_levels.json configs/beat_noise_bt_gangqinpu_levels.json outputs/meter_ts.md outputs/meter_ts.json outputs/runs/meter_v5_*/eval_meter.json outputs/runs/meter_v5_*/decode.json outputs/runs/meter_v5_*/config.json outputs/runs/meter_v5_*/log.csv outputs/runs/meter_v5_*/meter_scores_*.json outputs/runs/meter_v4_gq/eval_meter.json outputs/runs/meter_v4_gq/meter_scores_*.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-cm*.out slurm-met_meter_v5_*.log 2>/dev/null; ls -la v2_compound.tgz
+```
+
+## 4x. Rendered beats: Beat This! on renders of every training performance
 
 `pace/v2_render.sh` gives every meter-model training performance with no recording Beat This!'s
 real beats of a render of it (FluidSynth and a sampled piano, `src/render.py`), in place of the
@@ -908,12 +927,45 @@ To bring the results back:
 cd ~/scratch/dl-proj-2026 && tar czf v2_render.tgz outputs/render_check data/processed/meter/tracked_report_render.json outputs/runs/meter_v4_gq_rb*/config.json outputs/runs/meter_v4_gq_rb*/log.csv outputs/runs/meter_v4_gq_rb*/eval_meter.json outputs/runs/meter_v4_gq_rb*/decode.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md slurm-rr*.out 2>/dev/null; ls -la v2_render.tgz
 ```
 
-## 4w. Our Beat This!: retrained without ASAP, fine-tuned on piano, cross-fitted
+## 4y. v6 data: a larger, balanced classical side, and the models retrained (larger ones too)
+
+`pace/v2_data.sh` grows the classical half of the training data without overfitting by work or by
+performance, then retrains the labeller and meter model on it, base and large, two seeds for the
+meter model. Run it before 4z (`pace/v2_btft.sh`), whose export then takes the downloaded classical
+recordings as real classical audio. Once, on the login node: `pip install yt-dlp`.
+
+```bash
+bash pace/v2_data.sh                  # stage 1, fetch (7 jobs)
+STAGE=build bash pace/v2_data.sh      # stage 2, re-transcription and the rebuild (4 jobs)
+STAGE=train bash pace/v2_data.sh      # stage 3, the v6 models and whole pieces (8 jobs)
+COOKIES=cookies.txt bash pace/v2_data.sh   # if YouTube asks PACE to confirm it is not a bot
+```
+
+- **More classical data** (PianoCoRe, best-aligned, never a Beyer & Dai test work): PERiScoPe up to 30
+  performances per work (`periscope_more`, ~10,400 more, 776 h); ATEPP and GiantMIDI-Piano (`atepp`,
+  ~4,700, 390 h, 794 works), their recordings fetched from YouTube (`scripts/fetch_pianocore_audio.py`)
+  and re-transcribed with Transkun V2 (`scripts/retranscribe_pianocore.py`: the original transcription
+  keeps giving the score map, ours becomes the input; a recording that does not match is dropped).
+- **Every Gangqinpu training recording** (17.6k; 3,000 before): real tracked beats, real pop audio.
+- **Against overfitting:** splits by work across every source, and the new sources never add to
+  `test_periscope`; at most 30 performances per work over all sources, different pianists first;
+  every work weighed as one performance in training (meter `--balance piece`, labeller `--piece-balance`).
+- **Models:** `nl_v6`, `nl_v6_large`; `meter_v6` (+ `_s1`), `meter_v6_large` (+ `_s1`), `meter_v6_ne`
+  (note encoder). Not published (`PUBLISH=0`) until compared: whole pieces against `nl_gq_mc + meter_v4_gq`.
+- The current `data/processed` is kept as `data/processed_pre_v6`.
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_data.tgz data/raw/pianocore/atepp/audio/fetch_report.json data/raw/pianocore/atepp_tk/retranscribe_report.json data/processed/report.json data/processed/meter/*report*.json outputs/runs/*_v6*/config.json outputs/runs/*_v6*/log.csv outputs/runs/*_v6*/eval_*.json outputs/system_eval/results.md outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/paired.md slurm-d*.out slurm-m*.out 2>/dev/null; ls -la v2_data.tgz
+```
+
+## 4z. Our Beat This!: retrained without ASAP, fine-tuned on piano, cross-fitted
 
 `pace/v2_btft.sh` retrains Beat This! from scratch on its published data without ASAP, fine-tunes it on
 our piano data (classical and pop, recordings and renders, balanced), cross-fitted so the meter
 model's training beats come from a model that never heard the piece, then trains and scores a meter
-model on them. Once, on the login node: FluidSynth and the SoundFonts as for 4v, and
+model on them. Once, on the login node: FluidSynth and the SoundFonts as for 4x, and
 `pip install pytorch-lightning`. Space: ~108 GB for Beat This!'s data without ASAP (`EXCLUDE="asap,harmonix"`: ~63 GB) plus ~25 GB.
 
 ```bash

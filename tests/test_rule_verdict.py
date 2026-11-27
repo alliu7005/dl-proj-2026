@@ -66,7 +66,13 @@ def test_verdict():
     # missing systems: undecided (None), which keeps the current setting
     v3 = verdict(fake_results({b: 0.0}), "L")
     assert v3["rules"] == {"beat_decode": None, "timing_check": None, "timing_beats": None, "fix_jumps": None}
-    # one condition only
+    # a condition missing (its job failed): undecided, though the other condition is clear
+    part = {k: d for k, d in fake_results({b: 0.0, dl: 0.0, with_suffixes(b, "tc", "bd"): -1.0}).items()
+            if not (k[1] == "gangqinpu_real" and k[0] != b)}
+    vp = verdict(part, "L")
+    assert vp["rules"]["timing_check"] is None and vp["rules"]["beat_decode"] is None
+    assert set(vp["evidence"]["timing_check"]) == {"real"}
+    # one condition only, asked for
     v4 = verdict(fake_results({b: 0.0, dl: 0.0, with_suffixes(b, "tc", "bd"): -1.0}, conditions=("real",)), "L",
                  conditions=["real"])
     assert v4["rules"]["timing_check"] is True and v4["conditions"] == ["real"]

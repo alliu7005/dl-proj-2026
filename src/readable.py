@@ -26,7 +26,10 @@ such rests: closing them lowered duration accuracy against ASAP's scores by abou
 (src/pipeline.py tidy_lengths), so the scoring script measures this as its own system (_rd).
 
 ``stem_voices`` (the MusicXML): in a measure where a staff has two voices or more, the voice with
-the higher notes gets its stems up and the others down, as engravers write them; without, both
+the higher notes gets its stems up and the others down, as engravers write them. With
+``two_voices`` (its own switch, _tv) the writer gives a staff two voices at most, ordered by pitch
+(src/preprocessing/detokenize.py ``_two_voices``: the user's "unlasting" song had three treble
+voices in bar 4, the up-stem one partly below two down-stem ones), so "the others" is one voice; without, both
 voices' stems point the same way and the demo's viewer draws them over each other (the user's
 bar 29: half-note chords under a melody looked like 32nd-beamed chords). The rests that fill the
 other voices out (all but the one with the most notes) are hidden (MusicXML print-object="no"), as

@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.pipeline import BEAT_SOURCES, GUARD_MARGIN, MODES, ScorePipeline, V2Pipeline  # noqa: E402
-from src.release import DELETE_ABOVE, GLISSANDO, GRID_TEMPO, READABLE, TEMPO_MARKS, TIDY, default_path, rule_settings  # noqa: E402
+from src.release import DELETE_ABOVE, GLISSANDO, GRID_TEMPO, READABLE, TEMPO_MARKS, TIDY, TWO_VOICES, default_path, rule_settings  # noqa: E402
 
 
 def main():
@@ -52,6 +52,7 @@ def main():
     ap.add_argument("--no-timing-beats", action="store_true", help="v2: keep the labeller's triplets in beats whose timing fits straight sixteenths better (src/timing.py check_beats)")
     ap.add_argument("--no-readable", action="store_true", help="v2: keep rests of a 16th or less, overlaps of a 16th or less, and stems as written (src/readable.py)")
     ap.add_argument("--no-fix-jumps", action="store_true", help="v2: keep the meter model's stretched bars (a jump of beats in one beat's time) as decoded")
+    ap.add_argument("--no-two-voices", action="store_true", help="v2: each note into the first voice free when it starts, however many voices that takes (not two to a staff, ordered by pitch)")
     ap.add_argument("--no-tempo-marks", action="store_true", help="v2: print no tempo marks in the MusicXML (src/tempo.py)")
     ap.add_argument("--constant-tempo", action="store_true", help="v2: play the score MIDI at one tempo for the whole piece, not the grid's tempo bar by bar")
     ap.add_argument("--device", default="auto")
@@ -63,6 +64,7 @@ def main():
                           glissando=GLISSANDO and not args.no_glissando,
                           timing_check=rules["timing_check"] and not args.no_timing_check,
                           readable=READABLE and not args.no_readable, fix_jumps=rules["fix_jumps"] and not args.no_fix_jumps,
+                          two_voices=TWO_VOICES and not args.no_two_voices,
                           timing_beats=rules["timing_beats"] and not args.no_timing_beats,
                           beat_decode=rules["beat_decode"] and not args.no_beat_decode,
                           tempo_marks=TEMPO_MARKS and not args.no_tempo_marks,

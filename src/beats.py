@@ -71,6 +71,24 @@ def beat_layout(ts: str) -> tuple[int, float]:
     return n, 4 / d
 
 
+def is_compound(ts: str) -> bool:
+    """A compound meter (its beats dotted: 6/8, 9/8, 12/8, 6/4; ``beat_layout``)."""
+    try:
+        n, _ = (int(x) for x in ts.split("/"))
+    except (ValueError, AttributeError):
+        return False
+    return n % 3 == 0 and n > 3
+
+
+def piece_compound(gt: dict) -> bool | None:
+    """Whether most of a ground-truth beat list's beats are in a compound meter (``ts_names``;
+    None without them)."""
+    names = gt.get("ts_names") if isinstance(gt, dict) else None
+    if names is None or not len(names):
+        return None
+    return bool(np.mean([is_compound(str(x)) for x in names]) > 0.5)
+
+
 def _time_map(pairs, sq, pt, max_ratio: float = 3.0):
     """Knots (q, t) of the piecewise-linear non-decreasing map through the matches, and the
     overall slope used beyond them (seconds per quarter), as in src/metrical.py _map_through, but
@@ -254,6 +272,13 @@ def window_beats(times: np.ndarray, down: np.ndarray, t0: float, lo: float, hi: 
 
 DOWN, HALF, OTHER, EXTRA = 0, 1, 2, 3  # a beat's place in its bar (bar_classes); EXTRA: not a true beat
 PHASE_BINS = 10               # histogram of where spurious beats fall between two true beats
+# tracker levels (``level_runs``): how many true beats one tracked beat spans, per stretch. Beat
+# This! also beats two-thirds of a compound meter's dotted beat (a 6/8 bar counted in three: the
+# user's "unlasting") and one and a half of a simple meter's (a hemiola reading)
+LEVELS = (1 / 4, 1 / 3, 1 / 2, 2 / 3, 1.0, 3 / 2, 2.0, 3.0, 4.0)
+LEVEL_TOL = 0.15              # a tracked interval within 15% (log) of a level takes it
+MIN_RUN = 6                   # tracked intervals in a row at one level before it is a stretch, not a slip
+MIN_LEVEL_FRAC = 0.05         # a performance has a level profile when a stretch at another level covers this
 PROFILE = ("miss", "extra", "offset", "jitter", "down_hit", "down_half", "down_other", "down_extra")
 FACTORS = (2, 3, 4)           # tempo octave errors: beats k times too fast / too slow
 
@@ -340,6 +365,14 @@ class BeatNoise:
     octave_profiles: list | None = None
     extra_phase: list | None = None
     profiles: list | None = None
+    # level profiles (fit_noise(levels=True); None: the octave errors above): one per fitted
+    # performance whose tracker spent a stretch at another level (LEVELS), its runs in order as
+    # [level, fraction of the piece], its bar length, whether its meter is compound, and the
+    # downbeat rates of its beats in those stretches. With them a beat list replays one (p_levels:
+    # the share of performances that had one; of its bar length and meter kind if any), several
+    # switches a piece and the 2/3 level included, and the octave errors are not drawn on top.
+    p_levels: float = 0.0
+    level_profiles: list | None = None
     fitted: bool = False
     note: str = "defaults (Beat This! on ASAP / MAESTRO, rounded), not fitted"
 
@@ -372,6 +405,16 @@ class BeatNoise:
         pool = same or profiles
         return pool[int(rng.integers(len(pool)))]
 
+    def _pick_level(self, bar: int, compound: bool | None, rng):
+        """A random level profile: of this bar length and meter kind if there are any, else of this
+        meter kind, else of this bar length, else any (a profile of unknown kind fits either)."""
+        ps = self.level_profiles or []
+        kind = [q for q in ps if compound is None or q.get("compound") in (None, compound)]
+        for pool in ([q for q in kind if q.get("bar") == bar], kind, [q for q in ps if q.get("bar") == bar], ps):
+            if pool:
+                return pool[int(rng.integers(len(pool)))]
+        return None
+
     def _octave(self, kind: str, bar: int, rng):
         """Factor, fraction of the list, downbeat rates and miss rate of one tempo octave error
         (rates / miss None: the right-tempo ones)."""
@@ -391,7 +434,10 @@ class BeatNoise:
             return {k: float(prof.get(k, getattr(self, k))) for k in PROFILE}
         return {k: float(getattr(self, k)) for k in PROFILE}
 
-    def __call__(self, times: np.ndarray, down: np.ndarray, rng: np.random.Generator):
+    def __call__(self, times: np.ndarray, down: np.ndarray, rng: np.random.Generator,
+                 compound: bool | None = None):
+        """``compound``: whether the beat list's meter is compound (src/beats.py piece_compound), for
+        the level profiles (None: either)."""
         times = np.asarray(times, np.float64).copy()
         down = np.asarray(down, bool).copy()
         if len(times) < 3:
@@ -401,7 +447,16 @@ class BeatNoise:
         p_class = np.array([r["down_hit"], r["down_half"], r["down_other"], r["down_extra"]], np.float64)
         cls = bar_classes(down)  # each beat's place in the true bar, carried through the tempo errors
         u = rng.random()
-        kind = "double" if u < self.p_double else "half" if u < self.p_double + self.p_half else None
+        wrong = None   # with a level profile: the beats in its stretches at another level
+        if self.level_profiles:
+            kind = None
+            if u < self.p_levels:
+                q = self._pick_level(bar, compound, rng)
+                if q is not None:
+                    times, cls, wrong = level_replay(times, cls, q["segments"])
+                    p_wrong = np.array([q[k] for k in ("down_hit", "down_half", "down_other", "down_extra")], np.float64)
+        else:
+            kind = "double" if u < self.p_double else "half" if u < self.p_double + self.p_half else None
         if kind is not None:
             k, frac, rates, miss = self._octave(kind, bar, rng)
             times, cls = octave_stretch(times, cls, kind, k, frac, rng)
@@ -414,8 +469,10 @@ class BeatNoise:
             cls = np.full(len(times), EXTRA)
             if self.octave_down:
                 p_class = np.asarray(self.octave_down, np.float64)
-        # downbeats: each beat marked independently, by its place in the true bar
-        down = rng.random(len(times)) < p_class[cls]
+        # downbeats: each beat marked independently, by its place in the true bar (in a level
+        # profile's stretches at another level, by that performance's rates there)
+        p_beat = p_class[cls] if wrong is None or len(wrong) != len(times) else np.where(wrong, p_wrong[cls], p_class[cls])
+        down = rng.random(len(times)) < p_beat
         if r["miss"] > 0 and len(times) > 2:
             keep = rng.random(len(times)) >= r["miss"]
             if keep.sum() >= 2:
@@ -469,6 +526,79 @@ def octave_stretch(times: np.ndarray, cls: np.ndarray, kind: str, k: int, frac: 
     idx = np.arange(a, a + m + 1)
     keep[idx[(idx - a) % k != 0]] = False
     return times[keep], cls[keep]
+
+
+def level_replay(times: np.ndarray, cls: np.ndarray, segments: list):
+    """A level profile's runs ([level, fraction], in order) laid over a true beat list: in each run,
+    a beat every ``level`` true beats (level 2/3: three beats to two true ones), timed through the
+    true beats; a beat on a true one keeps its class, one between two is EXTRA. Returns times,
+    classes and which beats are in a run at another level than 1."""
+    n = len(times)
+    if n < 2 or not segments:
+        return times, cls, np.zeros(n, bool)
+    span = n - 1
+    fr = np.array([max(float(f), 0.0) for _, f in segments])
+    edges = np.concatenate([[0.0], np.cumsum(fr / fr.sum() if fr.sum() > 0 else fr)]) * span
+    us, wrong = [], []
+    for (lv, _), a, b in zip(segments, edges[:-1], edges[1:]):
+        lv = float(lv)
+        if b - a <= 0:
+            continue
+        start = float(np.ceil(a - 1e-9)) if lv >= 1 else a      # a slower level starts on a true beat
+        k = np.arange(int(np.floor((b - start) / lv + 1e-9)) + 1)
+        u = start + k * lv
+        u = u[(u >= a - 1e-9) & (u < b - 1e-9)] if b < span - 1e-9 else u[(u >= a - 1e-9) & (u <= span + 1e-9)]
+        us.append(u)
+        wrong.append(np.full(len(u), abs(lv - 1.0) > 1e-9))
+    u = np.concatenate(us)
+    w = np.concatenate(wrong)
+    order = np.argsort(u, kind="stable")
+    u, w = u[order], w[order]
+    keep = np.concatenate([[True], np.diff(u) > 1e-6])
+    u, w = u[keep], w[keep]
+    on = np.abs(u - np.round(u)) < 1e-6
+    idx = np.clip(np.round(u).astype(int), 0, n - 1)
+    new_cls = np.where(on, np.asarray(cls)[idx], EXTRA)
+    return np.interp(u, np.arange(n), times), new_cls.astype(np.int64), w
+
+
+def level_runs(gt_t: np.ndarray, tr_t: np.ndarray) -> list:
+    """The tracker's level per stretch: each tracked interval as true beats spanned (the tracked
+    beats placed on the true beats' index by time), snapped to LEVELS (within LEVEL_TOL; else
+    none), runs of MIN_RUN or more intervals at one level kept, the intervals between two kept
+    runs given to the nearer one. Returns [[level, u_start, u_end], ...] covering the tracked
+    span in true-beat units (empty: fewer than MIN_RUN intervals)."""
+    gt_t, tr_t = np.asarray(gt_t, np.float64), np.asarray(tr_t, np.float64)
+    if len(gt_t) < 3 or len(tr_t) < MIN_RUN + 1:
+        return []
+    u = np.interp(tr_t, gt_t, np.arange(len(gt_t)))
+    du = np.diff(u)
+    lv = np.log(np.asarray(LEVELS))
+    snap = np.full(len(du), -1)
+    ok = du > 1e-6
+    d = np.abs(np.log(np.where(ok, du, 1.0))[:, None] - lv[None, :])
+    j = d.argmin(1)
+    snap[ok & (d[np.arange(len(du)), j] <= LEVEL_TOL)] = j[ok & (d[np.arange(len(du)), j] <= LEVEL_TOL)]
+    runs = []   # [level index, first interval, last interval + 1]
+    a = 0
+    for i in range(1, len(snap) + 1):
+        if i == len(snap) or snap[i] != snap[a]:
+            if snap[a] >= 0 and i - a >= MIN_RUN:
+                runs.append([int(snap[a]), a, i])
+            a = i
+    if not runs:
+        return [[1.0, float(u[0]), float(u[-1])]] if np.median(du) > 0 else []
+    merged = [runs[0]]
+    for r in runs[1:]:
+        if r[0] == merged[-1][0]:
+            merged[-1][2] = r[2]
+        else:
+            mid = (merged[-1][2] + r[1]) // 2   # the intervals between: split between the two
+            merged[-1][2] = mid
+            r[1] = mid
+            merged.append(r)
+    merged[0][1], merged[-1][2] = 0, len(du)
+    return [[float(LEVELS[k]), float(u[s]), float(u[e])] for k, s, e in merged]
 
 
 def match(ref: np.ndarray, est: np.ndarray, tol: float = MATCH_TOL) -> list[tuple[int, int]]:
@@ -531,20 +661,23 @@ def grid_agreement(onsets: np.ndarray, pitches: np.ndarray, tokens: list[str], b
     return float(score)
 
 
-def compare(gt_t, gt_d, tr_t, tr_d) -> dict:
+def compare(gt_t, gt_d, tr_t, tr_d, compound: bool | None = None) -> dict:
     """How a tracked beat list differs from the ground truth, in BeatNoise's terms: the tempo octave
     (and its factor), how often each kind of beat (bar_classes; spurious ones too) was marked as a
     downbeat ("down": class -> [marked, count]), and at the right tempo missed / spurious beats,
     timing errors and where the spurious beats fall. Only the tracked beats within the annotated span count:
     an ASAP performance can be one piece of a longer MAESTRO recording (101 of the 418 hold two or
-    more, e.g. a prelude and its fugue), and the tracker hears all of it."""
+    more, e.g. a prelude and its fugue), and the tracker hears all of it. Also the tracker's level
+    per stretch ("levels": [[level, fraction], ...], ``level_runs``), how its beats in stretches at
+    another level were marked as downbeats ("level_down"), and ``compound`` (the meter's kind, if
+    known) as given."""
     gt_t, tr_t = np.asarray(gt_t, np.float64), np.asarray(tr_t, np.float64)
     gt_d, tr_d = np.asarray(gt_d, bool), np.asarray(tr_d, bool)
     if len(gt_t):
         span = (tr_t >= gt_t[0] - MATCH_TOL) & (tr_t <= gt_t[-1] + MATCH_TOL)
         tr_t, tr_d = tr_t[span], tr_d[span]
     out = {"beat_f": f_measure(gt_t, tr_t), "downbeat_f": f_measure(gt_t[gt_d], tr_t[tr_d]),
-           "bar": bar_length(gt_d)}
+           "bar": bar_length(gt_d), "compound": compound}
     if len(gt_t) < 3 or len(tr_t) < 3:
         out["octave"] = "none"
         return out
@@ -570,6 +703,23 @@ def compare(gt_t, gt_d, tr_t, tr_d) -> dict:
     spurious = np.nonzero(~matched)[0]
     counts["extra"] = [int(tr_d[spurious].sum()), int(len(spurious))]
     out["down"] = counts
+    runs = level_runs(gt_t, tr_t)
+    if runs:
+        total = runs[-1][2] - runs[0][1]
+        out["levels"] = [[lv, round((b - a) / total, 5)] for lv, a, b in runs] if total > 0 else []
+        # downbeat marks of the tracked beats inside the stretches at another level
+        u = np.interp(tr_t, gt_t, np.arange(len(gt_t)))
+        in_wrong = np.zeros(len(tr_t), bool)
+        for lv, a, b in runs:
+            if abs(lv - 1.0) > 1e-9:
+                in_wrong |= (u >= a - 1e-9) & (u <= b + 1e-9)
+        lvd = {"hit": [0, 0], "half": [0, 0], "other": [0, 0], "extra": [0, 0]}
+        of = {b: a for a, b in pairs}
+        for b in np.nonzero(in_wrong)[0]:
+            key = ("hit", "half", "other")[cls[of[b]]] if b in of else "extra"
+            lvd[key][0] += int(tr_d[b])
+            lvd[key][1] += 1
+        out["level_down"] = lvd
     if ratio < 0.7:
         out["octave"], out["factor"] = "double", int(np.clip(np.floor(1 / ratio + 0.5), FACTORS[0], FACTORS[-1]))
         return out
@@ -602,14 +752,17 @@ def downbeat_rates(comparisons: list[dict]) -> dict:
     return out
 
 
-def fit_noise(comparisons: list[dict], note: str = "") -> BeatNoise:
+def fit_noise(comparisons: list[dict], note: str = "", levels: bool = False) -> BeatNoise:
     """BeatNoise from ``compare`` results, one per performance: the share of performances with each
     tempo octave error and its factors, the pooled downbeat rates at a wrong tempo, one octave
     profile per wrong-tempo performance (kind, factor, the fraction of the piece it covers from
     the beat density, its downbeat rates), one profile per
     right-tempo performance (its miss / extra rates, timing and downbeat rates; a downbeat rate it
     has no beats for -> the pooled rate), the scalars as the profiles' means, and the pooled phase
-    histogram of the spurious beats."""
+    histogram of the spurious beats. ``levels``: also one level profile per performance whose
+    tracker spent at least MIN_LEVEL_FRAC of it at another level (``compare``'s "levels"; its
+    downbeat rates there, a rate it has no beats for -> the wrong-tempo pooled rate), and p_levels:
+    the share of performances with one (BeatNoise then replays these instead of the octave errors)."""
     n = len(comparisons)
     if n == 0:
         raise ValueError("no performances to fit the beat noise on")
@@ -661,11 +814,27 @@ def fit_noise(comparisons: list[dict], note: str = "") -> BeatNoise:
                 if octave_down else pooled[name]
             q[name] = round(m_ / n_, 5) if n_ else fallback
         octave_profiles.append(q)
+    level_profiles = []
+    if levels:
+        for c in comparisons:
+            segs = c.get("levels") or []
+            if not any(abs(lv - 1.0) > 1e-9 and f >= MIN_LEVEL_FRAC for lv, f in segs):
+                continue
+            q = {"bar": int(c.get("bar", 0)), "compound": c.get("compound"),
+                 "segments": [[float(lv), float(f)] for lv, f in segs]}
+            for key, name in (("hit", "down_hit"), ("half", "down_half"), ("other", "down_other"),
+                              ("extra", "down_extra")):
+                m_, n_ = c.get("level_down", {}).get(key, [0, 0])
+                fallback = octave_down[("down_hit", "down_half", "down_other", "down_extra").index(name)] \
+                    if octave_down else pooled[name]
+                q[name] = round(m_ / n_, 5) if n_ else fallback
+            level_profiles.append(q)
     return BeatNoise(
         p_double=cnt("double"), p_half=cnt("half"), double_k=factors("double"), half_k=factors("half"),
         p_offbeat=cnt("offbeat"), **mean, octave_down=octave_down, octave_profiles=octave_profiles or None,
         extra_phase=[round(float(x), 5) for x in hist / hist.sum()] if hist is not None and hist.sum() else None,
-        profiles=profiles or None, fitted=True, note=note or f"fitted on {n} performances")
+        profiles=profiles or None, p_levels=round(len(level_profiles) / n, 5) if levels else 0.0,
+        level_profiles=level_profiles or None, fitted=True, note=note or f"fitted on {n} performances")
 
 
 # ---------------------------------------------------------------------------------------------

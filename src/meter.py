@@ -36,7 +36,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from .beats import MATCH_TOL, beat_layout
+from .beats import MATCH_TOL, beat_layout, piece_compound
 
 TS_CLASSES = ("4/4", "2/4", "3/4", "6/8", "3/8", "5/8", "9/8", "2/2", "12/16", "12/8", "6/4", "3/2", "4/8",
               "5/4", "4/2")
@@ -402,6 +402,19 @@ class DecodeConfig:
     # scripts/eval_meter.py --local-tempo tunes it on validation (ASAP, real, PERiScoPe, Gangqinpu).
     local_weight: float = 0.0
     local_sigma: float = 0.25
+    # the piece's own tempo (piece_tempo_ref, piece_tempo_logprior): the grid decoded once, the
+    # written tempo most of the piece is decoded at taken as the piece's (the peak of its steps'
+    # tempi, weighted by their seconds), and the decoder run again with piece_weight x a log-normal
+    # (piece_sigma) around it added to the step head. Beat This! switches between tempo octaves
+    # within a piece (the user's "unlasting": dotted quarters, two-thirds of them, eighths; "blue
+    # bird": a stretch at double speed), and the meter model follows each switch, so a stretch is
+    # written at half or double the note values of the rest although the music keeps its tempo.
+    # A neighbourhood (local_tempo_logprior) cannot see that: inside a stretch 40 beats long the
+    # wrong tempo is the local one. 0 (the default): off; scripts/eval_meter.py --piece-tempo tunes
+    # it on validation (ASAP, real, PERiScoPe, Gangqinpu). A piece that really changes tempo
+    # (a slow ending, a half-time section) pulls against it: the tuning weighs that.
+    piece_weight: float = 0.0
+    piece_sigma: float = 0.25
 
     def to_dict(self):
         return asdict(self)
@@ -709,6 +722,15 @@ class Augment:
         return out
 
 
+def noisy_beats(noise, gt: dict, rng: np.random.Generator):
+    """A simulated tracker's beats of a ground-truth beat list; a BeatNoise with level profiles
+    is told whether the meter is compound (src/beats.py piece_compound), any other noise is
+    called as it always was (the same draws)."""
+    if getattr(noise, "level_profiles", None):
+        return noise(gt["t"], gt["down"], rng, compound=piece_compound(gt))
+    return noise(gt["t"], gt["down"], rng)
+
+
 def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, note_noise=None, augment=None,
            aux_noise=None):
     """One training / validation sample of a performance: its tracked beats (the real tracker's if
@@ -726,13 +748,13 @@ def sample(perf: dict, rng: np.random.Generator, noise=None, chunk: int = 0, not
     if perf.get("beats") is not None:
         bt, bd = perf["beats"]
     elif noise is not None:
-        bt, bd = noise(gt["t"], gt["down"], rng)
+        bt, bd = noisy_beats(noise, gt, rng)
     else:
         bt, bd = gt["t"], gt["down"]
     bt, bd = np.asarray(bt, np.float64), np.asarray(bd, bool)
     aux = None
     if aux_noise is not None:
-        aux = perf["aux"] if perf.get("aux") is not None else aux_noise(gt["t"], gt["down"], rng)
+        aux = perf["aux"] if perf.get("aux") is not None else noisy_beats(aux_noise, gt, rng)
     if note_noise is not None and len(notes) and is_clean(perf):
         store = np.stack([notes[:, 0], notes[:, 1], notes[:, 2] - notes[:, 1], notes[:, 3]], axis=1).astype(np.float32)
         noisy, _ = note_noise(store, np.zeros((0, 2), np.float32), rng)
@@ -982,19 +1004,63 @@ def local_tempo_logprior(beat_t: np.ndarray, q: np.ndarray, cfg: DecodeConfig, w
     return out
 
 
+PIECE_BIN = 0.1   # piece_tempo_ref: width of the tempo histogram's bins, in log quarters per minute (~10%)
+
+
+def piece_tempo_ref(beat_t: np.ndarray, q: np.ndarray) -> float | None:
+    """The written tempo (log quarters per minute) most of a decoded piece is at: the steps' tempi
+    (60 x quarters / seconds between two tracked beats) in a histogram weighted by the steps'
+    seconds, and the weighted median of the peak bin and its two neighbours. None with fewer than
+    3 steps of known tempo."""
+    t, q = np.asarray(beat_t, np.float64), np.asarray(q, np.float64)
+    if len(t) < 4 or len(q) != len(t):
+        return None
+    dt = np.clip(np.diff(t), 1e-3, None)
+    dq = np.diff(q)
+    ok = dq > 0
+    if ok.sum() < 3:
+        return None
+    lq, w = np.log(60.0 * dq[ok] / dt[ok]), dt[ok]
+    lo = lq.min()
+    k = np.floor((lq - lo) / PIECE_BIN).astype(int)
+    mass = np.bincount(k, weights=w)
+    peak = int(mass.argmax())
+    sel = np.abs(k - peak) <= 1
+    order = np.argsort(lq[sel])
+    cw = np.cumsum(w[sel][order])
+    return float(lq[sel][order][np.searchsorted(cw, cw[-1] / 2)])
+
+
+def piece_tempo_logprior(beat_t: np.ndarray, ref: float | None, cfg: DecodeConfig) -> np.ndarray:
+    """[K, len(Q_STEPS)]: the log-weight of each step between beat k and k + 1 by how far the
+    written tempo it implies is from the piece's (``ref``, piece_tempo_ref; the last row 0, as
+    the step head's last row is unused). All 0 when off or without a reference."""
+    t = np.asarray(beat_t, np.float64)
+    out = np.zeros((len(t), len(Q_STEPS)))
+    if len(t) < 2 or cfg.piece_weight <= 0 or ref is None:
+        return out
+    dt = np.clip(np.diff(t), 1e-3, None)
+    qpm = 60.0 * np.asarray(Q_STEPS, np.float64)[None, :] / dt[:, None]
+    out[:-1] = -0.5 * cfg.piece_weight * ((np.log(qpm) - ref) / cfg.piece_sigma) ** 2
+    return out
+
+
 def grid_from_logp(beat_t: np.ndarray, lp: dict | None, cfg: DecodeConfig = DecodeConfig()) -> dict:
     """``predict_logp``'s output decoded into a grid (a single bar without it), with cfg's tempo
     prior added to the step head's log-probabilities when its weight is above 0 (and with
-    cfg.local_weight above 0, decoded a second time with local_tempo_logprior added), then the
-    piece's note-value level chosen (``choose_level``; with cfg's level weights at 0, the grid as
-    decoded)."""
+    cfg.local_weight or cfg.piece_weight above 0, decoded a second time with local_tempo_logprior /
+    piece_tempo_logprior from the first decoding added), then the piece's note-value level chosen
+    (``choose_level``; with cfg's level weights at 0, the grid as decoded)."""
     if lp is None:
         return grid_from_states(beat_t, [(0, 0)] * len(beat_t))
     step = lp["step"] + tempo_logprior(beat_t, cfg) if cfg.tempo_weight > 0 else lp["step"]
     states, steps = decode(lp["bar"], step, lp["ts"], cfg, return_steps=True)
-    if cfg.local_weight > 0 and len(beat_t) >= 4:
+    if (cfg.local_weight > 0 or cfg.piece_weight > 0) and len(beat_t) >= 4:
         first = grid_from_states(beat_t, states, steps)
-        step = step + local_tempo_logprior(beat_t, first["q"], cfg)
+        if cfg.local_weight > 0:
+            step = step + local_tempo_logprior(beat_t, first["q"], cfg)
+        if cfg.piece_weight > 0:
+            step = step + piece_tempo_logprior(beat_t, piece_tempo_ref(beat_t, first["q"]), cfg)
         states, steps = decode(lp["bar"], step, lp["ts"], cfg, return_steps=True)
     return choose_level(grid_from_states(beat_t, states, steps), cfg, lp.get("tempo"))
 

@@ -1,9 +1,9 @@
 #!/bin/bash
-# v5 data: a larger, balanced classical side, then the models retrained on it, larger ones included
+# v6 data: a larger, balanced classical side, then the models retrained on it, larger ones included
 # (on the login node from the repo root, after git pull, with the queue empty).
 #   bash pace/v2_data.sh                  # stage 1, fetch (7 jobs: PianoCoRe rows, YouTube, Gangqinpu)
 #   STAGE=build bash pace/v2_data.sh      # stage 2, after stage 1: re-transcription, the data rebuilt (4 jobs)
-#   STAGE=train bash pace/v2_data.sh      # stage 3, after stage 2: the v5 models and whole pieces (8 jobs)
+#   STAGE=train bash pace/v2_data.sh      # stage 3, after stage 2: the v6 models and whole pieces (8 jobs)
 # Then pace/v2_btft.sh fine-tunes Beat This! on it (its export takes the downloaded classical
 # recordings as real classical audio).
 #
@@ -25,7 +25,7 @@
 # Before (once, on the login node):
 #   module load anaconda3 && conda activate dl-proj && pip install yt-dlp
 # Space: ~22 GB of ATEPP / GiantMIDI audio, ~50 GB of Gangqinpu recordings, a few GB of PianoCoRe
-# rows; the current data/processed is kept as data/processed_pre_v5. Check pace-quota first.
+# rows; the current data/processed is kept as data/processed_pre_v6. Check pace-quota first.
 # YouTube may ask PACE's addresses to confirm they are not a bot: the fetch then stops and says so;
 # export a cookies.txt from a logged-in browser, copy it here and run with COOKIES=<its path>.
 #
@@ -42,10 +42,10 @@
 #   dtrack   Beat This! on every Gangqinpu recording (its real beats for the meter model)   drebuild (ok)
 # Stage 3 (train)
 #   mtests   the tests                                                                      -
-#   mnl      nl_v5 (base); mnll: nl_v5_large                                                mtests (ok)
-#   mmeter   meter_v5, meter_v5_s1, meter_v5_ne; mmeterl: meter_v5_large, _large_s1       mtests (ok)
+#   mnl      nl_v6 (base); mnll: nl_v6_large                                                mtests (ok)
+#   mmeter   meter_v6, meter_v6_s1, meter_v6_ne; mmeterl: meter_v6_large, _large_s1       mtests (ok)
 #   mresume  any not finished: resumed                                                     the four (any)
-#   meval    whole pieces, ASAP and Gangqinpu: each v5 labeller on each v5 meter, and     mresume (any)
+#   meval    whole pieces, ASAP and Gangqinpu: each v6 labeller on each v6 meter, and     mresume (any)
 #            nl_gq_mc + meter_v4_gq (the release) to compare
 #   mfinal   Beyer & Dai's metrics, paired.md                                               meval (any)
 set -euo pipefail
@@ -54,7 +54,7 @@ G=(--gres=gpu:1 "--constraint=$GPUS")
 STAGE=${STAGE:-fetch}
 PER_WORK=${PER_WORK:-30}
 PC=data/raw/pianocore
-OLD=${OLD:-data/processed_pre_v5}
+OLD=${OLD:-data/processed_pre_v6}
 BD=${BD:-$HOME/scratch/beyer_dai}
 COOKIES=${COOKIES:-}
 case "$STAGE" in fetch|build|train) ;; *) echo "STAGE must be fetch, build or train, not $STAGE"; exit 1 ;; esac
@@ -76,7 +76,7 @@ submit() {
 }
 
 if [ "$STAGE" = fetch ]; then
-  submit dtests -c 8 --mem=32G -t 2:00:00 --wrap="$ENV; python -c 'import yt_dlp' || { echo 'pip install yt-dlp'; exit 1; }; python -m tests.test_data_v5 && python -m tests.test_bt && python -m tests.test_preprocessing"
+  submit dtests -c 8 --mem=32G -t 2:00:00 --wrap="$ENV; python -c 'import yt_dlp' || { echo 'pip install yt-dlp'; exit 1; }; python -m tests.test_data_v6 && python -m tests.test_bt && python -m tests.test_preprocessing"
   tests=$ID
   echo "the tests: job $tests"
   submit dpc -c 4 --mem=32G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; \
@@ -139,31 +139,31 @@ du -sh data/processed $OLD"
   exit 0
 fi
 
-# stage 3: the v5 models
+# stage 3: the v6 models
 [ -e "$OLD" ] || { echo "no $OLD: stage 2 has not rebuilt the data"; exit 1; }
-submit mtests -c 8 --mem=64G -t 2:00:00 --wrap="$ENV; python -m tests.test_data_v5 && python -m tests.test_meter && python -m tests.test_v2_system"
+submit mtests -c 8 --mem=64G -t 2:00:00 --wrap="$ENV; python -m tests.test_data_v6 && python -m tests.test_meter && python -m tests.test_v2_system"
 tests=$ID
-submit mnl "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v5"
+submit mnl "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v6"
 a=$ID
-submit mnll "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v5_large"
+submit mnll "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v6_large"
 b=$ID
-submit mmeter "${G[@]}" -c 24 --mem=128G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS meters meter_v5 meter_v5_s1 meter_v5_ne"
+submit mmeter "${G[@]}" -c 24 --mem=128G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS meters meter_v6 meter_v6_s1 meter_v6_ne"
 c=$ID
-submit mmeterl "${G[@]}" -c 16 --mem=128G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS meters meter_v5_large meter_v5_large_s1"
+submit mmeterl "${G[@]}" -c 16 --mem=128G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS meters meter_v6_large meter_v6_large_s1"
 d=$ID
-echo "nl_v5 (job $a), nl_v5_large (job $b), meter_v5 / _s1 / _ne (job $c), meter_v5_large / _s1 (job $d)"
+echo "nl_v6 (job $a), nl_v6_large (job $b), meter_v6 / _s1 / _ne (job $c), meter_v6_large / _s1 (job $d)"
 submit mresume "${G[@]}" -c 24 --mem=128G -t 8:00:00 "--dependency=afterany:$a:$b:$c:$d" \
-  --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v5 nl_v5_large; PUBLISH=0 $JOBS meters meter_v5 meter_v5_s1 meter_v5_ne meter_v5_large meter_v5_large_s1"
+  --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v6 nl_v6_large; PUBLISH=0 $JOBS meters meter_v6 meter_v6_s1 meter_v6_ne meter_v6_large meter_v6_large_s1"
 res=$ID
 echo "any not finished: resumed: job $res"
 GQOUT=outputs/system_eval_gangqinpu
 GQSYS="SYS_ARGS=\"--manifest $GQOUT/manifest.json --out $GQOUT --conditions gangqinpu,gangqinpu_real\""
 SPECS="nl_gq_mc+meter_v4_gq:tidy,d95,bd,missing"
-for nl in nl_v5 nl_v5_large; do
-  for m in meter_v4_gq meter_v5 meter_v5_s1 meter_v5_ne meter_v5_large meter_v5_large_s1; do SPECS="$SPECS $nl+$m:tidy,d95,bd"; done
+for nl in nl_v6 nl_v6_large; do
+  for m in meter_v4_gq meter_v6 meter_v6_s1 meter_v6_ne meter_v6_large meter_v6_large_s1; do SPECS="$SPECS $nl+$m:tidy,d95,bd"; done
 done
 submit meval "${G[@]}" -c 8 --mem=48G -t 8:00:00 "--dependency=afterany:$res" \
-  --wrap="$ENV; $JOBS trackers meter_v5 meter_v5_s1 meter_v5_ne meter_v5_large meter_v5_large_s1; $JOBS systems $SPECS; $GQSYS $JOBS systems $SPECS"
+  --wrap="$ENV; $JOBS trackers meter_v6 meter_v6_s1 meter_v6_ne meter_v6_large meter_v6_large_s1; $JOBS systems $SPECS; $GQSYS $JOBS systems $SPECS"
 evl=$ID
 echo "whole pieces, ASAP and Gangqinpu: job $evl"
 BDENV="module load anaconda3; eval \"\$(conda shell.bash hook)\"; conda activate bd311; export PYTHONUNBUFFERED=1; cd \"\$SLURM_SUBMIT_DIR\""

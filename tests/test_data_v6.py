@@ -1,11 +1,11 @@
-"""Tests for the v5 data (pace/v2_data.sh): the capped, performer-diverse PianoCoRe selection
+"""Tests for the v6 data (pace/v2_data.sh): the capped, performer-diverse PianoCoRe selection
 (scripts/fetch_pianocore.py select), the recordings' links (scripts/fetch_pianocore_audio.py), the
 re-transcription and its two-step alignment (scripts/retranscribe_pianocore.py,
 src/preprocessing/pianocore.py pianocore_performance), the build from several folders that never
 adds to the test set (scripts/build_dataset.py), and the labeller's weighing by work
 (src/dataset.py piece_counts).
 
-    python -m tests.test_data_v5        # or: pytest tests/test_data_v5.py
+    python -m tests.test_data_v6        # or: pytest tests/test_data_v6.py
 
 Uses real PianoCoRe rows where data/raw/pianocore/periscope has them (else skips that test);
 stand-in downloader and transcriber.

@@ -1662,6 +1662,175 @@ else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the releas
 the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
 the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
+**5. The piece's own tempo, and two voices to a staff** (`pace/v2_tempo.sh`).
+- **What the user's songs showed.** Beat This! switches tempo octaves inside a piece, and the meter
+  model follows each switch, so a stretch is written at double or half the note values of the rest
+  while the music keeps its tempo:
+  - "Unlasting" (6/8): the tracker's beat is a dotted quarter, then two-thirds of one, then an
+    eighth; the score's quarter lasted 1.04 s, 0.69 s and 0.33 s in turn (0.69 s is right).
+  - "Blue bird" (4/4): right at 0.80 s except 3:04-3:37, where the tracker went to double speed and
+    the model wrote the left hand's eighths as quarters (that part plays half as fast).
+  - On Gangqinpu's real recordings Beat This!'s beat F is 0.50 on 6/8 songs (0.74 on 4/4), and the
+    training noise only simulates whole-factor octave errors over one stretch of a piece.
+- **The decoding** (`src/meter.py piece_tempo_ref`, `piece_tempo_logprior`): the piece decoded once,
+  its most common written tempo (the peak of its steps' tempi, weighted by their seconds) taken
+  as the piece's, and the decoder run again with `piece_weight` x a log-normal (`piece_sigma`)
+  around it on every step. The local tempo term cannot do this: inside a stretch 40 beats long the
+  wrong tempo is the local one (on "unlasting" it changed nothing).
+  - On the two songs (weight 5): every stretch at the piece's tempo (0.63-0.72 s and 0.73-0.80 s a
+    quarter), 170 -> 137 and 150 -> 135 bars. It does not fix the time signatures (3/4 for 6/8,
+    2/4 for 4/4): the time-signature head prefers them, and bar lines follow the tracker's
+    downbeats. That is for training (simulated tracker noise with the 2/3 level and several
+    switches a piece, 6/8 weighted up).
+  - The risk: a piece that really changes tempo. "Blue bird"'s slower ending is rewritten at the
+    piece's tempo with sigma 0.25 and kept with 0.35, which in turn leaves "unlasting"'s intro
+    wrong. So it is tuned on validation (`eval_meter.py --piece-tempo`: ASAP, real, PERiScoPe,
+    Gangqinpu; the selection score, which sees a stretch's doubled bar lines in its downbeat F;
+    the right level and beat F on record) as `meter_v4_gq_pt` (the same checkpoint), then measured
+    on whole pieces: models alone, with the beat decoding, and in the demo's configuration.
+- **Two voices to a staff** (`_tv`, engraving): the writer had put each chord into the first voice
+  free, whatever its pitch (the user's bar 4: three treble voices, two stemmed down, the up-stem one
+  partly below them). Two voices at most, ordered by pitch, held notes tied, a pitch struck again
+  ending the held one; it sounds the same. Measured in the demo's configuration.
+
+| system | compared with |
+|---|---|
+| `nl_gq` + `meter_v4_gq_pt` | `nl_gq` + `meter_v4_gq` (models alone) |
+| ... `_bd` | `nl_gq` + `meter_v4_gq` `_bd` (`pace/v2_decode2.sh`) |
+| `nl_gq` + `meter_v4_gq` `_tc_tb_rd_jf_bd_tv` | the demo's configuration (`pace/v2_decode.sh`) |
+| `nl_gq` + `meter_v4_gq_pt` `_tc_tb_rd_jf_bd_tv` | the line above |
+
+The piece-tempo prior reaches the demo only by publishing `meter_v4_gq_pt` as the meter
+(`publish_model.py --run outputs/runs/meter_v4_gq_pt`) if the whole pieces say it helps.
+
+### Eleventh round design: compound meters in the meter model's training (2026-11-27)
+
+`pace/v2_compound.sh`. The decoding fixes above leave the time signature itself: "unlasting" (6/8)
+is written 3/4, "blue bird" (4/4) 2/4, because the time-signature head prefers them. A training
+problem, so a training fix.
+
+**What the numbers say** (`scripts/meter_ts_report.py` on `meter_v4_gq`, Gangqinpu's real
+recordings, Beat This!'s real beats):
+
+| true | songs | right ts | read as | beat F |
+|---|---|---|---|---|
+| 4/4 | 1,238 | 0.935 | 2/4 44, 3/4 27 | 0.805 |
+| 3/4 | 257 | 0.638 | 4/4 46, 6/8 36 | 0.667 |
+| 6/8 | 79 | 0.494 | 3/4 23, 4/4 11 | 0.538 |
+| 12/8 | 21 | 0.000 | 3/4 10, 4/4 6, 6/8 4 | 0.534 |
+
+From the aligned notes (the simulated tracker) 6/8 is right on 0.899: the drop is the real
+tracker on compound meters (its beat F 0.50 on 6/8 songs, 0.74 on 4/4).
+
+**Why the training did not prepare the model for it.** Half of the Gangqinpu draws with a
+recording use its real tracked beats (about 2,200 pieces); every other draw (about 16,000 pieces,
+and every ASAP / PERiScoPe one without a recording) gets the simulated tracker, and that knew one
+tempo octave error a piece, a whole factor (x2, x3, x4) over one stretch. Compared beat by beat
+(`src/beats.py level_runs`: each tracked interval as the true beats it spans, snapped to `LEVELS`,
+runs of 6 or more kept), Beat This! on ASAP's real recordings (training splits) does more:
+
+| | compound meters | simple meters |
+|---|---|---|
+| a stretch at another level | 65% of performances | 68% |
+| two or more switches | 41% | 59% |
+| beats at 2/3 of the true beat (a 6/8 bar counted in three) | 12% | 0% |
+| beats at 1/3 (the eighths) | 19% | 0.02% |
+
+The old simulation on compound pieces: 0% at 2/3, 0.6% at 1/3, two or more switches 9%; the new
+one: 9%, 21%, 44%.
+
+**The fixes**, each measured alone and together (`meter_v4_gq`'s recipe otherwise):
+- `meter_v5_lv`: level profiles (`fit_noise(levels=True)`: one per performance whose tracker
+  spent 5% or more of it at another level, its runs in order, its bar length and meter kind, its
+  downbeat rates there), replayed by `BeatNoise` instead of the octave errors, a compound piece
+  getting a compound performance's profile. Fitted on ASAP's recordings
+  (`fit_beat_noise.py --levels` -> `configs/beat_noise_levels.json`) and Gangqinpu's
+  (`fit_pm2s_noise.py --from-stored beat_this --levels` ->
+  `configs/beat_noise_bt_gangqinpu_levels.json`). The configs used so far draw exactly as before.
+- `meter_v5_cw`: performances in a compound meter drawn 3 times as often (`--compound-weight 3`,
+  within each source; Gangqinpu: 6/8 4.5% of the pieces, 12/8 1.2%).
+- `meter_v5_lvcw`: both.
+
+Each is tuned and evaluated like `meter_v4_gq` (`--tune --tempo-prior`; on the real recordings by
+`v2_jobs.sh trackers`), compared per true time signature (`outputs/meter_ts.md`), and on whole
+pieces with `nl_gq` (models alone) against `meter_v4_gq`, and with each other. The training's own
+validation uses the run's noise, so the runs' selection scores are not comparable with each
+other; the evaluation (`eval_meter.py`, its `configs/beat_noise.json` for the simulated
+condition) is the same for all. A meter that evaluates better than the release's is published by
+the jobs (`v2_jobs.sh meters`), as before.
+
+### Tenth and eleventh rounds: results (2026-11-27)
+
+Whole pieces: MUSTER mean error, A minus B paired by performance, 95% bootstrap over pieces
+(`outputs/system_eval/paired.md`, `outputs/system_eval_gangqinpu/paired.md`; bold: the interval
+excludes 0). ASAP `real`: 24 performances of 11 pieces; Gangqinpu: 58 pieces.
+
+**The rule verdict** (`outputs/rule_verdict.md`; `nl_gq_mc`, made the release's labeller by its
+training publish, 0.847 against `nl_gq`'s 0.845 on the four test conditions):
+
+| rule | ASAP real | Gangqinpu real | kept |
+|---|---|---|---|
+| beat decoding (`_bd`, against the models alone) | **-0.23** | **-0.03** | on |
+| timing check (`_tc`) | **+0.45** (better on 3/24) | +0.02 | off |
+| whole-beat check (`_tb`) | **+0.28** | +0.02 | off |
+| short-bar fix (`_jf`) | **-0.09** | **-0.03** | on |
+| every rule together | +0.31 | **-0.08** | - |
+
+Published to the release manifest: beat decoding on, short-bar fix on, both timing checks off. With
+the beat decoding in place the timing check makes whole pieces worse on ASAP (better on 3 of 24
+performances), and does not help on Gangqinpu. `nl_gq` gives the same verdict (timing check **+0.40** on ASAP).
+Its cost on the user's song: the triplets the labeller writes where the playing is straight (bars
+61-70, 80-86, 138-149) are back, which is the labeller's error, not a rule's.
+
+**The labels** (`outputs/label_audit.json`, beat-level, 20,000 training windows each): Gangqinpu's
+pairs have *fewer* written triplets played straight than ASAP's, 2.9% against 7.0% (pop 3.6%,
+jazz 2.9%), and about the same written sixteenths played as triplets (1.0% / 1.2%). The pop labels
+are not the cause of the song's triplets. `nl_gq_mc` (those notes masked) matches `nl_gq`: models
+alone -0.01 [-0.32, +0.31] (ASAP real), -0.04 [-0.16, +0.07] (Gangqinpu real); with its beat
+decoding, validation position accuracy 94.1% against 94.0%.
+
+**The local tempo term** (`meter_v4_gq_lt`): **-0.02** on ASAP real, -0.00 on Gangqinpu real. Real,
+but too small to matter; `_jf` stays.
+
+**The piece-tempo prior did nothing.** Tuning on validation (`slurm-pttune`) chose
+`piece_weight 0`: the selection score was 0.7742 with the prior off and with every weight tried
+(10 settings). So `meter_v4_gq_pt` decodes as `meter_v4_gq`, and its whole pieces are the same
+(+0.00 [+0.00, +0.00], better on 0/24 and 0/58; with `_bd`, within 0.01). The reason is the validation: its beats are drawn by the simulated
+tracker (`configs/beat_noise.json`), which has one whole-factor octave error a piece and no 2/3
+level. The tempo switches the prior is for ("unlasting", "blue bird") do not happen there, so no
+weight can help, and a tie goes to off. It has to be tuned where they happen: on the real tracked
+beats of Gangqinpu's validation recordings, or on draws with the fitted level runs.
+
+**Two voices to a staff** (`_tv`, the demo's configuration with and without it): **-0.09**
+[-0.19, -0.00] ASAP real (better on 19/24), **-0.24** ASAP clean (53/59), **-0.02** Gangqinpu real,
+-0.00 Gangqinpu. Scored with the first version of the writer; the version MuseScore opens
+(2026-11-27, `docs/demo.md`) plays 0.04-0.2% of the notes differently, so it is to be re-scored.
+
+**Compound meters in training: no meter beat `meter_v4_gq`.** None was published: on the four
+simulated and real test conditions their mean is 0.645 (`lv`), 0.674 (`cw`), 0.643 (`lvcw`) against
+0.695. Per true time signature (`outputs/meter_ts.md`), Gangqinpu's real recordings:
+
+| meter | 6/8 right (79) | 12/8 right (21) | compound right | 3/4 right (257) | 4/4 right (1,238) |
+|---|---|---|---|---|---|
+| `meter_v4_gq` | 0.494 | 0.000 | 0.447 | 0.638 | 0.935 |
+| `meter_v5_lv` (levels replayed) | 0.342 | 0.000 | 0.293 | 0.669 | 0.934 |
+| `meter_v5_cw` (compound x3) | 0.456 | 0.048 | 0.480 | 0.564 | 0.944 |
+| `meter_v5_lvcw` (both) | **0.532** | **0.143** | **0.504** | 0.556 | 0.936 |
+
+- `lvcw` gets 3 more 6/8 songs and 3 more 12/8 songs right, and loses 21 of the 3/4 ones, mostly
+  to 6/8 (58 against 36): it moved the 3/4-6/8 boundary rather than learning to tell them apart.
+- The replayed levels alone make it worse everywhere, the simulated conditions included
+  (Gangqinpu's aligned notes, 6/8: 0.899 -> 0.620): the model learns to trust the tracker less, and
+  on most performances the tracker is right.
+- On whole pieces none is significantly better on real recordings (Gangqinpu real: `lv` +0.14,
+  `cw` -0.01, `lvcw` -0.03; ASAP real -0.24, -0.18, -0.32, intervals about +-1), and `lvcw` is
+  significantly worse on ASAP clean (**+1.02**).
+- The gap stays where it was. With the aligned notes' beats `meter_v4_gq` writes 6/8 right on 0.899
+  of the songs, with Beat This!'s 0.494: the tracker's level on compound meters is the problem, and
+  a meter model that reads the tracker's beats cannot fully undo it. The remaining levers are the
+  tracker itself (Beat This! fine-tuned on Gangqinpu's recordings, test pieces held out) and the
+  piece-tempo prior tuned on real tracked beats.
+
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
 The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced

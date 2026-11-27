@@ -137,7 +137,8 @@ def playback_qpm(score, seconds: float | None) -> float | None:
 
 
 def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None = None,
-            glissandi: list | None = None, stems: bool = False, tempo: dict | None = None) -> dict:
+            glissandi: list | None = None, stems: bool = False, two_voices: bool = False,
+            tempo: dict | None = None) -> dict:
     """Tokens -> ``out``/score.musicxml and score.mid (``res.files``; failures in ``res.errors``).
     ``seconds``: the performance's length, which sets the score MIDI's tempo (``playback_qpm``; the
     MusicXML carries no tempo, as the scores the comparison rates). Returns how the export went
@@ -147,8 +148,11 @@ def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None =
     MIDI plays grace notes and rolled chords as written (src/playback.py: "graces_played",
     "rolled_chords_played"), which music21's MIDI export alone does not. ``stems``: the higher
     voice's stems up, the others' down where a staff has two voices (src/readable.py stem_voices;
-    "stems_set": how many measures). ``tempo`` (src/tempo.py score_tempo, v2's grid): its "marks"
-    and "words" printed in the MusicXML ("tempo_marks_printed": how many), and the score MIDI played at its tempo per bar
+    "stems_set": how many measures). ``two_voices``: two voices to a staff at most, ordered by pitch
+    (src/preprocessing/detokenize.py _two_voices); the score MIDI is written without (it plays a held
+    note once, where music21's MIDI export would strike a tied note of a chord again). ``tempo``
+    (src/tempo.py score_tempo, v2's grid): its "marks" and "words" printed in the MusicXML
+    ("tempo_marks_printed": how many), and the score MIDI played at its tempo per bar
     ("playback_tempo": "grid") instead of at the one ``playback_qpm`` ("constant")."""
     import music21 as m21
     from .preprocessing.detokenize import tokens_to_musicxml, tokens_to_score
@@ -168,9 +172,11 @@ def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None =
                 report["stems_set"] = stem_voices(score)
     try:
         res.files["musicxml"] = Path(tokens_to_musicxml(tokens, str(out / "score.musicxml"), report=report,
-                                                        decorate=deco))
+                                                        decorate=deco, two_voices=two_voices))
         for clip in (False, True):  # clip notes to their bars if the plain export fails
             try:
+                # the score MIDI from the one-voice-per-slot writer: it plays a held note once (music21's MIDI
+                # export would strike a note of a chord again where the two-voice writer ties it into the next)
                 score = tokens_to_score(tokens, clip=clip)
                 qpm = playback_qpm(score, seconds)
                 bars = (tempo or {}).get("bars")
@@ -607,12 +613,14 @@ class V2Pipeline(_FrontEnd):
                  device: str = "auto", window_notes: int = 128, delete_above: float = DELETE_ABOVE,
                  tidy: bool = False, glissando: bool = False, timing_check: bool = False,
                  readable: bool = False, fix_jumps: bool = False, timing_beats: bool = False,
-                 beat_decode: bool = False, tempo_marks: bool = False, grid_tempo: bool = True):
+                 beat_decode: bool = False, two_voices: bool = False, tempo_marks: bool = False,
+                 grid_tempo: bool = True):
         """``glissando``: find glissandos in the notes (src/glissando.py) and write each as its first
         and last note joined by a "gliss." line, not as the run of notes. ``timing_check``: a note
         written on a triplet position but played on a straight eighth or sixteenth is moved there
         (src/timing.py). ``readable``: rests of a 16th or less closed, overlaps of a 16th or less
-        trimmed, stems by voice (src/readable.py). ``fix_jumps``: a bar the meter model's decoder
+        trimmed, stems by voice (src/readable.py). ``two_voices``: the score written with two voices to a
+        staff at most, ordered by pitch (src/preprocessing/detokenize.py _two_voices). ``fix_jumps``: a bar the meter model's decoder
         stretched with a jump is shortened instead (src/readable.py fix_jumps). ``timing_beats``: a
         beat whose timing fits straight sixteenths better than the labeller's triplets is written
         straight (src/timing.py check_beats). ``beat_decode``: the labeller's splits of the quarter
@@ -660,6 +668,7 @@ class V2Pipeline(_FrontEnd):
         self.readable = bool(readable)
         self.timing_beats = bool(timing_beats)
         self.fix_jumps = bool(fix_jumps)
+        self.two_voices = bool(two_voices)
         from .beat_decode import BeatDecode
         self.beat_params = BeatDecode.load(labeller_ckpt.parent)   # None: not tuned for this labeller
         self.beat_decode = bool(beat_decode)
@@ -830,13 +839,13 @@ class V2Pipeline(_FrontEnd):
             beat_checkpoint: str = "final0", delete_above: float | None = None, tidy: bool | None = None,
             beat_source: str = "beat_this", glissando: bool | None = None, timing_check: bool | None = None,
             readable: bool | None = None, fix_jumps: bool | None = None, timing_beats: bool | None = None,
-            beat_decode: bool | None = None, **_) -> Result:
+            beat_decode: bool | None = None, two_voices: bool | None = None, **_) -> Result:
         """``beats``: (times, down) in the input's seconds, given instead of tracking them.
         ``beat_checkpoint``: the Beat This! model that tracks them (scripts/system_scores.py gives
         each ASAP test piece the cross-validation model that never heard it). ``beat_source``:
         beat_this (the recording; a MIDI input rendered to audio first) or pm2s (PM2S on the notes:
         the MIDI, or the transcription of a recording). ``glissando``, ``timing_check``, ``timing_beats``, ``beat_decode``, ``readable``,
-        ``fix_jumps``: the pipeline's settings if None."""
+        ``fix_jumps``, ``two_voices``: the pipeline's settings if None."""
         if beat_source not in BEAT_SOURCES:
             raise ValueError(f"beat_source must be one of {BEAT_SOURCES}, not {beat_source!r}")
         from collections import Counter
@@ -909,7 +918,8 @@ class V2Pipeline(_FrontEnd):
         files["tokens"] = out / "tokens.txt"
         progress("engrave", 0.0, "writing MusicXML")
         export = engrave(tokens, out, res, float(notes[:, OFFSET].max() - notes[:, ONSET].min()), glissandi=gl,
-                         stems=counts["readable"], tempo=tempo)
+                         stems=counts["readable"], two_voices=self.two_voices if two_voices is None else bool(two_voices),
+                         tempo=tempo)
         written = counts.pop("bar_ts")  # the score's bars (the grid's, up to the bar the music ends in)
         ts = Counter(written)
         dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())

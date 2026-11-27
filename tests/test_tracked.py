@@ -339,6 +339,7 @@ def test_both_trackers_end_to_end():
         pipe.meter.load_state_dict(ck["model"])
         from src.meter import DecodeConfig
         pipe.decode_cfg = DecodeConfig()
+        pipe.fix_jumps = False   # the pipeline's settings that grid() reads (built without __init__ here)
         pipe.pm2s_beats = lambda notes: calls.append(len(notes)) or (0.5 * np.arange(20), np.arange(20) % 4 == 0)
         notes = np.stack([np.full(40, 60.0), 0.25 * np.arange(40), 0.25 * np.arange(40) + 0.2, np.full(40, 80.0)], 1)
         g = pipe.grid(notes.astype(np.float32), (0.5 * np.arange(20), np.arange(20) % 4 == 0))

@@ -53,7 +53,7 @@ submit() {
   ID=$(sbatch --parsable -J "$name" -o "slurm-$name-%j.out" ${kill[@]+"${kill[@]}"} "$@")
   n=$((n + 1))
 }
-submit dctests -c 8 --mem=64G -t 2:00:00 --wrap="source pace/common.sh; python -m tests.test_beat_decode && python -m tests.test_readable && python -m tests.test_timing && python -m tests.test_v2_system && python -m tests.test_system_eval && python -m tests.test_compare_runs && python -m tests.test_publish"
+submit dctests -c 8 --mem=64G -t 2:00:00 --wrap="source pace/common.sh; python -m tests.test_beat_decode && python -m tests.test_readable && python -m tests.test_timing && python -m tests.test_v2_system && python -m tests.test_system_eval && python -m tests.test_compare_runs && python -m tests.test_publish && python -m tests.test_rule_verdict"
 tests=$ID
 echo "tests: job $tests"
 submit dcaudit -c 4 --mem=48G -t 4:00:00 "--dependency=afterok:$tests" --wrap="source pace/common.sh; python scripts/audit_labels.py --splits train,train_gangqinpu,val,val_gangqinpu --windows 20000"
