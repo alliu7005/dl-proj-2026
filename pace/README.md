@@ -1011,7 +1011,7 @@ git pull && bash pace/v2_simplicity.sh
 `outputs/simplicity/report.md`: how often each writes a rare rhythm against the reference scores,
 MUSTER (onset / offset parts), score similarity's duration error, and MUSTER against the release.
 
-## 4ad. Articulation pilot (any time; 5 jobs)
+## 4ad. Articulation pilot (any time; 6 jobs)
 
 The labeller writes the length it hears: a detached off-beat eighth comes out as a 1/6-beat note and
 rests (Lemon: 124 rare written lengths). Training varies played lengths by only ~15%, so it never

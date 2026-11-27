@@ -73,7 +73,7 @@ def test_articulation_batch():
         tmp = Path(t)
         (tmp / "pace").mkdir()
         shutil.copy(ROOT / "pace" / "v2_articulation.sh", tmp / "pace")
-        for f in ("data/processed/train_gangqinpu/notelabels.npz", "data/processed/vocab.json",
+        for f in ("data/raw/gangqinpu/data/x.parquet", "data/processed/vocab.json",
                   "outputs/runs/meter_v4_gq/best.pt", "outputs/system_eval_gangqinpu/manifest.json",
                   "outputs/system_eval/manifest.json", "bd/MIDI2ScoreTF.ckpt"):
             (tmp / f).parent.mkdir(parents=True, exist_ok=True)
@@ -81,14 +81,19 @@ def test_articulation_batch():
         (tmp / "bin").mkdir()
         (tmp / "bin" / "sbatch").write_text('#!/bin/bash\nn=$(( $(cat "$SUBMITS.n" 2>/dev/null || echo 100) + 1 ))\n'
                                             'echo $n > "$SUBMITS.n"\nprintf "%s\\t%s\\n" "$n" "$*" >> "$SUBMITS"\necho $n\n')
-        (tmp / "bin" / "sbatch").chmod(0o755)
+        (tmp / "bin" / "squeue").write_text("#!/bin/bash\necho 900\n")
+        for f in (tmp / "bin").iterdir():
+            f.chmod(0o755)
         r = subprocess.run(["bash", "-c", 'export PATH="$PWD/bin:$PATH"; bash pace/v2_articulation.sh'], cwd=tmp,
                            env=batch_env(SUBMITS=str(tmp / "jobs.txt"), USER="me", BD=str(tmp / "bd")),
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stdout + r.stderr
         by = {ln.split("\t")[1].split("-J ")[1].split()[0]: ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()}
-        assert list(by) == ["a1tests", "a1train", "a1asap", "a1gq", "a1final"]
-        assert f"afterok:{by['a1tests'][0]}" in by["a1train"][1] and "labellers nl_gq_p20k nl_gq_art_p20k" in by["a1train"][1]
+        assert list(by) == ["a1tests", "a1data", "a1train", "a1asap", "a1gq", "a1final"]
+        assert "--dependency=afterany:900" in by["a1data"][1]                     # round 12's builder first
+        assert "build_gangqinpu_windows.py --release data/raw/gangqinpu --splits $s" in by["a1data"][1]
+        assert "build_notelabels.py --splits $L" in by["a1data"][1]
+        assert f"afterok:{by['a1tests'][0]}:{by['a1data'][0]}" in by["a1train"][1] and "labellers nl_gq_p20k nl_gq_art_p20k" in by["a1train"][1]
         assert "nl_gq_art_p20k+meter_v4_gq:tidy,d95,missing" in by["a1gq"][1] and "--conditions gangqinpu" in by["a1gq"][1]
         assert f"afterany:{by['a1asap'][0]}:{by['a1gq'][0]}" in by["a1final"][1] and "articulation_report.py" in by["a1final"][1]
 
