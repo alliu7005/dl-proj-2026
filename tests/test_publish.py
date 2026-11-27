@@ -207,7 +207,11 @@ def test_update_and_demo():
         assert not D.update("me/models", out, hub=hub, log=logs.append) and "using what is here" in logs[-1]
         assert not D.update("", out, hub=hub)
 
-        from demo.app import keep_updated
+        try:
+            from demo.app import keep_updated
+        except ModuleNotFoundError as e:   # the web server (fastapi / uvicorn) is not installed, e.g. on PACE
+            print(f"  (demo/app.py keep_updated skipped: {e})")
+            return
         pipes, calls = {"v2": "old"}, {"n": 0}
 
         class Stop(Exception):

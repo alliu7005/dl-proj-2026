@@ -57,7 +57,7 @@ submit() {
   ID=$(sbatch --parsable -J "$name" -o "slurm-$name-%j.out" ${kill[@]+"${kill[@]}"} "$@")
   n=$((n + 1))
 }
-submit d2tests -c 8 --mem=64G -t 2:00:00 --wrap="source pace/common.sh; python -m tests.test_rule_verdict && python -m tests.test_beat_decode && python -m tests.test_publish && python -m tests.test_release && python -m tests.test_compare_runs"
+submit d2tests -c 8 --mem=64G -t 2:00:00 --wrap="source pace/common.sh; python -m tests.test_rule_verdict && python -m tests.test_beat_decode && python -m tests.test_publish && python -m tests.test_release && python -m tests.test_compare_runs && python -m tests.test_system_eval"
 tests=$ID
 echo "tests: job $tests"
 before=$(queued dctune dceval)

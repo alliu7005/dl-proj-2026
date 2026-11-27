@@ -75,15 +75,18 @@ def verdict(results: dict, labeller: str, meter: str = METER, conditions=None) -
                 if r:
                     out[c] = dict(r, A=a, B=b, verdict=significant(r))
         return out
+
+    def complete(e):   # "worse on none" needs every condition measured: else undecided (the setting stays)
+        return len(e) == len(conditions)
     # the model side: the beat decoding stays unless it hurts
     e = compare(dl, base)
     ev["beat_decode"] = e
-    rules["beat_decode"] = None if not e else not any(v["verdict"] > 0 for v in e.values())
+    rules["beat_decode"] = None if not complete(e) else not any(v["verdict"] > 0 for v in e.values())
     # the corrections: on only when they help and hurt nowhere
     for rule, flag in CORRECTIONS.items():
         e = compare(with_suffixes(base, flag, "bd"), dl)
         ev[rule] = e
-        if not e:
+        if not complete(e):
             rules[rule] = None
         else:
             helps = any(v["verdict"] < 0 for v in e.values())

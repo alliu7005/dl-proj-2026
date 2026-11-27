@@ -135,8 +135,23 @@ def test_system_scores_v2_and_failures():
         common = ["--runs-dir", str(tmp / "runs"), "--vocab", str(ROOT / "data" / "processed" / "vocab.json"),
                   "--manifest", str(tmp / "manifest.json"), "--out", str(tmp / "out"), "--device", "cpu",
                   "--tracked", str(tmp / "tracked"), "--synth-beats", str(tmp / "synth.npz")]
+        # --beat-decode before the labeller's decoding is tuned: refused, nothing written under the _bd name
+        try:
+            system_scores.main(["--v2", "nl+m", "--beat-decode", "--conditions", "real"] + common)
+        except SystemExit as e:
+            assert "beat_decode.json" in str(e), e
+        else:
+            raise AssertionError("an untuned --beat-decode should be refused")
+        assert not (tmp / "out" / "v2_nl_m_bd").exists()
+        (tmp / "runs" / "nl" / "beat_decode.json").write_text(json.dumps({"best": {"weight": 1.0, "anchor": 0.1}}))
+        system_scores.main(["--v2", "nl+m", "--beat-decode", "--conditions", "real"] + common)
+        bd = json.loads((tmp / "out" / "v2_nl_m_bd" / "summary.json").read_text())
+        assert bd["beat_decode"]["weight"] == 1.0 and len(bd["pieces"]) == 1
+        (tmp / "runs" / "nl" / "beat_decode.json").unlink()
+        shutil.rmtree(tmp / "out" / "v2_nl_m_bd")
         system_scores.main(["--v2", "nl+m"] + common)
         summary = json.loads((tmp / "out" / "v2_nl_m" / "summary.json").read_text())
+        assert summary["beat_decode"] is None
         pieces = {p["condition"]: p for p in summary["pieces"]}
         assert summary["v2"] == "nl+m" and summary["midi_beats"] == "synth" and summary["mode"] is None
         assert pieces["real"]["beats"] == "given: 40 beats, 10 downbeats", pieces["real"]

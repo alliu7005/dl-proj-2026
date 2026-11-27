@@ -156,6 +156,9 @@ def main(argv=None):
                           delete_above=args.delete_above, tidy=args.tidy, glissando=args.glissando,
                           timing_check=args.timing_check, readable=args.readable, fix_jumps=args.fix_jumps,
                           timing_beats=args.timing_beats, beat_decode=args.beat_decode)
+        if args.beat_decode and pipe.beat_params is None:
+            raise SystemExit(f"--beat-decode: {runs / lab} has no beat_decode.json (not tuned: pace/v2_jobs.sh "
+                             f"beatdecode {lab}); not scored, so no _bd system is written without the decoding")
         wants_beats, midi_beats = True, "synth"
     else:
         pipe = ScorePipeline(runs / args.run / args.ckpt, vocab=args.vocab, device=args.device)
@@ -244,6 +247,8 @@ def main(argv=None):
                                                   "midi_beats": midi_beats if wants_beats else None,
                                                   "clean_beats": args.clean_beats if args.v2 else None,
                                                   "real_beats": args.real_beats if args.v2 else None,
+                                                  "beat_decode": (pipe.beat_params.to_dict() if args.v2 and args.beat_decode
+                                                                  else None),
                                                   "pieces": done}, indent=1))
     print(f"wrote {out}: {sum(d['musicxml'] is not None for d in done)}/{len(done)} scores")
 
