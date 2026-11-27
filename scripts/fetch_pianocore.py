@@ -9,7 +9,17 @@ and for each needed parquet row group reads only:
   * refined performance / score MIDI + alignment (only to build the performance -> score time map)
   * ``score_xml_bytes``                    once per score (the targets)
 
-Writes ``<out>/periscope/rows-<shard>-<rg>.parquet`` and ``<out>/periscope/scores-<shard>-<rg>*.parquet``
+More data, without overfitting by work or by performance (all three are written to their own folder,
+which scripts/build_dataset.py reads as an extra source: it never adds to the test set):
+    python scripts/fetch_pianocore.py --out-name periscope_more --have periscope --total-per-work 30
+    python scripts/fetch_pianocore.py --source ATEPP,GiantMIDI-Piano --out-name atepp --have periscope,periscope_more --total-per-work 30
+--have: the folders already fetched (their performances are not fetched again, and count towards
+the cap); --total-per-work: at most this many performances of a work over all of them together;
+different performers first (a second recording by the same pianist only when a work has no
+other). ATEPP and GiantMIDI-Piano rows are then given their recordings and our own transcriptions
+(scripts/fetch_pianocore_audio.py, scripts/retranscribe_pianocore.py).
+
+Writes ``<out>/<out-name>/rows-<shard>-<rg>.parquet`` and ``<out>/periscope/scores-<shard>-<rg>*.parquet``
 (per row group, so an interrupted run resumes; scores keyed by ``score_xml_path``, since
 ``score_id`` is not unique) and ``<out>/periscope/selection.parquet``. Re-running also fetches any
 scores missing from row groups already downloaded.
@@ -29,30 +39,60 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.preprocessing.pianocore import FETCH_COLS, HF_REPO, hf_fs, open_shard, work_key  # noqa: E402
 
 KEEP_META = ["id", "work_key", "composer", "composition", "movement", "score_id", "score_xml_path",
-             "bd_split", "asap_folders", "performance_dataset", "capture_model",
+             "bd_split", "asap_folders", "performance_dataset", "capture_model", "performer",
              "performance_duration", "refined_recall"]
+
+
+def select(rows: pd.DataFrame, per_work: int, total_per_work: int, have_per_work: dict, seed: int) -> pd.DataFrame:
+    """Per work, in a reproducible random order with different performers first (a pianist's second
+    recording of a work only after every other pianist's first): at most ``per_work`` of these, and
+    at most ``total_per_work`` counting the ``have_per_work`` already fetched (0: no total cap)."""
+    rows = rows.sample(frac=1, random_state=seed).copy()
+    performer = rows["performer"] if "performer" in rows else pd.Series([None] * len(rows), index=rows.index)
+    key = performer.fillna("").astype(str)
+    key = key.where(key != "", rows["id"].astype(str))          # unknown performer: each is its own
+    rows["_nth"] = rows.assign(_k=key).groupby(["work_key", "_k"]).cumcount()
+    rows = rows.sort_values(["work_key", "_nth"], kind="stable")
+    rows["_rank"] = rows.groupby("work_key").cumcount()
+    room = rows["work_key"].map(lambda w: max(0, total_per_work - have_per_work.get(w, 0)) if total_per_work else per_work)
+    keep = (rows["_rank"] < per_work) & (rows["_rank"] < room)
+    return rows[keep].drop(columns=["_nth", "_rank"])
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--meta-dir", default="data/raw/pianocore")
-    ap.add_argument("--source", default="PERiScoPe", help="performance_dataset to keep")
-    ap.add_argument("--per-work", type=int, default=10)
+    ap.add_argument("--source", default="PERiScoPe", help="performance_dataset(s) to keep (comma-separated)")
+    ap.add_argument("--per-work", type=int, default=10, help="performances per work from this fetch")
+    ap.add_argument("--out-name", default="periscope", help="the folder under --meta-dir")
+    ap.add_argument("--have", default="", help="folders already fetched (comma-separated): not fetched again, counted in the cap")
+    ap.add_argument("--total-per-work", type=int, default=0,
+                    help="at most this many performances per work over --have and this fetch (0: --per-work alone)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-row-groups", type=int, default=0,
                     help="only fetch this many row groups (a quick test download; 0 = all)")
     args = ap.parse_args()
     meta_dir = Path(args.meta_dir)
-    out = meta_dir / "periscope"
+    out = meta_dir / args.out_name
     out.mkdir(parents=True, exist_ok=True)
 
     meta = pd.read_parquet(meta_dir / "metadata.parquet")
     if "work_key" not in meta:
         meta["work_key"] = [work_key(*t) for t in zip(meta["composer"], meta["composition"], meta["movement"])]
-    sel = meta[meta["tier_a_star"] & meta["is_refined"] & (meta["performance_dataset"] == args.source)
+    sources = [x for x in args.source.split(",") if x]
+    sel = meta[meta["tier_a_star"] & meta["is_refined"] & meta["performance_dataset"].isin(sources)
                & (meta["bd_split"] != "test") & meta["score_xml_path"].notna()]
-    # random (reproducible) performances per work, not the first N in file order
-    sel = sel.sample(frac=1, random_state=args.seed).groupby("work_key").head(args.per_work)
+    have_ids, have_per_work, have_performers = set(), {}, {}
+    for h in [x for x in args.have.split(",") if x]:
+        f = meta_dir / h / "selection.parquet"
+        if not f.exists():
+            raise SystemExit(f"--have {h}: no {f}")
+        hs = pd.read_parquet(f, columns=["id", "work_key"])
+        have_ids |= set(hs["id"])
+        for w, n in hs["work_key"].value_counts().items():
+            have_per_work[w] = have_per_work.get(w, 0) + int(n)
+    sel = sel[~sel["id"].isin(have_ids)]
+    sel = select(sel, args.per_work, args.total_per_work, have_per_work, args.seed)
     sel = sel.sort_values(["shard", "row_group", "row_in_group"])
     sel.to_parquet(out / "selection.parquet")
 

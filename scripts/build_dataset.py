@@ -46,10 +46,20 @@ SPLITS = ("train", "val", "test", "test_periscope")
 PIANOCORE_COLS = ["id", "work_key", "score_xml_path", "asap_folders"]
 
 
-def load_pianocore(pc_dir: Path) -> dict[str, list[tuple[str, int, dict]]]:
+def pianocore_dirs(pc: dict) -> list[str]:
+    """The PianoCoRe folders to build from: ``dir`` (PERiScoPe) and ``extra_dirs`` (more sources,
+    e.g. recordings re-transcribed by scripts/retranscribe_pianocore.py), those that exist."""
+    dirs = [pc["dir"]] + list(pc.get("extra_dirs") or [])
+    return [d for i, d in enumerate(dirs) if i == 0 or Path(d).is_dir()]
+
+
+def load_pianocore(pc_dir) -> dict[str, list[tuple[str, int, dict]]]:
     """score_xml_path -> [(rows parquet file, row index, metadata)] from scripts/fetch_pianocore.py.
-    Keyed by path: PianoCoRe's score_id is not unique (all ASAP-sourced scores share one)."""
-    files = sorted(pc_dir.glob("rows-*.parquet"))
+    Keyed by path: PianoCoRe's score_id is not unique (all ASAP-sourced scores share one).
+    ``pc_dir``: one folder or several (a score's performances from all of them; the metadata gets
+    ``extra``: True for a row from any but the first)."""
+    dirs = [Path(d) for d in (pc_dir if isinstance(pc_dir, (list, tuple)) else [pc_dir])]
+    files = [(f, k > 0) for k, d in enumerate(dirs) for f in sorted(d.glob("rows-*.parquet"))]
     if not files:  # not downloaded: build ASAP only instead of failing
         print(f"PianoCoRe: no rows-*.parquet in {pc_dir} -> skipped "
               "(run scripts/fetch_pianocore_meta.py and scripts/fetch_pianocore.py to include it)")
@@ -57,9 +67,9 @@ def load_pianocore(pc_dir: Path) -> dict[str, list[tuple[str, int, dict]]]:
     import pyarrow.parquet as pq
 
     by_score = defaultdict(list)
-    for f in files:
+    for f, extra in files:
         for i, r in enumerate(pq.read_table(f, columns=PIANOCORE_COLS).to_pylist()):
-            by_score[r["score_xml_path"]].append((str(f), i, r))
+            by_score[r["score_xml_path"]].append((str(f), i, {**r, "extra": extra}))
     return by_score
 
 
@@ -80,7 +90,8 @@ def process_pianocore_score(pc_dir: str, score_path: str, items, cfg: SegmentCon
         return tables[f].slice(i, 1).to_pylist()[0]
 
     try:
-        sc = next(r for p in Path(pc_dir).glob("scores-*.parquet")
+        sc = next(r for d in (pc_dir if isinstance(pc_dir, (list, tuple)) else [pc_dir])
+                  for p in Path(d).glob("scores-*.parquet")
                   for r in pq.read_table(p, filters=[("score_xml_path", "=", score_path)]).to_pylist())
         measures = load_unfolded_score(sc["score_xml_bytes"], Path(sc["score_xml_path"]).suffix)
         shift, match = score_midi_shift(row(*items[0][:2])["refined_score_midi_bytes"], measures)
@@ -204,7 +215,7 @@ def main():
     by_piece, skipped = load_asap(root, exclude)
     cids = {f: composition_id("asap", f) for f in by_piece}
     pc = cfg.get("pianocore") or {}
-    by_score = load_pianocore(Path(pc["dir"])) if pc.get("enabled") else {}
+    by_score = load_pianocore(pianocore_dirs(pc)) if pc.get("enabled") else {}
     pc_cid, pc_composer = {}, {}
     for sid, items in by_score.items():  # works also in ASAP share the ASAP composition id
         m = items[0][2]
@@ -249,10 +260,15 @@ def main():
             units.append(("asap", sp, cids[f], [r["midi_performance"] for r, _ in by_piece[f]]))
         for s in scores:
             sp = splits[pc_cid[s]]
-            futs.append(ex.submit(process_pianocore_score, pc["dir"], s, by_score[s],
+            items = by_score[s]
+            if sp == "test_periscope":   # the extra sources never add to the test set (it stays comparable)
+                items = [it for it in items if not it[2].get("extra")]
+                if not items:
+                    continue
+            futs.append(ex.submit(process_pianocore_score, pianocore_dirs(pc), s, items,
                                   base if sp == "train" else eval_cfg, sp, pc_cid[s], str(shard_dir),
                                   pc.get("min_score_match", 0.9)))
-            units.append(("pianocore", sp, pc_cid[s], [m["id"] for _, _, m in by_score[s]]))
+            units.append(("pianocore", sp, pc_cid[s], [m["id"] for _, _, m in items]))
         for fu in tqdm(as_completed(futs), total=len(futs), desc="pieces"):
             shard, rep, sz, tc = fu.result()
             reports += rep

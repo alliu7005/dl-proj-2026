@@ -106,6 +106,24 @@ meter_flags() {
     meter_v4_gq_pmhs) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_hos.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
     # meter_v4_gq trained longer (its best checkpoint was at 56,000 of its 60,000 steps)
     meter_v4_gql) echo "--gangqinpu --gangqinpu-share 0.5 --steps 100000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
+    # Beat This! on renders of every training performance with no recording (pace/v2_render.sh,
+    # src/render.py): each performance gets its recording's beats where there is one, else its
+    # render's (ASAP included); rb: always those (no simulated tracker), rbm: in half of the draws,
+    # simulated in the others (meter_v4_gq's mix, the renders standing in where it had none)
+    meter_v4_gq_rb) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this,beat_this_render --tracked-share 1 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
+    meter_v4_gq_rbm) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this,beat_this_render --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
+    # our Beat This! (pace/v2_btft.sh: retrained without ASAP, fine-tuned on piano, cross-fitted):
+    # every performance's beats from the fine-tuned model that never heard its piece, its
+    # recording's where there is one, else its render's; never simulated
+    meter_v4_gq_ft) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this_ft,beat_this_render_ft --tracked-share 1 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
+    # v5: the larger classical data (pace/v2_data.sh: PERiScoPe up to 30 per work, ATEPP and GiantMIDI-Piano
+    # re-transcribed with Transkun), each piece weighed alike (--balance piece, the default); half of every
+    # batch Gangqinpu. Two seeds each, the meter model's seed spread being ~0.9 points on whole pieces.
+    meter_v5) echo "--gangqinpu --gangqinpu-share 0.5 --steps 80000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
+    meter_v5_s1) echo "--gangqinpu --gangqinpu-share 0.5 --steps 80000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --seed 1" ;;
+    meter_v5_large) echo "--gangqinpu --gangqinpu-share 0.5 --steps 80000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --d-model 384 --layers 8" ;;
+    meter_v5_large_s1) echo "--gangqinpu --gangqinpu-share 0.5 --steps 80000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --d-model 384 --layers 8 --seed 1" ;;
+    meter_v5_ne) echo "--gangqinpu --gangqinpu-share 0.5 --steps 80000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --note-encoder" ;;
     # (earlier: meter_v3 fine-tuned on the Gangqinpu mix)
     meter_v3_gqft) echo "--init outputs/runs/meter_v3/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 16000 --lr 1e-4 --warmup 500 --eval-every 2000 --patience 4 --tracked beat_this --tracked-share 0.5" ;;
     *) echo "unknown meter run $1 (add it to meter_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
@@ -116,7 +134,7 @@ meter_eval_flags() {  # how a finished meter run is tuned before its evaluation
     # its bar / step / time-signature heads are meter_v3's: meter_v3_tp's decoder, the level tuned on top
     meter_v3_th) echo "--level --decode-from outputs/runs/meter_v3_tp/decode.json" ;;
     meter_v3_ft) echo "--tune --tempo-prior --level" ;;
-    meter_v4_gq|meter_v4_gq_both|meter_v3_gqft|meter_v4_gql) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
+    meter_v4_gq|meter_v4_gq_both|meter_v3_gqft|meter_v4_gql|meter_v4_gq_rb|meter_v4_gq_rbm|meter_v4_gq_ft|meter_v5|meter_v5_s1|meter_v5_large|meter_v5_large_s1|meter_v5_ne) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
     # its decoder tuned for the tracker it was trained for (tested with it by the trackers task)
     meter_v4_gq_pm) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s.json" ;;
     meter_v4_gq_pmho) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_ho.json" ;;
@@ -135,6 +153,9 @@ nl_flags() {
     # nl_gq's recipe, the training notes whose written split the performance contradicts left out of
     # the loss (src/notelabels.py contradicted; scripts/audit_labels.py)
     nl_gq_mc) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5 --mask-contradicted" ;;
+    # v5: the larger classical data, every work weighed as one performance (--piece-balance); base and large
+    nl_v5) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5 --mask-contradicted --piece-balance" ;;
+    nl_v5_large) echo "--size large --grid-noise 0.8 --gangqinpu-share 0.5 --mask-contradicted --piece-balance" ;;
     *) echo "unknown labeller run $1 (add it to nl_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
   esac
 }

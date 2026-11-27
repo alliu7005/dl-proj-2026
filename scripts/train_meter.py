@@ -35,7 +35,13 @@ Real tracker output in the mix: --tracked beat_this / pm2s attaches that tracker
 PERiScoPe's notes; never ASAP, which both trackers trained on) to the training performances that
 have them, and each time one of them is drawn it gets those beats with probability
 --tracked-share, else the simulated tracker: errors that come from the music itself (where the
-real tracker goes wrong), and the variety of fresh simulated draws.
+real tracker goes wrong), and the variety of fresh simulated draws. beat_this_<tag> /
+beat_this_render_<tag>: our fine-tuned Beat This!'s, each performance tracked by the model that never
+heard its piece (scripts/track_meter_data.py --models). --tracked beat_this_render:
+Beat This! on the performances rendered to audio (src/render.py), every source including ASAP
+(tracked by the fold model that never heard it). Several, comma-separated, in order of preference:
+--tracked beat_this,beat_this_render gives each performance its recording's beats where there is
+one, else its render's; with --tracked-share 1 the simulated tracker is left out of training.
 
 A second tracker as evidence: --aux pm2s gives every beat of the first tracker features of PM2S's
 beats around it (src/meter.py aux_features: does it agree, does it beat faster, on the off-beats),
@@ -155,11 +161,14 @@ def with_tracked(perf: dict, rng: np.random.Generator, share: float) -> dict:
     return out
 
 
-def attach_tracked(perfs: list, beats: dict, key: str = "tracked") -> int:
+def attach_tracked(perfs: list, beats: dict, key: str = "tracked", keep: bool = False) -> int:
     """Each performance's real tracked beats (keyed by src/meter.py perf_key) as ``key``
-    (tracked: the first tracker's, tracked_aux: the second's); how many got them."""
+    (tracked: the first tracker's, tracked_aux: the second's); how many got them. ``keep``: a
+    performance that already has some keeps them (trackers attached in order of preference)."""
     n = 0
     for p in perfs:
+        if keep and p.get(key) is not None:
+            continue
         b = beats.get(perf_key(p))
         if b is not None and len(b[0]) >= 2:
             p[key] = (np.asarray(b[0], np.float64), np.asarray(b[1], bool))
@@ -293,8 +302,9 @@ def main(argv=None):
     ap.add_argument("--real-beats", choices=("tracked", "simulated"), default="tracked",
                     help="the real transcriptions: Beat This!'s recorded beats, or the simulated tracker "
                          "(--beat-noise) as the other sources (training for another tracker)")
-    ap.add_argument("--tracked", choices=("none", "beat_this", "pm2s"), default="none",
-                    help="mix this tracker's real beats (meter/tracked_*.npz) into training: Gangqinpu, PERiScoPe")
+    ap.add_argument("--tracked", default="none",
+                    help="mix real trackers' beats (meter/tracked_*.npz) into training: beat_this, pm2s, beat_this_render, "
+                         "or several comma-separated in order of preference (beat_this,beat_this_render)")
     ap.add_argument("--tracked-share", type=float, default=0.5,
                     help="with --tracked / --aux: the chance a performance that has them is drawn with the real beats")
     ap.add_argument("--aux", choices=("none", "pm2s"), default="none",
@@ -339,6 +349,12 @@ def main(argv=None):
                              "(scripts/build_meter_data.py --gangqinpu <release> --gangqinpu-only)")
     if not 0.0 <= args.gangqinpu_share < 1.0:
         raise SystemExit("--gangqinpu-share must be in [0, 1)")
+    tracked_list = [t for t in args.tracked.split(",") if t and t != "none"]
+    import re
+    bad = [t for t in tracked_list if not re.fullmatch(r"(beat_this|beat_this_render)(_[A-Za-z0-9]+)?|pm2s", t)]
+    if bad:
+        raise SystemExit(f"--tracked: unknown {bad} (beat_this, pm2s, beat_this_render; beat_this[_render]_<tag>: "
+                         "our Beat This!, scripts/track_meter_data.py --models)")
     tracked_counts, aux_counts = {}, {}
     if args.aux != "none":
         from scripts.track_meter_data import tracked_path
@@ -346,12 +362,13 @@ def main(argv=None):
             if sources.get(name):
                 aux_counts[name] = attach_tracked(sources[name], load_beats(tracked_path(data / "meter", split, args.aux)),
                                                   key="tracked_aux")
-    if args.tracked != "none":
+    if tracked_list:
         from scripts.track_meter_data import tracked_path
-        for name, split in (("gangqinpu", "train_gangqinpu"), ("periscope", "train_periscope")):
-            if sources.get(name):
-                tracked_counts[name] = attach_tracked(sources[name], load_beats(tracked_path(data / "meter", split,
-                                                                                            args.tracked)))
+        for name, split in (("asap", "train"), ("gangqinpu", "train_gangqinpu"), ("periscope", "train_periscope")):
+            if sources.get(name):   # the first tracker in the list that has a performance's beats gives them
+                tracked_counts[name] = sum(
+                    attach_tracked(sources[name], load_beats(f), keep=True)
+                    for f in (tracked_path(data / "meter", split, t) for t in tracked_list) if f.exists())
         if not any(tracked_counts.values()):  # e.g. no recording could be downloaded: trains on, simulated only
             print(f"WARNING --tracked {args.tracked}: no tracked beats in {data / 'meter'} "
                   "(scripts/track_meter_data.py): the simulated tracker only (config.json: tracked_by_source)",
@@ -433,7 +450,7 @@ def main(argv=None):
                         "real_transcriptions": counts["real"]},
                # which PM2S weights its stored PM2S beats came from (src/pm2s_beats.py weights_tag; '' = released)
                "pm2s": ({"tag": weights_tag(), "weights": os.environ.get("PM2S_WEIGHTS") or "released"}
-                        if "pm2s" in (args.tracked, args.aux) else None)},
+                        if "pm2s" in (*tracked_list, args.aux) else None)},
               open(run / "config.json", "w"), indent=1)
     print(f"meter model: {n_params / 1e6:.2f}M parameters ({n_train / 1e6:.2f}M trained) on {device} (note encoder: "
           f"{'yes' if cfg.get('n_note_features') else 'no'}, {cfg['n_features']} beat features) | training: "
@@ -454,7 +471,7 @@ def main(argv=None):
     stream = Stream(train, mixed_weights(sources, args.balance, shares), noise, note_noise, args.batch, args.chunk,
                     args.chunk_min or max(args.chunk // 4, 2), args.seed * 100003 + step,
                     Augment() if args.augment else None,
-                    tracked_share=args.tracked_share if (args.tracked != "none" or args.aux != "none") else 0.0,
+                    tracked_share=args.tracked_share if (tracked_list or args.aux != "none") else 0.0,
                     by_dataset=by_dataset, aux_noise=aux_noise)
     loader = torch.utils.data.DataLoader(stream, batch_size=None, num_workers=args.workers,
                                          prefetch_factor=4 if args.workers else None,

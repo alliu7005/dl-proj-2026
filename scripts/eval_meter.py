@@ -267,6 +267,8 @@ def main(argv=None):
                          "configs/beat_noise_pm2s.json for a model trained for PM2S")
     ap.add_argument("--tracker", choices=("beat_this", "pm2s"), default="beat_this",
                     help="the beats at test: Beat This!'s (simulated, or recorded on real), or PM2S on the notes")
+    ap.add_argument("--real-tracker", default="beat_this",
+                    help="--real-tracked: which stored beats (beat_this_<tag>: our fine-tuned Beat This!, scripts/track_meter_data.py --models)")
     ap.add_argument("--real-tracked", action="store_true",
                     help="Beat This!'s real beats stored for the condition (track_meter_data.py), its performances "
                          "that have them only: <condition>_real")
@@ -375,7 +377,7 @@ def main(argv=None):
         real = None
         if args.real_tracked:
             from scripts.track_meter_data import tracked_path
-            real = load_beats(tracked_path(data / "meter", CONDITIONS[cond_name], "beat_this"))
+            real = load_beats(tracked_path(data / "meter", CONDITIONS[cond_name], args.real_tracker))
             perfs = [p for p in perfs if perf_key(p) in real]
             if not perfs:
                 print(f"skip {cond_name}: no Beat This! beats stored for {CONDITIONS[cond_name]} (track_meter_data.py)")
@@ -434,7 +436,7 @@ def main(argv=None):
         res["decoder_version"] = DECODER_VERSION
         res["ts_confusion"] = [[a, b, n] for (a, b), n in confusion.most_common(25)]
         res["refined"] = {k: v / len(perfs) for k, v in refined.items()}   # anchors moved / added per performance
-        res["tracker"] = args.tracker + ("_real" if real is not None else "")
+        res["tracker"] = (args.real_tracker if real is not None and args.real_tracker != "beat_this" else args.tracker)             + ("_real" if real is not None else "")
         if aux_of is not None:
             res["aux"] = "pm2s"
         if pm2s is not None:

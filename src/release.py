@@ -47,6 +47,10 @@ TIDY = True
 GLISSANDO = True
 # a triplet the timing contradicts written as the straight eighth / sixteenth it was played on (src/timing.py)
 TIMING_CHECK = True
+# the score's tempo from the meter model's grid (src/tempo.py): tempo marks printed in the MusicXML,
+# and the score MIDI played bar by bar at the performer's tempo (not one tempo for the whole piece)
+TEMPO_MARKS = True
+GRID_TEMPO = True
 # readability: short rests closed, small overlaps trimmed, stems by voice; bars the decoder stretched
 # with a jump shortened (src/readable.py)
 READABLE = True

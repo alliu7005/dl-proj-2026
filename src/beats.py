@@ -673,7 +673,7 @@ def fit_noise(comparisons: list[dict], note: str = "") -> BeatNoise:
 # ---------------------------------------------------------------------------------------------
 
 def beats_path(split_dir, source: str) -> Path:
-    if source not in SOURCES:
+    if source not in SOURCES and not source.startswith("tracked_"):   # tracked_<tag>: another tracker's
         raise ValueError(f"beat source must be one of {SOURCES}, not {source!r}")
     return Path(split_dir) / f"beats_{source}.npz"
 

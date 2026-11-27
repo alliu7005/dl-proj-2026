@@ -15,6 +15,7 @@ dependencies:
   - pandas
   - pyarrow           # PianoCoRe parquet shards
   - ffmpeg            # audio decoding fallback for librosa/audioread
+  - fluidsynth        # renders performances to audio for the beat tracker (src/render.py)
   - setuptools<82     # torch 2.11 requirement
   - pip:
       # CUDA 12.8 wheels (needs NVIDIA driver >= 570). Pinned: the cu128 index stops at 2.11, and

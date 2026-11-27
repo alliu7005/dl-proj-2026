@@ -44,6 +44,8 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from collections import defaultdict
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset, WeightedRandomSampler
@@ -289,13 +291,25 @@ class _ContextCorrupter:
         return np.asarray([self.stoi[t] for t in head + body], dtype=ids.dtype)
 
 
+def piece_counts(meta: list) -> np.ndarray:
+    """For each window: how many performances its work (``composition``, else ``piece``) has in the
+    split (``piece_balance``: a window's weight divided by it, so a work with 40 performances is
+    drawn no more often than one with a single performance of the same length)."""
+    def work(m):
+        return m.get("composition") or m.get("piece") or m.get("performance")
+    perfs = defaultdict(set)
+    for m in meta:
+        perfs[work(m)].add(m.get("performance"))
+    return np.array([max(len(perfs[work(m)]), 1) for m in meta], np.float64)
+
+
 class ScoreSegmentDataset(Dataset):
     def __init__(self, split_dir: str, vocab_path: str, noise: NoiseModel | None = None,
                  seed: int = 0, ornament_oversample: float = 3.0, augment: AugmentConfig | None = None,
                  use_prompt: bool = True, prompt_dropout: float = 0.1, feature_stats: str | None = "auto",
                  context_noise: ContextNoise | None = None, context_before: int = 0, context_after: int = 0,
                  metrical: bool = False, beats: str | None = None, beat_noise: BeatNoise | None = None,
-                 beat_dropout: float = 0.0, notelabels: bool = False):
+                 beat_dropout: float = 0.0, notelabels: bool = False, piece_balance: bool = False):
         """``prompt_dropout``: chance (when training, i.e. with noise or augmentation) of hiding the
         prompt, so the model also works without context (first window of a piece, or after a bad
         window). ``feature_stats``: JSON from ``compute_feature_stats`` (written by build_dataset.py
@@ -380,6 +394,8 @@ class ScoreSegmentDataset(Dataset):
         has_rare = (cs[idx[:, 5]] - cs[idx[:, 6]]) > 0  # rare tokens in the target (not the prompt)
         self.has_ornament = has_rare
         self.weights = np.where(has_rare, ornament_oversample, 1.0)
+        if piece_balance:   # a work counts as much as one of its performances, however many it has
+            self.weights = self.weights / piece_counts(self.store.meta)
 
     def set_epoch(self, epoch: int):
         """Call each epoch so the injected noise differs between epochs but stays reproducible."""
@@ -679,11 +695,12 @@ class MixedTrainDataset(Dataset):
                  augment: AugmentConfig | None = None, real_fraction: float = 0.3, seed: int = 0,
                  ornament_oversample: float = 3.0, context_noise: ContextNoise | None = None,
                  context_before: int = 0, context_after: int = 0, metrical: bool = False,
-                 beats: dict | None = None, real_beats: dict | None = None, notelabels: bool = False):
+                 beats: dict | None = None, real_beats: dict | None = None, notelabels: bool = False,
+                 piece_balance: bool = False):
         """``beats`` / ``real_beats``: beat arguments of ScoreSegmentDataset (beats, beat_noise,
         beat_dropout) for the clean and the real-transcription part; None = no beat features."""
         ctx = dict(context_noise=context_noise, context_before=context_before, context_after=context_after,
-                   metrical=metrical, notelabels=notelabels)
+                   metrical=metrical, notelabels=notelabels, piece_balance=piece_balance)
         self.synthetic = ScoreSegmentDataset(clean_dir, vocab_path, noise=noise, augment=augment,
                                              seed=seed, ornament_oversample=ornament_oversample, **ctx,
                                              **(beats or {}))

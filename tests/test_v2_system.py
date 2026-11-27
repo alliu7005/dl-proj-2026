@@ -419,9 +419,18 @@ def test_v2_pipeline():
             heard_notes = [n for i in pm.instruments for n in i.notes]
             length = max(n.end for n in heard_notes) - min(n.start for n in heard_notes)
             perf = float(notes[:, 2].max() - notes[:, 1].min())
-            # (these untrained models write far too many quarters: the tempo then stops at its 300 cap)
-            ok = 0.98 * perf < length < 1.02 * perf if st["playback_qpm"] < 300 else length > perf
-            assert ok, (length, perf, st["playback_qpm"])
+            if st["playback_tempo"] == "grid":   # each bar in the time the performance took for it
+                f = st["score_follow"]
+                assert np.all(np.diff(f["t"]) > 0) and np.all(np.diff(f["q"]) > 0), f
+                assert len(pm.get_tempo_changes()[1]) >= 1
+                # up to the last bar line, the score MIDI takes about the performance's time (the
+                # grid covers it), give or take the first and the last bars' empty parts
+                span = np.interp(max(f["q"][-2], 0.0), f["q"], f["t"])
+                assert 0.7 * perf < span < 1.3 * perf + 4.0, (span, perf)
+            else:
+                # (these untrained models write far too many quarters: the tempo then stops at its 300 cap)
+                ok = 0.98 * perf < length < 1.02 * perf if st["playback_qpm"] < 300 else length > perf
+                assert ok, (length, perf, st["playback_qpm"])
         saved = json.loads((tmp / "a" / "result.json").read_text())
         assert saved["stats"]["system"] == "v2" and (tmp / "a" / "tokens.txt").read_text().split() == res.tokens
         heard = []

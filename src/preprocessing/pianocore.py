@@ -196,17 +196,25 @@ def pianocore_performance(row: dict, measures, shift_q: float, min_anchor_frac: 
     d = load_aligned(row["refined_performance_midi_bytes"], row["refined_score_midi_bytes"],
                      row["refined_alignment_bytes"])
     keep = ~d["interpolated"]
-    notes, pedal = load_performance(row["performance_midi_bytes"])
-    ref_i, raw_i = match_raw_to_refined(notes, d, keep)
+    raw, pedal = load_performance(row["performance_midi_bytes"])
+    ref_i, raw_i = match_raw_to_refined(raw, d, keep)
     frac = len(ref_i) / max(int(keep.sum()), 1)
     if frac < min_anchor_frac:
         return f"raw_vs_refined_anchors_{frac:.2f}"
-    anchor_t = np.sort(notes[raw_i, 1])
+    notes = raw
+    if row.get("transcription_midi_bytes"):
+        # our own Transkun transcription of the recording (scripts/retranscribe_pianocore.py), already on
+        # the original transcription's clock: the time map still comes from the original (its notes are
+        # what the alignment was made from), the model input is ours (Transkun's errors, as at test time)
+        notes, pedal = load_performance(row["transcription_midi_bytes"])
+        if len(notes) < 8:
+            return "transcription_empty"
+    anchor_t = np.sort(raw[raw_i, 1])
     j = np.searchsorted(anchor_t, notes[:, 1])
     near = np.minimum(np.abs(notes[:, 1] - anchor_t[np.clip(j - 1, 0, len(anchor_t) - 1)]),
                       np.abs(notes[:, 1] - anchor_t[np.clip(j, 0, len(anchor_t) - 1)]))
     kept = near <= max_anchor_gap_s
-    tl = timeline_from_alignment(notes[raw_i, 1], d["beat"][ref_i] - shift_q, measures)
+    tl = timeline_from_alignment(raw[raw_i, 1], d["beat"][ref_i] - shift_q, measures)
     if isinstance(tl, str):
         return tl
     dropped = int((~kept).sum())

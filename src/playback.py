@@ -30,12 +30,16 @@ def _notes(el) -> list:
     return list(el.notes) if isinstance(el, m21.chord.Chord) else [el]
 
 
-def realize(score, qpm: float | None) -> dict:
+def realize(score, qpm) -> dict:
     """Change ``score`` (a music21 Score, to be written as MIDI) in place so its MIDI plays the grace
-    notes and the rolled chords; ``qpm``: the playback tempo (quarters per minute; 120 if unknown).
+    notes and the rolled chords; ``qpm``: the playback tempo (quarters per minute; 120 if unknown),
+    or a function of the score offset giving it there (src/tempo.py: a tempo per bar).
     Returns {"graces_played": n, "rolled_chords_played": n}."""
     import music21 as m21
-    qps = (qpm or 120.0) / 60.0                     # quarters per second
+
+    def qps(off: float) -> float:                   # quarters per second at this offset
+        v = qpm(off) if callable(qpm) else qpm
+        return (v or 120.0) / 60.0
     parts = list(score.parts)
     graces, rolls = [], defaultdict(list)
     for k, part in enumerate(parts):
@@ -48,9 +52,9 @@ def realize(score, qpm: float | None) -> dict:
     by_main = defaultdict(list)
     for k, el, off in graces:
         by_main[(k, round(off, 6))].append(el)
-    step = min(GRACE_S * qps, 0.25)
     n_grace = 0
     for (k, off), els in by_main.items():
+        step = min(GRACE_S * qps(off), 0.25)
         start = off - step * len(els)
         if start < 0:
             start = off                              # no room before the piece's first beat
@@ -68,7 +72,7 @@ def realize(score, qpm: float | None) -> dict:
         if len(notes) < 2:   # one note marked rolled: nothing to spread
             continue
         end = off + max(float(el.quarterLength) for _, el in items)
-        gap = min(ROLL_S * qps, (end - off) / (2 * max(len(notes), 1)))
+        gap = min(ROLL_S * qps(off), (end - off) / (2 * max(len(notes), 1)))
         for _, el in items:
             el.activeSite.remove(el)
         for i, (pitch, k, el) in enumerate(notes):

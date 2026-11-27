@@ -138,6 +138,9 @@ def main(argv=None):
     ap.add_argument("--out", default="outputs/system_eval")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--runs-dir", default="outputs/runs")
+    ap.add_argument("--beats-tag", default="",
+                    help="the real recordings' beats from another tracker: beats_tracked_<tag>.npz and "
+                         "beats_gangqinpu_<tag>.npz (scripts/track_eval_beats.py); the system gets _bt<tag>")
     ap.add_argument("--tracked", default="data/processed/test_transcribed",
                     help="split folder whose beats_tracked.npz holds the real transcriptions' beats")
     ap.add_argument("--synth-beats", default="outputs/system_eval/beats_synth.npz",
@@ -161,11 +164,14 @@ def main(argv=None):
         pipe = ScorePipeline(runs / args.run / args.ckpt, vocab=args.vocab, device=args.device)
         wants_beats, midi_beats = bool(pipe.info["beats"]), args.midi_beats
     tracked, synth, folds = {}, {}, {}
-    bp = beats_path(Path(args.tracked), "tracked")
+    bp = beats_path(Path(args.tracked), f"tracked_{args.beats_tag}" if args.beats_tag else "tracked")
     if wants_beats and bp.exists():
         tracked = load_beats(bp)
     if wants_beats and any(e["condition"] in GANGQINPU for e in entries):   # the recordings' beats
-        tracked.update(load_beats(Path(args.manifest).parent / "beats_gangqinpu.npz"))
+        gb = Path(args.manifest).parent / (f"beats_gangqinpu_{args.beats_tag}.npz" if args.beats_tag else "beats_gangqinpu.npz")
+        if args.beats_tag and not gb.exists():
+            raise SystemExit(f"no {gb}: scripts/track_eval_beats.py --models ... --tag {args.beats_tag}")
+        tracked.update(load_beats(gb))
     if wants_beats and midi_beats == "synth":
         synth = load_beats(args.synth_beats)
         if not synth:
@@ -182,6 +188,8 @@ def main(argv=None):
     system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above,
                          args.tidy, args.real_beats, args.glissando, args.timing_check, args.readable, args.fix_jumps,
                          args.timing_beats, args.beat_decode)
+    if args.beats_tag:   # another tracker's beats of the recordings: its own system
+        system += f"_bt{args.beats_tag}"
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before

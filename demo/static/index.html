@@ -324,6 +324,15 @@ function showResult(id, job) {
       const how = s.delete_above >= 1 ? ' (keeping every note)' : s.delete_above != null ? ` (p > ${s.delete_above})` : '';
       items.push([n, `${word(n, 'note', 'notes')} left out as transcription errors${how}`]);
     }
+    if ((s.tempo_marks || []).length) {
+      const unit = { 0.25: '𝅘𝅥𝅯', 0.5: '♪', 0.75: '♪.', 1: '♩', 1.5: '♩.', 2: '𝅗𝅥' };
+      const mk = m => `${unit[m.unit] || '♩'} = ${m.value}`;
+      const tm = s.tempo_marks, rest = tm.slice(1);
+      const nw = (s.tempo_words || []).filter(w => w.text !== 'a tempo').length;
+      items.push([mk(tm[0]), (rest.length
+        ? `tempo, changing at ${word(rest.length, 'bar', 'bars')} ${rest.map(m => `${m.bar} (${mk(m)})`).join(', ')}`
+        : 'tempo') + (nw ? `; ${nw} rit. / accel. as played` : '')]);
+    }
     if (s.glissando && (s.glissandi || []).length) {
       const g = s.glissandi;
       const bars = g.map((x) => x.bar).join(', ');
@@ -431,8 +440,9 @@ async function renderScore(url, ok, stats) {
 }
 
 // ---- the playback bar: a line over the score at the moment being played -------------------------
-// The score MIDI plays the written score at one tempo (stats.playback_qpm), so its clock maps to the
-// score directly. The recording and the transcription run on the performance's clock: v2 maps it to
+// The score MIDI plays the written score at v2's grid tempo, one tempo per bar (stats.score_follow:
+// the MIDI's seconds -> quarters from the first written note), else at one tempo (stats.playback_qpm),
+// so its clock maps to the score directly. The recording and the transcription run on the performance's clock: v2 maps it to
 // the score through the beats of its grid (stats.follow: beat times -> quarters from the first
 // written note); seq2seq has no such map, so there only the score MIDI moves the bar.
 function interp(x, xs, ys) {
@@ -499,7 +509,10 @@ class Follow {
     const jump = (p, t) => { if (p.playing) p.stop(); p.currentTime = Math.max(0, t); p.start(); };
     if (src === 'score') {
       if (this.position('score') === null) return;               // its notes not loaded yet
-      jump($('#mscore'), this.t0 + (q - this.first) * 60 / this.qpm);
+      const sf = this.stats.score_follow;   // the score MIDI's tempo changes bar by bar (v2's grid)
+      const t = sf ? interp(q - this.first, sf.q, sf.t) : (q - this.first) * 60 / this.qpm;
+      if (t === null) return;
+      jump($('#mscore'), this.t0 + t);
     } else {
       if (!this.map) return;
       const t = interp(q - this.first, this.map.q, this.map.t);
@@ -603,6 +616,8 @@ class Follow {
         this.t0 = ns.notes.reduce((m, n) => Math.min(m, n.startTime || 0), Infinity);
         this.qpm = (ns.tempos && ns.tempos.length && ns.tempos[0].qpm) || this.stats.playback_qpm || 120;
       }
+      const sf = this.stats.score_follow;
+      if (sf) { const r = interp(p.currentTime - this.t0, sf.t, sf.q); return r === null ? null : this.first + r; }
       return this.first + (p.currentTime - this.t0) * this.qpm / 60;
     }
     if (!this.map) return null;

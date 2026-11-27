@@ -150,6 +150,9 @@ def main(argv=None):
     ap.add_argument("--grid-noise", type=float, default=0.0,
                     help="share of training windows whose true grid gets the beat tracker's timing (GridNoise)")
     ap.add_argument("--beat-noise", default="configs/beat_noise.json", help="the tracker errors --grid-noise draws")
+    ap.add_argument("--piece-balance", action="store_true",
+                    help="each window weighed by 1 / its work's performances: works with many performances "
+                         "(PERiScoPe, ATEPP) do not dominate (src/dataset.py piece_counts)")
     ap.add_argument("--gangqinpu-share", type=float, default=0.0,
                     help="share of training windows from train_gangqinpu (scripts/build_gangqinpu_windows.py); 0 = none")
     ap.add_argument("--mask-contradicted", action="store_true",
@@ -180,11 +183,12 @@ def main(argv=None):
     pin_vocab(vocab_path, run)  # the run keeps the vocabulary it trains with (demo, pipelines)
     ctx = {"context_before": args.context_before, "context_after": args.context_after}
 
-    # ---- data
+    # ---- data (training sets only: weights by work)
+    tctx = {**ctx, "piece_balance": bool(args.piece_balance)}
     nm = NoiseModel.from_json(args.noise)
     if has_split(data, "train_transcribed"):
         train = MixedTrainDataset(str(data / "train"), str(data / "train_transcribed"), vocab_path, noise=nm,
-                                  augment=AugmentConfig(), real_fraction=0.0, notelabels=True, **ctx)
+                                  augment=AugmentConfig(), real_fraction=0.0, notelabels=True, **tctx)
         train.real_fraction = len(train.real) / len(train)
         sampler = train.sampler()
         a, b_ = store_lengths(train.synthetic.store, args.max_notes, 10 ** 9)
@@ -195,7 +199,7 @@ def main(argv=None):
     else:
         print(f"note: no {data / 'train_transcribed'}, training on `train` only", flush=True)
         train = ScoreSegmentDataset(str(data / "train"), vocab_path, noise=nm, augment=AugmentConfig(),
-                                    notelabels=True, **ctx)
+                                    notelabels=True, **tctx)
         sampler = train.sampler()
         _, note_len = store_lengths(train.store, args.max_notes, 10 ** 9)
         space = train.label_space
@@ -208,7 +212,7 @@ def main(argv=None):
             raise SystemExit(f"--gangqinpu-share: no {data / 'train_gangqinpu'} (scripts/build_gangqinpu_windows.py, "
                              "then scripts/build_notelabels.py --splits train_gangqinpu,val_gangqinpu,test_gangqinpu)")
         gq = ScoreSegmentDataset(str(data / "train_gangqinpu"), vocab_path, noise=nm, augment=AugmentConfig(),
-                                 seed=args.seed + 2, notelabels=True, **ctx)
+                                 seed=args.seed + 2, notelabels=True, **tctx)
         gq_n = len(gq)
         S = args.gangqinpu_share
         if isinstance(train, MixedTrainDataset):
