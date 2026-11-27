@@ -149,6 +149,47 @@ class AugmentConfig:
     tempo: tuple = (0.85, 1.18)       # time-stretch factor for onsets / durations / pedal
     velocity: tuple = (0.8, 1.2)      # velocity scale
     prob: float = 0.9                 # probability a segment is augmented at all
+    # the share of windows played with another articulation (articulate): written lengths do not change
+    # when a pianist plays detached, legato or pedalled; 0 = off (as every run before it)
+    articulation: float = 0.0
+
+
+ARTIC_PHRASE = (1.5, 4.0)   # seconds per stretch played one way
+ARTIC_MODES = (("detached", 0.4), ("legato", 0.3), ("held", 0.1), ("as played", 0.2))
+
+
+def articulate(notes: np.ndarray, rng, split: int = 60) -> np.ndarray:
+    """The same notes played with another articulation, stretch by stretch and hand by hand (pitches
+    below ``split`` / from it): detached (each length x 0.25-0.6), legato (each note held up to its
+    hand's next onset, x 1.0-1.2), held (x 1.5-3, as under the pedal), or as played. Onsets, pitches
+    and velocities stay; the written score (the targets) is the same however the notes are held.
+    Columns: pitch, onset, duration, velocity (the segment format); a copy is returned."""
+    out = np.array(notes, np.float32, copy=True)
+    if len(out) == 0:
+        return out
+    on = out[:, 1]
+    t, end = float(on.min()), float(on.max())
+    names = [m for m, _ in ARTIC_MODES]
+    probs = np.array([w for _, w in ARTIC_MODES])
+    while t <= end:
+        t1 = t + float(rng.uniform(*ARTIC_PHRASE))
+        for hand in (out[:, 0] < split, out[:, 0] >= split):
+            idx = np.nonzero(hand & (on >= t) & (on < t1))[0]
+            if not len(idx):
+                continue
+            mode = names[int(rng.choice(len(names), p=probs / probs.sum()))]
+            if mode == "detached":
+                out[idx, 2] = np.maximum(out[idx, 2] * rng.uniform(0.25, 0.6, len(idx)), 0.03)
+            elif mode == "held":
+                out[idx, 2] = out[idx, 2] * rng.uniform(1.5, 3.0, len(idx))
+            elif mode == "legato":
+                hand_on = np.unique(on[hand])
+                for i in idx:
+                    k = np.searchsorted(hand_on, on[i], side="right")
+                    if k < len(hand_on):
+                        out[i, 2] = max(out[i, 2], (hand_on[k] - on[i]) * rng.uniform(1.0, 1.2))
+        t = t1
+    return out
 
 
 class _Transposer:
@@ -480,6 +521,8 @@ class ScoreSegmentDataset(Dataset):
         """Returns (notes, pedal, tokens, prompt, tempo factor). Transposition shifts input pitches,
         target AND prompt tokens together; the tempo factor also rescales time thresholds."""
         a = self.augment
+        if a.articulation > 0 and rng.random() < a.articulation:   # its own draw: the rest may be off
+            notes = articulate(notes, rng)
         if rng.random() >= a.prob:
             return notes, pedal, tokens, prompt, 1.0
         notes, pedal = notes.copy(), pedal.copy()

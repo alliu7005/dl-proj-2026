@@ -1662,6 +1662,20 @@ else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the releas
 the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
 the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
+### Articulation pilot: plan (2026-11-27)
+
+The rare written lengths in the Lemon demo are mostly played lengths written as they were played. A
+penalty at decoding (below) is a prior; the cause is in training: the noise model varies played
+lengths by ~15% (log-normal, `offset_log_std` 0.15), while real playing is detached (30-60% of the
+written length), legato (held up to the next note) or held under the pedal, so the labeller never
+saw a written length far from the played one. `src/dataset.py articulate` plays a training window
+another way stretch by stretch (1.5-4 s) and hand by hand (below / from middle C): detached (x
+0.25-0.6, at least 30 ms) 40%, legato 30%, held (x 1.5-3) 10%, as played 20%; onsets, pitches,
+velocities and targets unchanged. `pace/v2_articulation.sh` (pace/README.md, 4ad): `nl_gq`'s recipe
+for 20k steps without and with it on half the windows. Go for the full recipe: rare written lengths
+down on whole pieces, MUSTER not worse beyond chance anywhere, window duration accuracy not down by
+more than 0.01.
+
 ### Simpler rhythms: plan (2026-11-27)
 
 The Lemon demo's score (69 bars) had a rare rhythm (32nds, triplets, sextuplets, quintuplets) in 28

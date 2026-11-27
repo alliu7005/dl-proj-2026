@@ -161,6 +161,9 @@ def main(argv=None):
     ap.add_argument("--eval-loss-windows", type=int, default=400)
     ap.add_argument("--eval-decode-windows", type=int, default=200)
     ap.add_argument("--max-steps", type=int, default=0)
+    ap.add_argument("--articulation", type=float, default=0.0,
+                    help="share of training windows played with another articulation (src/dataset.py articulate: "
+                         "detached, legato, held, stretch by stretch): written lengths do not follow played ones")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="auto")
@@ -184,7 +187,7 @@ def main(argv=None):
     nm = NoiseModel.from_json(args.noise)
     if has_split(data, "train_transcribed"):
         train = MixedTrainDataset(str(data / "train"), str(data / "train_transcribed"), vocab_path, noise=nm,
-                                  augment=AugmentConfig(), real_fraction=0.0, notelabels=True, **ctx)
+                                  augment=AugmentConfig(articulation=args.articulation), real_fraction=0.0, notelabels=True, **ctx)
         train.real_fraction = len(train.real) / len(train)
         sampler = train.sampler()
         a, b_ = store_lengths(train.synthetic.store, args.max_notes, 10 ** 9)
@@ -194,7 +197,7 @@ def main(argv=None):
         parts = [train.synthetic, train.real]
     else:
         print(f"note: no {data / 'train_transcribed'}, training on `train` only", flush=True)
-        train = ScoreSegmentDataset(str(data / "train"), vocab_path, noise=nm, augment=AugmentConfig(),
+        train = ScoreSegmentDataset(str(data / "train"), vocab_path, noise=nm, augment=AugmentConfig(articulation=args.articulation),
                                     notelabels=True, **ctx)
         sampler = train.sampler()
         _, note_len = store_lengths(train.store, args.max_notes, 10 ** 9)
@@ -207,7 +210,7 @@ def main(argv=None):
         if not has_split(data, "train_gangqinpu"):
             raise SystemExit(f"--gangqinpu-share: no {data / 'train_gangqinpu'} (scripts/build_gangqinpu_windows.py, "
                              "then scripts/build_notelabels.py --splits train_gangqinpu,val_gangqinpu,test_gangqinpu)")
-        gq = ScoreSegmentDataset(str(data / "train_gangqinpu"), vocab_path, noise=nm, augment=AugmentConfig(),
+        gq = ScoreSegmentDataset(str(data / "train_gangqinpu"), vocab_path, noise=nm, augment=AugmentConfig(articulation=args.articulation),
                                  seed=args.seed + 2, notelabels=True, **ctx)
         gq_n = len(gq)
         S = args.gangqinpu_share

@@ -1011,6 +1011,23 @@ git pull && bash pace/v2_simplicity.sh
 `outputs/simplicity/report.md`: how often each writes a rare rhythm against the reference scores,
 MUSTER (onset / offset parts), score similarity's duration error, and MUSTER against the release.
 
+## 4ad. Articulation pilot (any time; 5 jobs)
+
+The labeller writes the length it hears: a detached off-beat eighth comes out as a 1/6-beat note and
+rests (Lemon: 124 rare written lengths). Training varies played lengths by only ~15%, so it never
+learned that written lengths do not follow played ones. `src/dataset.py articulate` plays training
+windows detached, legato or held, stretch by stretch and hand by hand, with the targets unchanged
+(`train_labeller.py --articulation`). `pace/v2_articulation.sh` trains `nl_gq`'s recipe for 20k
+steps without and with it on half the windows (`nl_gq_p20k`, `nl_gq_art_p20k`), evaluates both on
+the test windows and on whole pieces with `meter_v4_gq`.
+
+```bash
+git pull && bash pace/v2_articulation.sh
+```
+
+`outputs/articulation/report.md`: duration accuracy on the windows, rare rhythms against the
+reference scores, MUSTER paired, and a go / no go for `nl_gq`'s full recipe with it.
+
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 
 The grid is v2's bottleneck: the labeller's window onset F1 is 0.78-0.86 on the true grid and

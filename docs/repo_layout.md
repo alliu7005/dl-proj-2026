@@ -77,6 +77,7 @@ scripts/fetch_pdmx.py            PDMX's public-domain MusicXML scores from Zenod
 scripts/build_synthetic_meter.py v2: piano scores rendered (src/synthetic.py) -> data/processed/meter/{train,val}_synthetic.pkl + synthetic_report.json
 scripts/postprocess_scores.py    PKSpell (_ps) and / or the engraving rules (_eg) on a system's scores as written already: a new system folder
 scripts/train_dur_chooser.py     the duration chooser for a labeller: trained on the validation windows, measured on the test windows -> outputs/runs/<labeller>/dur_chooser.pt, dur_chooser.json
+scripts/articulation_report.py   the articulation pilot: window duration accuracy, rare rhythms, MUSTER -> outputs/articulation
 scripts/simplicity_report.py     simpler rhythms: rare rhythms against the reference scores, MUSTER, duration error -> outputs/simplicity
 scripts/round13_report.py        the thirteenth round's report: the grid's worth, meter pretraining -> outputs/round13
 scripts/fetch_aria_midi.py       Aria-MIDI (CC-BY-NC-SA): one subset's MIDI files streamed from Hugging Face -> data/raw/aria_midi
@@ -112,6 +113,7 @@ pace/v2_level.sh                 v2 fifth round: the written-tempo head for the 
 pace/v2_gangqinpu.sh             v2 sixth round: meter models trained with Gangqinpu; the grid's beat times taken from the notes
 pace/v2_pm2s.sh                  v2 seventh round: PM2S retrained without our test pieces, its beats on whole pieces, a meter model for it
 pace/v2_pilot.sh                 v2 pilot: ensembles of trained models, synthetic data (12k steps), stable PM2S (16k steps), d80, per-piece choice: go / no go (8 jobs)
+pace/v2_articulation.sh          articulation pilot: nl_gq's recipe 20k steps without / with the articulation augmentation (5 jobs)
 pace/v2_simplicity.sh            simpler rhythms: the complexity penalty, plain lengths, the jump fix, on whole pieces (4 jobs)
 pace/v2_round13.sh               thirteenth round: the grid's worth (_og, _ogt, _s2g, _rf) and meter pretraining on Aria-MIDI
 pace/v2_round12.sh               twelfth round: round 11, the duration chooser and new defaults, seq2seq with Gangqinpu, round 9, one stage after another
@@ -141,6 +143,7 @@ tests/test_pm2s.py               PM2S: post-processing, the tracker on random we
 tests/test_publish.py            publishing: archive, the gate, --force, refusals, the demo's update + swap, the batch jobs' hook
 tests/test_readable.py           the readability rules: jumps (and what is no jump), lengths (and what is left), stems and hidden rests, the switches
 tests/test_synthetic.py          synthetic performances: rendering a written score, the build script, the PDMX unpacking, pace/v2_pilot.sh
+tests/test_articulation.py       the articulation augmentation, its flag and recipes, pace/v2_articulation.sh
 tests/test_simplicity.py         rhythm complexity, the penalty, plain lengths, the report's counts, pace/v2_simplicity.sh
 tests/test_grid_sources.py       grid sources, the refinement loop, their systems, meter pretraining, pace/v2_round13.sh
 tests/test_dur_chooser.py        the duration chooser's features, training, use in placed_notes and V2Pipeline, the _dc system, the new defaults, pace/v2_round12.sh

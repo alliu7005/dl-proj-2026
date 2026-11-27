@@ -166,6 +166,10 @@ nl_flags() {
     nl_base_gn_pm) echo "--size base --grid-noise 0.8 --beat-noise configs/beat_noise_pm2s.json" ;;
     # nl_base_gn's recipe with Gangqinpu's scores as half of the training windows (scripts/build_gangqinpu_windows.py)
     nl_gq) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5" ;;
+    # articulation pilot (pace/v2_articulation.sh): nl_gq's recipe for 20k steps, without and with half the
+    # training windows played with another articulation (src/dataset.py articulate)
+    nl_gq_p20k) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5 --max-steps 20000" ;;
+    nl_gq_art_p20k) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5 --max-steps 20000 --articulation 0.5" ;;
     # nl_gq's recipe, the training notes whose written split the performance contradicts left out of
     # the loss (src/notelabels.py contradicted; scripts/audit_labels.py)
     nl_gq_mc) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5 --mask-contradicted" ;;
