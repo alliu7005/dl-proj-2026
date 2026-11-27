@@ -215,13 +215,15 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
       ogt) out="$out --grid oracle_beats" ;;
       s2g) out="$out --grid seq2seq" ;;
       rf) out="$out --refine 1" ;;
+      sl) out="$out --simplify-lengths" ;;
+      sp[0-9]*) out="$out --simplicity $(awk "BEGIN{print ${o#sp} / 10}")" ;;
       keepall) out="$out --delete-above 1" ;;
       missing) out="$out --only-missing" ;;
       pm) out="$out --clean-beats pm2s" ;;
       rpm) out="$out --real-beats pm2s" ;;
       rsb) out="$out --real-beats synth" ;;
       d[0-9]*) out="$out --delete-above 0.${o#d}" ;;
-      *) echo "unknown v2 option $o (tidy, gl, tc, tb, bd, rd, jf, ps, eg, sw, dc, og, ogt, s2g, rf, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
+      *) echo "unknown v2 option $o (tidy, gl, tc, tb, bd, rd, jf, ps, eg, sw, dc, og, ogt, s2g, rf, sl, sp<10x>, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
     esac
   done
   echo "$out"

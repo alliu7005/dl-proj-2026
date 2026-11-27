@@ -75,7 +75,8 @@ def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, cle
                 glissando: bool = False, timing_check: bool = False, readable: bool = False,
                 fix_jumps: bool = False, timing_beats: bool = False, beat_decode: bool = False,
                 pkspell: bool = False, engraving: bool = False, swing: bool = False,
-                dur_chooser: bool = False, grid: str = "meter", refine: float = 0.0) -> str:
+                dur_chooser: bool = False, grid: str = "meter", refine: float = 0.0, simplicity: float = 0.0,
+                simplify: bool = False) -> str:
     """The folder (and table row) of a system under outputs/system_eval (v2 with another deletion
     threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy; glissandos written
     as glissandos: _gl; triplets the timing contradicts made straight: _tc; beats the timing says are straight: _tb;
@@ -91,6 +92,7 @@ def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, cle
                 + ("_bd" if beat_decode else "")
                 + ("_ps" if pkspell else "") + ("_eg" if engraving else "") + ("_sw" if swing else "")
                 + ("_dc" if dur_chooser else "") + GRID_SUFFIX[grid] + ("_rf" if refine else "")
+                + (f"_sp{round(simplicity * 10)}" if simplicity else "") + ("_sl" if simplify else "")
                 + BEAT_SUFFIX[clean_beats]
                 + REAL_SUFFIX[real_beats])
         if "pm2s" in (clean_beats, real_beats):   # other PM2S weights ($PM2S_WEIGHTS): their tag, _pm_rpm_<tag>
@@ -152,6 +154,11 @@ def main(argv=None):
     ap.add_argument("--refine", type=float, default=0.0,
                     help="v2: the labeller's bar lines fed back to the meter decoder with this weight, then labelled "
                          "again (src/grid_sources.py with_votes); its own system (_rf)")
+    ap.add_argument("--simplicity", type=float, default=0.0,
+                    help="v2: rarer rhythms (32nds, triplets, quintuplets) cost this x their complexity in the "
+                         "labeller's choice (src/labeller.py rhythm_complexity); its own system (_sp<10x>)")
+    ap.add_argument("--simplify-lengths", action="store_true",
+                    help="v2: rare written lengths made plain (src/readable.py simplify_lengths); its own system (_sl)")
     ap.add_argument("--grid-run", default="sf_base_reg_cab_c128", help="--grid seq2seq: the seq2seq run (meter mode)")
     ap.add_argument("--meter-data", default="data/processed/meter", help="--grid oracle*: the ground truth")
     ap.add_argument("--fix-jumps", action="store_true",
@@ -184,7 +191,8 @@ def main(argv=None):
                           timing_check=args.timing_check, readable=args.readable, fix_jumps=args.fix_jumps,
                           timing_beats=args.timing_beats, beat_decode=args.beat_decode,
                           pkspell=args.pkspell, engraving=args.engraving, swing=args.swing,
-                          dur_chooser=args.dur_chooser, refine=args.refine)
+                          dur_chooser=args.dur_chooser, refine=args.refine, simplicity=args.simplicity,
+                          simplify=args.simplify_lengths)
         if args.dur_chooser and pipe.dur_chooser is None:
             raise SystemExit(f"--dur-chooser: no {runs / lab / 'dur_chooser.pt'} (scripts/train_dur_chooser.py)")
         wants_beats, midi_beats = True, "synth"
@@ -209,13 +217,13 @@ def main(argv=None):
     if not args.v2 and (args.delete_above != DELETE_ABOVE or args.tidy or args.glissando or args.timing_check
                         or args.readable or args.fix_jumps or args.timing_beats or args.beat_decode
                         or args.pkspell or args.engraving or args.swing or args.dur_chooser or args.grid != "meter"
-                        or args.refine):
+                        or args.refine or args.simplicity or args.simplify_lengths):
         ap.error("--delete-above, --tidy, --glissando, --timing-check, --timing-beats, --readable, --fix-jumps and "
                  "--beat-decode are for v2 (--v2)")
     system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above,
                          args.tidy, args.real_beats, args.glissando, args.timing_check, args.readable, args.fix_jumps,
                          args.timing_beats, args.beat_decode, args.pkspell, args.engraving, args.swing,
-                         args.dur_chooser, args.grid, args.refine)
+                         args.dur_chooser, args.grid, args.refine, args.simplicity, args.simplify_lengths)
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before

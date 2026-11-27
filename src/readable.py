@@ -148,6 +148,49 @@ def readable_lengths(placed: list, bar_ts: list[str], gap: Fraction = GAP) -> tu
     return closed, trimmed
 
 
+SIMPLE = tuple(Fraction(x) for x in ("1/4", "1/2", "3/4", "1", "3/2", "2", "3", "4"))
+
+
+def simplify_lengths(placed: list, bar_ts: list[str]) -> int:
+    """Written lengths in a rarer subdivision (src/labeller.py rhythm_complexity: 32nds, triplets,
+    quintuplets ...) made plain: a short note played detached (the labeller writes what was played:
+    an off-beat eighth held for 1/6 of a beat) is written as an arrangement writes it, up to its
+    staff's next onset when that gap is a plain value no longer than the beat, else the plain value
+    nearest to its length that still ends by that onset. Notes on a rare position keep their
+    length (a real triplet's notes stay triplets). Changes ``placed`` in place; returns how many."""
+    from .labeller import rhythm_complexity
+    from .pipeline import _bar_starts
+    starts = _bar_starts(placed, bar_ts)
+    at = lambda p: starts[p.bar] + Fraction(p.pos)  # noqa: E731
+    onsets = {}
+    for p in placed:
+        if not p.grace:
+            onsets.setdefault(p.staff, set()).add(at(p))
+    onsets = {k: sorted(v) for k, v in onsets.items()}
+    changed = 0
+    for p in placed:
+        if p.grace or not p.total or rhythm_complexity(p.total) == 0:
+            continue
+        pos = Fraction(p.pos)
+        if rhythm_complexity(pos - (pos.numerator // pos.denominator)) > 0:
+            continue
+        q = at(p)
+        on = onsets[p.staff]
+        k = bisect_right(on, q)
+        gap = on[k] - q if k < len(on) else None
+        if gap is not None and gap <= 1 and rhythm_complexity(gap) == 0:
+            new = gap
+        else:
+            fits = [v for v in SIMPLE if gap is None or v <= gap]
+            if not fits:
+                continue
+            new = min(fits, key=lambda v: abs(v - Fraction(p.total)))
+        if new != p.total:
+            p.total = new
+            changed += 1
+    return changed
+
+
 def stem_voices(score) -> int:
     """Stems up for the higher voice, down for the others, and the rests of all but the fullest voice
     hidden, in every measure where a staff has two voices or more (module docstring). Changes the

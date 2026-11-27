@@ -607,7 +607,8 @@ class V2Pipeline(_FrontEnd):
                  tidy: bool = False, glissando: bool = False, timing_check: bool = False,
                  readable: bool = False, fix_jumps: bool = False, timing_beats: bool = False,
                  beat_decode: bool = False, pkspell: bool = False, engraving: bool = False, swing: bool = False,
-                 dur_chooser: bool = False, one_meter: float | None = None, refine: float = 0.0):
+                 dur_chooser: bool = False, one_meter: float | None = None, refine: float = 0.0,
+                 simplicity: float = 0.0, simplify: bool = False):
         """``glissando``: find glissandos in the notes (src/glissando.py) and write each as its first
         and last note joined by a "gliss." line, not as the run of notes. ``timing_check``: a note
         written on a triplet position but played on a straight eighth or sixteenth is moved there
@@ -669,6 +670,8 @@ class V2Pipeline(_FrontEnd):
         from .dur_chooser import DurChooser
         self.dur_chooser = DurChooser.load(labeller_ckpt.parent, self.device) if dur_chooser else None
         self.dur_chooser_missing = bool(dur_chooser) and self.dur_chooser is None
+        self.simplify = bool(simplify)     # rare written lengths made plain (src/readable.py simplify_lengths)
+        self.simplicity = float(simplicity)   # rarer rhythms cost extra (src/labeller.py rhythm_complexity)
         self.refine = float(refine)        # the labeller's bar lines fed back to the meter decoder (src/grid_sources.py)
         self.info = {"system": "v2", "labeller": str(labeller_ckpt), "meter": str(meter_ckpt),
                      "params_M": round((n_lab + n_met) / 1e6, 1), "device": str(self.device),
@@ -771,6 +774,7 @@ class V2Pipeline(_FrontEnd):
         bd = self.beat_decode if beat_decode is None else bool(beat_decode)
         bparams = self.beat_params if bd else None   # None also when not tuned
         dc = dict(dur_chooser=self.dur_chooser, frames=frames) if self.dur_chooser is not None else {}
+        dc["simplicity"] = self.simplicity
         placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
                                 delete_above=delete_above, beat_decode=bparams, **dc)
         staves = piece_staves([p.staff for pl in placed for p in pl])
@@ -806,6 +810,10 @@ class V2Pipeline(_FrontEnd):
         if rd:   # short rests closed, small overlaps trimmed (before a glissando's start is set to reach its end)
             from .readable import readable_lengths
             closed, trimmed = readable_lengths(notes_out, list(grid["bars"]))
+        simplified = 0
+        if self.simplify:   # after the readability rules, before swing (which moves starts and ends alike)
+            from .readable import simplify_lengths
+            simplified = simplify_lengths(notes_out, list(grid["bars"]))
         swung, swing_kind = 0, None
         if self.swing:   # swung pairs written straight (after the lengths are tidied: it moves starts and ends alike)
             from .swing import write_swing
@@ -840,6 +848,7 @@ class V2Pipeline(_FrontEnd):
                                         else False),
                         "readable": rd, "rests_closed": closed, "overlaps_trimmed": trimmed,
                         "swing": swing_kind, "swing_written_straight": swung,
+                        "simplicity": self.simplicity, "lengths_simplified": simplified,
                         "dur_chooser": self.dur_chooser is not None, "dur_chooser_missing": self.dur_chooser_missing,
                         "follow": follow_map(grid, notes_out)}
 

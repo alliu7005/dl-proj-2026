@@ -993,6 +993,24 @@ git pull && bash pace/v2_round13.sh        # 9 jobs
 
 `outputs/round13/report.md`: section 1 (the grid) after `g1final`, section 2 (pretraining) after `p1final`.
 
+## 4ac. Simpler rhythms (any time; 4 jobs)
+
+v2 writes the rhythm it hears: a detached off-beat eighth as a 1/6-beat note and rests, a rushed run
+as 32nds or a quintuplet, where an arrangement writes plain eighths and sixteenths (the Lemon demo:
+28 of its 69 bars had a rare rhythm). `pace/v2_simplicity.sh` measures, on whole pieces:
+- `_sp10`, `_sp20`: rarer rhythms cost 1 or 2 times their complexity in the labeller's choice
+  (`src/labeller.py rhythm_complexity`);
+- `_sl`: rare written lengths made plain (`src/readable.py simplify_lengths`);
+- `_sp20_sl`: both (Lemon: 28 -> 8 bars);
+- `_jf`: the demo's jump fix, where Lemon's 3/4 and 2/4 bars came from.
+
+```bash
+git pull && bash pace/v2_simplicity.sh
+```
+
+`outputs/simplicity/report.md`: how often each writes a rare rhythm against the reference scores,
+MUSTER (onset / offset parts), score similarity's duration error, and MUSTER against the release.
+
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 
 The grid is v2's bottleneck: the labeller's window onset F1 is 0.78-0.86 on the true grid and

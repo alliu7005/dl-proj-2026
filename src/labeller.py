@@ -155,7 +155,7 @@ def keep_mask(keep_logits: torch.Tensor, delete_above: float = 0.5) -> torch.Ten
 
 def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, staves: int = 0,
                  delete_above: float = 0.5, pos_est=None, beat_decode=None, dur_chooser=None,
-                 frame=None, perf=None) -> list[Placed]:
+                 frame=None, perf=None, simplicity: float = 0.0) -> list[Placed]:
     """Item ``b`` of a batch's predictions -> the notes to render: every own note (window or
     carried, ``own`` mask over the item's notes; context notes belong to other windows) the keep
     head keeps, at its predicted bar (grid bar + correction, never before bar 0), position,
@@ -166,8 +166,13 @@ def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, st
     the quarter decoded a beat at a time, fused with the timing, instead of each note's likeliest.
     ``dur_chooser`` (src/dur_chooser.py DurChooser) with ``frame`` (the window's bars) and ``perf``
     ((onsets, durations) in seconds per item note): each length chosen among the dur head's top
-    candidates from the placed notes around it (a length the beat decoding changed is kept)."""
+    candidates from the placed notes around it (a length the beat decoding changed is kept).
+    ``simplicity``: each position-in-beat and length class's logit lowered by this x its
+    rhythm_complexity, so a 32nd, triplet or quintuplet must be clearly likelier to be written."""
     n = min(len(own), out["keep"].shape[1])  # the batch pads every item to its longest one
+    if simplicity > 0:   # the rarer subdivisions cost extra (complexity_penalties)
+        ps, pd = complexity_penalties(space, out["sub"].device)
+        out = dict(out, sub=out["sub"] - simplicity * ps, dur=out["dur"] - simplicity * pd)
     keep = keep_mask(out["keep"][b, :n], delete_above).cpu().numpy()
     pick = {k: out[k][b, :n].argmax(-1).cpu().numpy() for k in ("delta", "pos", "sub", "dur")}
     staff_logits = out["staff"][b, :n]
@@ -196,6 +201,32 @@ def placed_notes(out: dict, b: int, pitches, bar_est, own: np.ndarray, space, st
     return res
 
 
+def rhythm_complexity(x) -> float:
+    """How unusual a position in the beat or a written length is: 0 for whole, half, quarter, eighth
+    and sixteenth values (and their dotted forms), 1 for 32nds and triplets / sextuplets, 1.5 for
+    64ths and triplet 16ths, 2 for anything else (quintuplets, 1/24 ...)."""
+    from fractions import Fraction
+    d = Fraction(x).limit_denominator(96).denominator
+    if d in (1, 2, 4):
+        return 0.0
+    if d in (8, 3, 6):
+        return 1.0
+    if d in (16, 12):
+        return 1.5
+    return 2.0
+
+
+def complexity_penalties(space, device=None) -> tuple[torch.Tensor, torch.Tensor]:
+    """(sub [n_sub], dur [n_dur]) penalties of the label space's classes (rhythm_complexity), cached."""
+    key = "_complexity"
+    if getattr(space, key, None) is None:
+        sub = torch.tensor([0.0] + [rhythm_complexity(f) for f in space.subs])
+        dur = torch.tensor([rhythm_complexity(f) for f in space.durs])
+        setattr(space, key, (sub, dur))
+    sub, dur = getattr(space, key)
+    return sub.to(device), dur.to(device)
+
+
 def performed(model_cfg, notes: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
     """(onsets, durations) in seconds of an item's notes, from its standardised features
     (src/dataset.py note_features: onset column 1, log duration column 3; cfg.feat_mean / feat_std
@@ -221,7 +252,8 @@ def load_labeller(path, device) -> NoteLabeller:
 @torch.no_grad()
 def predict_placed(model, items: list[dict], coll, device, amp: bool, space, batch_size: int = 32,
                    carried: bool = True, staves: int = 0, delete_above: float = 0.5,
-                   beat_decode=None, dur_chooser=None, frames: list | None = None) -> list[list[Placed]]:
+                   beat_decode=None, dur_chooser=None, frames: list | None = None,
+                   simplicity: float = 0.0) -> list[list[Placed]]:
     """Label dataset items (ScoreSegmentDataset(notelabels=True), or src/pipeline.py V2Pipeline's
     windows): the notes each keeps, placed in its window's bars. ``carried``: also the notes carried
     over from the window before (a window's target writes their continuation; a whole piece
@@ -246,7 +278,8 @@ def predict_placed(model, items: list[dict], coll, device, amp: bool, space, bat
             res[i] = placed_notes(out, r, it["notes"][:, 0].numpy(), it["bar_est"].numpy(), own, space, staves,
                                   delete_above, pos_est=pe, beat_decode=beat_decode, dur_chooser=ch,
                                   frame=frames[i] if ch is not None else None,
-                                  perf=performed(model.cfg, it["notes"]) if ch is not None else None)
+                                  perf=performed(model.cfg, it["notes"]) if ch is not None else None,
+                                  simplicity=simplicity)
     return res
 
 

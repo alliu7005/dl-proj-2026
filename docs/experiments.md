@@ -1662,6 +1662,25 @@ else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the releas
 the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
 the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
+### Simpler rhythms: plan (2026-11-27)
+
+The Lemon demo's score (69 bars) had a rare rhythm (32nds, triplets, sextuplets, quintuplets) in 28
+bars, though 98% of its onsets were plain (beat, eighth, sixteenth). The written lengths were the
+main cause: 124 rare lengths, mostly left-hand off-beat eighths held for 1/6 of a beat (detached
+playing written as played, with rests) and runs written in 32nds. Its three non-4/4 bars (one 2/4,
+two 3/4) all came from the jump fix (`src/readable.py fix_jumps`): without it every bar is 4/4.
+- **A penalty in the labeller's choice** (`rhythm_complexity`: 0 for plain values, 1 for 32nds and
+  triplets, 1.5 for 64ths and triplet 16ths, 2 otherwise), times a weight, off each position-in-beat
+  and length logit: the idea of the simplicity priors in rhythm quantization (Cemgil, Desain &
+  Kappen 2000; the note-value priors of Nakamura et al.'s metrical HMMs). On Lemon, weight 2:
+  rare onsets 38 -> 11, rare lengths 124 -> 55. A labeller sure of a played length keeps it.
+- **Plain written lengths** (`simplify_lengths`): a rare length on a plain position becomes the gap to
+  its staff's next onset when that is a plain value up to a beat, else the nearest plain value
+  ending by it; notes on rare positions (real triplets) keep theirs. With the penalty: rare lengths
+  55 -> 36, bars with a rare rhythm 28 -> 8.
+- Both off by default; `pace/v2_simplicity.sh` (pace/README.md, 4ac) measures them, and the jump
+  fix, on whole pieces, with how often the reference scores themselves use a rare rhythm.
+
 ### Thirteenth round: plan (2026-11-27)
 
 `pace/v2_round13.sh` (pace/README.md, 4ab). Round 12's changes are each worth tenths of a MUSTER
