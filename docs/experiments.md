@@ -1662,6 +1662,21 @@ else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the releas
 the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
 the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
+### Headroom tests (2026-11-27)
+
+`pace/v2_headroom.sh` (pace/README.md, 4z) measures three proposed ideas before anyone builds them.
+- **A learned duration chooser.** Each note's written length is chosen from the surrounding notes
+  among the labeller's top candidates, after Nakamura, Yoshii & Dixon's note-value MRF. Written
+  lengths are MUSTER's largest error (offsets ~22-31% against onsets ~13-18% in the seventh round),
+  and the length rules so far have cost as often as helped. The ceiling: `nl_gq` with the best of
+  its top 2 / 4 lengths (and positions), rendered and scored on the true grid.
+- **Local meter repair.** A ranker over alternative grids where the decoder is unsure. The ceiling:
+  the best of the decoded grid and its alternatives (shifted bar lines, halved / doubled values,
+  each likely time signature, one meter per piece), per piece and per 8 bars.
+- **Not tested: training on two performances of one passage with an agreement loss.** Both
+  performances already share the same target score, and each is trained to it, so the extra loss
+  adds little supervision. Consistency training pays where one side has no labels.
+
 ### Pilot, part 3: spelling, stems and swing (2026-11-27)
 
 `pace/v2_pilot3.sh` (pace/README.md, 4y). On the whole-piece benchmark v2 is level with Beyer &

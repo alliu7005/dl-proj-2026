@@ -923,6 +923,25 @@ of `outputs/pilot/report.md` has the MUSTER and the score-similarity spelling, s
 errors, with a go / no go. PKSpell was trained on ASAP's scores, our ASAP test pieces included:
 Gangqinpu is its honest test.
 
+## 4z. Headroom tests: what an idea could gain at most (no training)
+
+Before building a proposed improvement, `pace/v2_headroom.sh` (`scripts/headroom.py`) measures its
+ceiling with the released models:
+- **A learned duration / position chooser** (picking each note's written length from the
+  surrounding notes among the labeller's own top candidates): `nl_gq`'s heads with the best of
+  their top 2 / 4, the windows rendered and scored. If even that oracle barely lifts duration
+  accuracy, the chooser is not worth training.
+- **Local meter repair** (a ranker over alternative grids where the decoder is unsure):
+  `meter_v4_gq`'s grid against the best of the decoded one, bar lines shifted by 1-3 beats, note
+  values halved or doubled, each of the 3 likeliest time signatures, and one meter per piece. Per
+  piece and per 8 bars.
+
+```bash
+git pull && bash pace/v2_headroom.sh       # 4 jobs, about an hour or two
+```
+
+`outputs/headroom/report.md`; bring it back with `scp` (it is small).
+
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 
 The grid is v2's bottleneck: the labeller's window onset F1 is 0.78-0.86 on the true grid and
