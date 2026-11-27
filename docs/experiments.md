@@ -1662,6 +1662,30 @@ else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the releas
 the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
 the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
+### Thirteenth round: plan (2026-11-27)
+
+`pace/v2_round13.sh` (pace/README.md, 4ab). Round 12's changes are each worth tenths of a MUSTER
+point at most; the grid is where v2 loses (the labeller's onset F1 0.78-0.86 on the true grid,
+0.26-0.49 on the meter models'). Two questions first, then the longest bet:
+- **How much is a perfect grid worth on whole pieces?** `_og` gives the release a perfect meter
+  model on its own tracked beats where the ground truth reaches (`src/grid_sources.py`
+  spliced_logp; the model's log-probabilities elsewhere, e.g. outside Gangqinpu's reliable
+  stretches); `_ogt` the annotated beats as well. If `_og` is far below the release, meter work
+  pays; if not, the losses are elsewhere (transcription errors on real audio, the labeller).
+- **Can the seq2seq system supply a better grid now?** `_s2g`: its score of the same input aligned
+  to the performance (`fit_alignment`, the rank map refitted through matched pitches) and read as
+  v2's grid: its bars and time signatures, each quarter timed through the matched notes.
+- **`_rf`, the cheap form of one model deciding bar lines and notes together:** each note the
+  labeller writes on a bar line votes for the tracked beat it was played on; the votes go into the
+  meter model's bar log-probabilities, the grid is decoded again and the notes labelled on it.
+  The labeller reads the grid, so its votes mostly agree with it; its bar corrections (the delta
+  head) are where they can differ. Expected small; measured because it costs nothing.
+- **Pretraining the meter model on unlabelled MIDI** (Aria-MIDI, Bradshaw & Colton, ICLR 2025:
+  ~1.2M solo-piano transcriptions; its unique subset, 32,522 files): PM2S's beats of each file,
+  the meter model trained to rebuild 15% masked beats (spans of 1-4) from their neighbours, then
+  the pilot's 12k-step recipe from it against the same from scratch. Go for a full run: +0.01 on
+  (downbeat F + ts) / 2 over the real test sets, no set down by more than 0.02.
+
 ### Twelfth round: plan (2026-11-27)
 
 `pace/v2_round12.sh` (pace/README.md, 4aa), from the pilot's and the headroom tests' results

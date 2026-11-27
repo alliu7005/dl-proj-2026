@@ -62,6 +62,10 @@ def parse_v2(spec: str) -> tuple[str, str]:
 
 
 BEAT_SUFFIX = {"synth": "", "audio": "_ab", "pm2s": "_pm"}       # v2 on clean MIDI
+# v2's grid (src/grid_sources.py): the meter model's; a perfect meter model on the tracked beats where the
+# ground truth reaches; the annotated beats with it; the seq2seq system's score aligned to the performance
+GRID_SUFFIX = {"meter": "", "oracle": "_og", "oracle_beats": "_ogt", "seq2seq": "_s2g"}
+GT_SPLITS = ("test", "test_transcribed", "test_gangqinpu")       # data/processed/meter/<split>.pkl
 GANGQINPU = ("gangqinpu", "gangqinpu_real")   # scripts/gangqinpu_inputs.py: the recording's beats, as real
 REAL_SUFFIX = {"audio": "", "pm2s": "_rpm", "synth": "_rsb"}     # v2 on the real transcriptions (and Gangqinpu's)
 
@@ -71,7 +75,7 @@ def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, cle
                 glissando: bool = False, timing_check: bool = False, readable: bool = False,
                 fix_jumps: bool = False, timing_beats: bool = False, beat_decode: bool = False,
                 pkspell: bool = False, engraving: bool = False, swing: bool = False,
-                dur_chooser: bool = False) -> str:
+                dur_chooser: bool = False, grid: str = "meter", refine: float = 0.0) -> str:
     """The folder (and table row) of a system under outputs/system_eval (v2 with another deletion
     threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy; glissandos written
     as glissandos: _gl; triplets the timing contradicts made straight: _tc; beats the timing says are straight: _tb;
@@ -86,7 +90,7 @@ def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, cle
                 + ("_tc" if timing_check else "") + ("_tb" if timing_beats else "") + ("_rd" if readable else "") + ("_jf" if fix_jumps else "")
                 + ("_bd" if beat_decode else "")
                 + ("_ps" if pkspell else "") + ("_eg" if engraving else "") + ("_sw" if swing else "")
-                + ("_dc" if dur_chooser else "")
+                + ("_dc" if dur_chooser else "") + GRID_SUFFIX[grid] + ("_rf" if refine else "")
                 + BEAT_SUFFIX[clean_beats]
                 + REAL_SUFFIX[real_beats])
         if "pm2s" in (clean_beats, real_beats):   # other PM2S weights ($PM2S_WEIGHTS): their tag, _pm_rpm_<tag>
@@ -141,6 +145,15 @@ def main(argv=None):
     ap.add_argument("--dur-chooser", action="store_true",
                     help="v2: each written length chosen among the labeller's top 4 from the notes around it "
                          "(src/dur_chooser.py, dur_chooser.pt next to the labeller); its own system (_dc)")
+    ap.add_argument("--grid", default="meter", choices=list(GRID_SUFFIX),
+                    help="v2: where the grid comes from (src/grid_sources.py): the meter model; oracle (_og): a perfect "
+                         "meter model on the tracked beats where the ground truth reaches; oracle_beats (_ogt): the "
+                         "annotated beats too; seq2seq (_s2g): the seq2seq system's score of the input aligned to it")
+    ap.add_argument("--refine", type=float, default=0.0,
+                    help="v2: the labeller's bar lines fed back to the meter decoder with this weight, then labelled "
+                         "again (src/grid_sources.py with_votes); its own system (_rf)")
+    ap.add_argument("--grid-run", default="sf_base_reg_cab_c128", help="--grid seq2seq: the seq2seq run (meter mode)")
+    ap.add_argument("--meter-data", default="data/processed/meter", help="--grid oracle*: the ground truth")
     ap.add_argument("--fix-jumps", action="store_true",
                     help="v2: a bar the meter decoder stretched with a jump shortened instead (src/readable.py, the "
                          "demo's default); its own system (_jf)")
@@ -171,7 +184,7 @@ def main(argv=None):
                           timing_check=args.timing_check, readable=args.readable, fix_jumps=args.fix_jumps,
                           timing_beats=args.timing_beats, beat_decode=args.beat_decode,
                           pkspell=args.pkspell, engraving=args.engraving, swing=args.swing,
-                          dur_chooser=args.dur_chooser)
+                          dur_chooser=args.dur_chooser, refine=args.refine)
         if args.dur_chooser and pipe.dur_chooser is None:
             raise SystemExit(f"--dur-chooser: no {runs / lab / 'dur_chooser.pt'} (scripts/train_dur_chooser.py)")
         wants_beats, midi_beats = True, "synth"
@@ -195,13 +208,14 @@ def main(argv=None):
         print(f"--clean-beats audio: {len(entries)} of {n} inputs (clean ones need a recording)", flush=True)
     if not args.v2 and (args.delete_above != DELETE_ABOVE or args.tidy or args.glissando or args.timing_check
                         or args.readable or args.fix_jumps or args.timing_beats or args.beat_decode
-                        or args.pkspell or args.engraving or args.swing or args.dur_chooser):
+                        or args.pkspell or args.engraving or args.swing or args.dur_chooser or args.grid != "meter"
+                        or args.refine):
         ap.error("--delete-above, --tidy, --glissando, --timing-check, --timing-beats, --readable, --fix-jumps and "
                  "--beat-decode are for v2 (--v2)")
     system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above,
                          args.tidy, args.real_beats, args.glissando, args.timing_check, args.readable, args.fix_jumps,
                          args.timing_beats, args.beat_decode, args.pkspell, args.engraving, args.swing,
-                         args.dur_chooser)
+                         args.dur_chooser, args.grid, args.refine)
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before
@@ -210,6 +224,43 @@ def main(argv=None):
     if args.only_missing:
         entries = [e for e in entries if not (out / e["condition"] / f"{e['slug']}.musicxml").exists()]
         print(f"{system}: {len(entries)} inputs without a score", flush=True)
+    gts, seq = {}, None
+    if args.v2 and args.grid in ("oracle", "oracle_beats"):
+        import pickle
+
+        from src.grid_sources import ground_truth
+        for split in GT_SPLITS:
+            f = Path(args.meter_data) / f"{split}.pkl"
+            if f.exists():
+                for perf, g in ground_truth(pickle.load(open(f, "rb"))).items():
+                    gts.setdefault(perf, g)
+        print(f"--grid {args.grid}: ground truth for {len(gts)} performances", flush=True)
+    if args.v2 and args.grid == "seq2seq":
+        seq = ScorePipeline(runs / args.grid_run / args.ckpt, vocab=args.vocab, device=args.device)
+
+    def grid_kwargs(e, beats, kw) -> dict:
+        """The V2Pipeline.run arguments of --grid for one input ({"skip": why} when it cannot be had)."""
+        if args.grid == "meter":
+            return {}
+        if args.grid in ("oracle", "oracle_beats"):
+            from src.grid_sources import annotated_beats, spliced_logp
+            g = gts.get(e["performance"])
+            if not g:
+                return {"skip": f"--grid {args.grid}: no ground truth for {e['performance']}"}
+            out = {"logp_fn": lambda bt, lp: spliced_logp(bt, lp, g)}
+            if args.grid == "oracle_beats":
+                if beats is None:
+                    return {"skip": "--grid oracle_beats: no tracked beats to fill in around the ground truth"}
+                out["beats"] = annotated_beats(beats[0], beats[1], g)
+            return out
+        from src.grid_sources import score_grid
+
+        def from_seq2seq(notes, bts):
+            with tempfile.TemporaryDirectory() as t2:
+                r = seq.run(e["midi"], t2, mode="meter", beats=bts if seq.info.get("beats") else None)
+            return score_grid(r.tokens, notes[:, 1], notes[:, 0]) if r.tokens else None
+        return {"grid_given": from_seq2seq}
+
     done = []
     for k, e in enumerate(entries):
         dst = out / e["condition"] / f"{e['slug']}.musicxml"
@@ -231,7 +282,12 @@ def main(argv=None):
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 if args.v2:
-                    res = pipe.run(e["midi"], tmp, beats=beats, **kw)
+                    gkw = grid_kwargs(e, beats, kw)
+                    if gkw.get("skip"):
+                        raise RuntimeError(gkw["skip"])
+                    if "beats" in gkw:
+                        beats = gkw.pop("beats")
+                    res = pipe.run(e["midi"], tmp, beats=beats, **kw, **gkw)
                 else:
                     res = pipe.run(e["midi"], tmp, mode=args.mode, beats=beats, **kw)
                 errors, ok = list(res.errors), "musicxml" in res.files

@@ -129,6 +129,8 @@ meter_flags() {
     # bar length (pace/v2_pilot2.sh): the repetition features (src/meter.py rep_features), and bar-length-tolerant targets
     meter_v4_gq_rep_p12k) echo "--gangqinpu --gangqinpu-share 0.5 --rep-features --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     meter_v4_gq_tol_p12k) echo "--gangqinpu --gangqinpu-share 0.5 --tolerant --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
+    # meter_v4_gq_p12k's recipe from the masked-beat pretraining on Aria-MIDI (scripts/pretrain_meter.py)
+    meter_v4_gq_pt_p12k) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     meter_v4_gq_syn_p12k) echo "--gangqinpu --gangqinpu-share 0.5 --synthetic --synthetic-share 0.25 --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     # meter_v4_gq's recipe with other seeds (pace/v2_ensemble.sh: the seed spread, and members of an ensemble)
     meter_v4_gq_s1) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --seed 1" ;;
@@ -209,13 +211,17 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
       eg) out="$out --engraving" ;;
       sw) out="$out --swing" ;;
       dc) out="$out --dur-chooser" ;;
+      og) out="$out --grid oracle" ;;
+      ogt) out="$out --grid oracle_beats" ;;
+      s2g) out="$out --grid seq2seq" ;;
+      rf) out="$out --refine 1" ;;
       keepall) out="$out --delete-above 1" ;;
       missing) out="$out --only-missing" ;;
       pm) out="$out --clean-beats pm2s" ;;
       rpm) out="$out --real-beats pm2s" ;;
       rsb) out="$out --real-beats synth" ;;
       d[0-9]*) out="$out --delete-above 0.${o#d}" ;;
-      *) echo "unknown v2 option $o (tidy, gl, tc, tb, bd, rd, jf, ps, eg, sw, dc, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
+      *) echo "unknown v2 option $o (tidy, gl, tc, tb, bd, rd, jf, ps, eg, sw, dc, og, ogt, s2g, rf, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
     esac
   done
   echo "$out"

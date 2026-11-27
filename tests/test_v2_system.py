@@ -443,7 +443,8 @@ def test_v2_pipeline():
 def test_demo_serves_both():
     """demo/app.py with a v2 and a seq2seq pipeline: /api/info lists both and the default, a job
     runs on the system it names (v2 without the seq2seq context mode, with the page's deletion
-    setting: only when sure by default), an unknown system or setting is refused."""
+    setting: only when sure by default, which is 0.8 for MIDI and 0.95 for audio), an unknown system or
+    setting is refused."""
     try:
         from fastapi.testclient import TestClient
     except Exception:  # noqa: BLE001 (needs httpx)
@@ -466,16 +467,18 @@ def test_demo_serves_both():
         c = TestClient(app)
         info = c.get("/api/info").json()
         assert set(info["systems"]) == {"v2", "seq2seq"} and info["default"] == "v2"
-        for data in ({"system": "v2", "mode": "guarded"}, {"system": "seq2seq", "mode": "guarded"},
-                     {"system": "v2", "delete": "off"}, {"system": "v2", "delete": "trained"}):
-            jid = c.post("/api/jobs", files={"file": ("x.mid", b"MThd")}, data=data).json()["id"]
+        for name, data in (("x.mid", {"system": "v2", "mode": "guarded"}), ("x.mid", {"system": "seq2seq", "mode": "guarded"}),
+                           ("x.mid", {"system": "v2", "delete": "off"}), ("x.mid", {"system": "v2", "delete": "trained"}),
+                           ("x.mp3", {"system": "v2"})):
+            jid = c.post("/api/jobs", files={"file": (name, b"MThd")}, data=data).json()["id"]
             for _ in range(100):
                 if c.get(f"/api/jobs/{jid}").json()["status"] in ("done", "error"):
                     break
                 import time
                 time.sleep(0.05)
-        assert calls == [("v2", {"delete_above": 0.95}), ("seq2seq", {"mode": "guarded"}), ("v2", {"delete_above": 1.0}),
-                         ("v2", {"delete_above": 0.5})], calls
+        # "only when sure": 0.8 for a MIDI upload (src/release.py DELETE_ABOVE_MIDI), 0.95 for a recording
+        assert calls == [("v2", {"delete_above": 0.8}), ("seq2seq", {"mode": "guarded"}), ("v2", {"delete_above": 1.0}),
+                         ("v2", {"delete_above": 0.5}), ("v2", {"delete_above": 0.95})], calls
         assert c.post("/api/jobs", files={"file": ("x.mid", b"MThd")}, data={"system": "v9"}).status_code == 400
         assert c.post("/api/jobs", files={"file": ("x.mid", b"MThd")}, data={"delete": "all"}).status_code == 400
 

@@ -607,7 +607,7 @@ class V2Pipeline(_FrontEnd):
                  tidy: bool = False, glissando: bool = False, timing_check: bool = False,
                  readable: bool = False, fix_jumps: bool = False, timing_beats: bool = False,
                  beat_decode: bool = False, pkspell: bool = False, engraving: bool = False, swing: bool = False,
-                 dur_chooser: bool = False, one_meter: float | None = None):
+                 dur_chooser: bool = False, one_meter: float | None = None, refine: float = 0.0):
         """``glissando``: find glissandos in the notes (src/glissando.py) and write each as its first
         and last note joined by a "gliss." line, not as the run of notes. ``timing_check``: a note
         written on a triplet position but played on a straight eighth or sixteenth is moved there
@@ -669,26 +669,42 @@ class V2Pipeline(_FrontEnd):
         from .dur_chooser import DurChooser
         self.dur_chooser = DurChooser.load(labeller_ckpt.parent, self.device) if dur_chooser else None
         self.dur_chooser_missing = bool(dur_chooser) and self.dur_chooser is None
+        self.refine = float(refine)        # the labeller's bar lines fed back to the meter decoder (src/grid_sources.py)
         self.info = {"system": "v2", "labeller": str(labeller_ckpt), "meter": str(meter_ckpt),
                      "params_M": round((n_lab + n_met) / 1e6, 1), "device": str(self.device),
                      "decode": self.decode_cfg.to_dict()}
 
     # ------------------------------------------------------------------ steps
-    def grid(self, notes: np.ndarray, beats: tuple, fix_jumps: bool | None = None) -> dict:
+    def grid(self, notes: np.ndarray, beats: tuple, fix_jumps: bool | None = None, logp_fn=None) -> dict:
         """The meter model's grid of the whole performance on these beats, with its key signature
-        (``fix_jumps``: the pipeline's setting if None; the count in "jumps_fixed")."""
-        from .meter import cover_notes, predict_grid, refine_grid, uses_aux
+        (``fix_jumps``: the pipeline's setting if None; the count in "jumps_fixed"). ``logp_fn``
+        (beat times, log-probabilities) -> log-probabilities: changes the model's before decoding
+        (src/grid_sources.py spliced_logp: a perfect meter model where the ground truth reaches)."""
+        from .meter import cover_notes, grid_from_logp, predict_logp, refine_grid, uses_aux
         from .notelabels import estimate_key
         # a meter model trained with a second tracker (train_meter.py --aux pm2s) reads PM2S's beats of the notes too
         aux = self.pm2s_beats(notes) if uses_aux(self.meter.cfg) else None
-        g = predict_grid(self.meter, notes, np.asarray(beats[0], np.float64), np.asarray(beats[1], bool),
-                         self.device, self.decode_cfg, aux=aux)
+        bt = np.asarray(beats[0], np.float64)
+        lp = predict_logp(self.meter, notes, bt, np.asarray(beats[1], bool), self.device, aux)
+        if logp_fn is not None and lp is not None:
+            lp = logp_fn(bt, lp)
+        g = grid_from_logp(bt, lp, self.decode_cfg)
         g = refine_grid(g, notes[:, ONSET], self.decode_cfg)  # beat times onto the notes (off unless decode.json says)
         g = cover_notes(g, float(notes[:, ONSET].min()))  # a pickup before the first tracked beat's bar
         g["jumps_fixed"] = 0
         if self.fix_jumps if fix_jumps is None else fix_jumps:
             from .readable import fix_jumps as fix
             g["jumps_fixed"] = fix(g)
+        g["key"] = estimate_key(notes)
+        return g
+
+    def given_grid(self, notes: np.ndarray, grid: dict) -> dict:
+        """A grid from elsewhere (src/grid_sources.py score_grid) made ready as ``grid`` makes the
+        meter model's: bars added before it for a pickup, the key signature."""
+        from .meter import cover_notes
+        from .notelabels import estimate_key
+        g = cover_notes(dict(grid), float(notes[:, ONSET].min()))
+        g["jumps_fixed"] = 0
         g["key"] = estimate_key(notes)
         return g
 
@@ -782,6 +798,7 @@ class V2Pipeline(_FrontEnd):
         if tb:       # whole beats the timing says are straight sixteenths, not the labeller's triplets
             from .timing import check_beats
             beat_fixed = check_beats(notes_out, notes[:, ONSET], grid, list(grid["bars"]))
+        self._last_placed = [(p.src, p.bar, p.pos) for p in notes_out if p.src >= 0 and not p.grace]
         graces = attach_graces(notes_out, list(grid["bars"]))
         tidied = tidy_lengths(notes_out, list(grid["bars"])) if tidy else 0
         rd = self.readable if readable is None else bool(readable)
@@ -831,8 +848,10 @@ class V2Pipeline(_FrontEnd):
             beat_checkpoint: str = "final0", delete_above: float | None = None, tidy: bool | None = None,
             beat_source: str = "beat_this", glissando: bool | None = None, timing_check: bool | None = None,
             readable: bool | None = None, fix_jumps: bool | None = None, timing_beats: bool | None = None,
-            beat_decode: bool | None = None, **_) -> Result:
+            beat_decode: bool | None = None, grid_given=None, logp_fn=None, **_) -> Result:
         """``beats``: (times, down) in the input's seconds, given instead of tracking them.
+        ``grid_given``: the grid from elsewhere instead of the meter model's (a dict, or a function
+        (notes, beats) -> dict or None: src/grid_sources.py); ``logp_fn``: see ``grid``.
         ``beat_checkpoint``: the Beat This! model that tracks them (scripts/system_scores.py gives
         each ASAP test piece the cross-validation model that never heard it). ``beat_source``:
         beat_this (the recording; a MIDI input rendered to audio first) or pm2s (PM2S on the notes:
@@ -891,7 +910,15 @@ class V2Pipeline(_FrontEnd):
             return res
         progress("grid", 0.0, "the metrical grid of the piece")
         t = time.perf_counter()
-        grid = self.grid(notes, beats, fix_jumps=fix_jumps)
+        if grid_given is not None:
+            gg = grid_given(notes, beats) if callable(grid_given) else grid_given
+            if gg is None:
+                res.errors.append("v2: the given grid source has no grid for this input")
+                res.stats = {**self.info, "notes": int(len(notes)), **timing}
+                return res
+            grid = self.given_grid(notes, gg)
+        else:
+            grid = self.grid(notes, beats, fix_jumps=fix_jumps, logp_fn=logp_fn)
         timing["grid_s"] = round(time.perf_counter() - t, 1)
         t = time.perf_counter()
         found = []
@@ -899,9 +926,24 @@ class V2Pipeline(_FrontEnd):
             from .glissando import find_glissandi, inner_mask
             found = find_glissandi(notes)
         drop = ~inner_mask(len(notes), found) if found else None
-        tokens, counts = self.label(notes, pedal, grid, progress, delete_above=delete_above, tidy=tidy,
-                                    glissandi=found, drop=drop, timing_check=timing_check, readable=readable,
-                                    timing_beats=timing_beats, beat_decode=beat_decode)
+        lab_kw = dict(delete_above=delete_above, tidy=tidy, glissandi=found, drop=drop, timing_check=timing_check,
+                      readable=readable, timing_beats=timing_beats, beat_decode=beat_decode)
+        tokens, counts = self.label(notes, pedal, grid, progress, **lab_kw)
+        refined = None
+        if self.refine > 0 and grid_given is None:   # the labeller's bar lines back into the decoder, then label again
+            from .grid_sources import labeller_bar_votes, with_votes
+            votes = labeller_bar_votes(self._last_placed, grid, notes[:, ONSET], beats[0])
+            base_fn = logp_fn
+
+            def fn(bt, lp):
+                lp = base_fn(bt, lp) if base_fn is not None else lp
+                return with_votes(lp, votes, self.refine)
+            grid2 = self.grid(notes, beats, fix_jumps=fix_jumps, logp_fn=fn)
+            refined = int(len(set(np.round(np.asarray(grid2.get("bar_t", []), np.float64), 2))
+                              ^ set(np.round(np.asarray(grid.get("bar_t", []), np.float64), 2))))
+            if refined:
+                grid = grid2
+                tokens, counts = self.label(notes, pedal, grid, progress, **lab_kw)
         gl = counts.pop("glissandi")
         timing["score_s"] = round(time.perf_counter() - t, 1)
         res.tokens = tokens
@@ -923,6 +965,7 @@ class V2Pipeline(_FrontEnd):
                      **counts, "tokens": len(tokens), "export": export,
                      "glissando": bool(self.glissando if glissando is None else glissando),
                      "jumps_fixed": int(grid.get("jumps_fixed", 0)),
+                     "refine": self.refine, "refined_bar_lines": refined,
                      "glissandi_found": len(found),
                      "glissandi": [{k: v for k, v in g.items() if k not in ("start", "end", "inner")}
                                    | {"bar": int(g["start"][0]) + 1} for g in gl],

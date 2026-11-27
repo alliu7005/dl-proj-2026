@@ -972,6 +972,27 @@ windows and on whole pieces, the new defaults, seq2seq with Gangqinpu against se
 against v2), and round 9's `outputs/compare` and `paired.md`. If `sf_c128_gq30` is not finished after
 its three jobs, `STAGES=seq2seq bash pace/v2_round12.sh` resumes it. Nothing is published (`PUBLISH=0`).
 
+## 4ab. Thirteenth round: what a better grid is worth, and meter pretraining
+
+The grid is v2's bottleneck (onset F1 0.78-0.86 on the true grid, 0.26-0.49 on the meter models'),
+and every meter idea so far moved it little. `pace/v2_round13.sh`:
+- **grid** (starts at once, ~4 GPU hours): whole pieces of the release with a perfect meter model on
+  its tracked beats (`_og`, the ceiling of any meter fix), with the annotated beats too (`_ogt`), on
+  the seq2seq system's score aligned to the performance (`_s2g`: seq2seq is ~2 MUSTER better on
+  ASAP and writes its bar lines from the notes), and with the labeller's bar lines fed back to the
+  decoder (`_rf`). `src/grid_sources.py`; `system_scores.py --grid / --refine`.
+- **pretrain** (waits for every job already queued, round 12, unless `PRETRAIN_AFTER=now`):
+  Aria-MIDI's unique subset (32,522 solo-piano transcriptions, CC-BY-NC-SA 4.0,
+  `scripts/fetch_aria_midi.py`), PM2S's beats of each, the meter model pretrained to rebuild masked
+  beats (`scripts/pretrain_meter.py`), then the pilot's 12k-step recipe from it
+  (`meter_v4_gq_pt_p12k`) against the same recipe from scratch (`meter_v4_gq_p12k`).
+
+```bash
+git pull && bash pace/v2_round13.sh        # 9 jobs
+```
+
+`outputs/round13/report.md`: section 1 (the grid) after `g1final`, section 2 (pretraining) after `p1final`.
+
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 
 The grid is v2's bottleneck: the labeller's window onset F1 is 0.78-0.86 on the true grid and
