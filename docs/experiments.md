@@ -1662,6 +1662,73 @@ else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the releas
 the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
 the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
+### Pilot design: every idea at small scale (2026-11-26)
+
+`pace/v2_pilot.sh` (pace/README.md, 4w) runs before any full-scale run.
+- **A: ensembles, with no training.** The release's meter model on 5 views (`meter_v4_gq_tta`).
+  Round 7's three PM2S meter models (michael branch: `meter_v4_gq_pm`, `_pm_s1`, `_pm_g30`)
+  averaged (`meter_v4_gq_pm_ens3`).
+- **B: synthetic performances of written scores** (`src/synthetic.py`). PDMX's public-domain
+  MusicXML scores, rendered with a random tempo, rubato, timing noise, articulation and a mild
+  accent of random strength; the grid exact. More data was the meter model's largest gain so far
+  (sixth round), and synthetic performances can supply the meters the real data lacks. Pilot:
+  3,000 scores, meter_v4_gq's recipe for 12k steps without and with them (a quarter of every
+  batch).
+- **C: PM2S with the ninth round's stable optimisation.** 16k steps at two rates, to check that the
+  loss stays down before the 2 x 7.5 h full run.
+- **D: the deletion threshold at 0.8** on the release.
+- **E: choosing seq2seq or v2 per piece.** Its ceiling only. On round 7's scores (michael branch),
+  taking the better system on every performance gains 0.11 over seq2seq alone with v2's Beat This!
+  path, and 0.63 with its PM2S path (real recordings). On Gangqinpu, v2 leads by over 3 points. A
+  selector without the reference gets part of that at best.
+- **Considered and not run:**
+  - choosing between candidate grids by the labeller's confidence: the fifth round measured that
+    confidence on the level choice, and its best setting on validation was never to switch;
+  - a larger meter model: it overfit in the third round;
+  - training the labeller on the meter model's grids: its targets are the score, which a wrong
+    grid cannot express.
+
+### Eleventh round design: meter ensembles (2026-11-26)
+
+`pace/v2_ensemble.sh` (pace/README.md, 4v). The meter model is the bottleneck, and it is noisy:
+
+- **The grid decides.** The labeller's window onset F1 is 0.78-0.86 on the true grid and 0.26-0.49
+  on the meter models' grids. On the oracle grid (every meter head right on the same tracked beats)
+  it is 0.66-0.72. A different labeller barely moves it (eighth round: 0.498 for both on the same
+  grid), so the gap is the meter model's.
+- **One recipe, very different models.** Third round: three seeds of `meter_v3` at 0.57-0.64
+  time-signature accuracy on PERiScoPe, up to 0.09 apart on the real test set. Eighth round:
+  `meter_v3_s1_tp` +0.93 MUSTER against `meter_v3_tp` on clean whole pieces. The michael branch's
+  seventh round: `meter_v4_gq_pm`'s second seed -0.25 / -0.14 (real / clean). Most changes measured
+  are smaller than that.
+- **Bigger does not help.** `meter_v3_large` (14.2M parameters against 4.8M) overfit: worse on
+  every test set.
+- **What the errors are.** Most wrong bars are at the wrong note-value level or bar length (3/4 as
+  3/8, 2/2 as 2/4, 6/4 as 6/8, 2/4 as 4/4): choices that seeds disagree on.
+
+Variance across seeds with no gain from size is what averaging models removes. So the round:
+- **`meter_v4_gq_s1`, `meter_v4_gq_s2`:** the release's recipe, seeds 1 and 2. They show the
+  spread on today's system, and they are the ensemble's members.
+- **`src/meter.py` MeterEnsemble:** the members' probabilities averaged per beat and head (a
+  mixture: the log of the mean probability) before the consistent decoder.
+  - A view is the performance transposed or stretched in time, within the training augmentation's
+    range (`TTA_VIEWS`: as is, -3 / +3 semitones, x0.9 / x1.1). The beats stay the same beats, so
+    the outputs line up.
+  - Averaged probabilities are less peaked than one model's, so each ensemble gets its own
+    decoder, tuned on validation exactly as the release's (`--tune --tempo-prior`).
+- **Systems:** `meter_v4_gq_tta` (the release's model on 5 views: no training), `meter_v4_gq_ens3`
+  (3 seeds), `meter_v4_gq_ens3t` (3 seeds x 5 views), and `meter_v4_gq_ens4` when this account's
+  `meter_v4_gq` differs from the published one (a fourth member for free).
+- **Measured:** whole pieces with `nl_gq` at the release's settings on ASAP and Gangqinpu, paired
+  against `nl_gq` + `meter_v4_gq`. Also the deletion threshold at 0.8, on the release and on
+  `ens3t`: on the michael branch's seventh round it was -0.03 / -0.13, small but sure on both.
+- **The verdict** (`scripts/ensemble_report.py`), the project's rule for a change: better beyond
+  chance on a condition and worse on none.
+- **Cost:** an ensemble of n members x v views runs the meter model n x v times. It is 4.8M
+  parameters, run once per piece: well under a second per piece on a GPU, a few seconds on a CPU.
+- **The release.** An ensemble is not a single checkpoint, so `publish_model.py` does not publish
+  it. If one wins, the release format needs a meter slot with several members.
+
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
 The whole repository was reviewed for errors (four reviews in parallel, each finding reproduced

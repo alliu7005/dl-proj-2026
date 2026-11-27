@@ -62,6 +62,12 @@
 #                          evaluated with it (true grid, meter_v4_gq's grids: modes *_bd), published
 #   localtempo <meter>     <meter>_lt: the same checkpoint with the decoder's local tempo term
 #                          (src/meter.py local_tempo_logprior) tuned on validation and evaluated
+#   ensemble <name> <none|tta> <member>...
+#                          <name>: the finished meter models read together, their probabilities
+#                          averaged before the decoder (scripts/make_ensemble.py; tta: each also on
+#                          4 more views of the performance, transposed and stretched), its decoder
+#                          tuned on validation (--tune --tempo-prior), evaluated, and on Gangqinpu's
+#                          real recordings (gangqinpu_real); never published (no single checkpoint)
 #   gqbase <meter>...      these finished meter models evaluated on the Gangqinpu test set too
 #                          (eval_meter.py --conditions gangqinpu, their own decoders), so the new
 #                          models trained with it have something to beat
@@ -112,6 +118,13 @@ meter_flags() {
     meter_v4_gq_pmho) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_ho.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
     # and for PM2S retrained with stable optimisation (pace/v2_pm2s2.sh: PM2S_WEIGHTS / PM2S_TAG=hos)
     meter_v4_gq_pmhs) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_hos.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
+    # pilot (pace/v2_pilot.sh): meter_v4_gq's recipe for 12k steps, without and with synthetic
+    # performances of written scores (scripts/build_synthetic_meter.py) as a quarter of every batch
+    meter_v4_gq_p12k) echo "--gangqinpu --gangqinpu-share 0.5 --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
+    meter_v4_gq_syn_p12k) echo "--gangqinpu --gangqinpu-share 0.5 --synthetic --synthetic-share 0.25 --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
+    # meter_v4_gq's recipe with other seeds (pace/v2_ensemble.sh: the seed spread, and members of an ensemble)
+    meter_v4_gq_s1) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --seed 1" ;;
+    meter_v4_gq_s2) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --seed 2" ;;
     # meter_v4_gq trained longer (its best checkpoint was at 56,000 of its 60,000 steps)
     meter_v4_gql) echo "--gangqinpu --gangqinpu-share 0.5 --steps 100000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     # (earlier: meter_v3 fine-tuned on the Gangqinpu mix)
@@ -124,7 +137,7 @@ meter_eval_flags() {  # how a finished meter run is tuned before its evaluation
     # its bar / step / time-signature heads are meter_v3's: meter_v3_tp's decoder, the level tuned on top
     meter_v3_th) echo "--level --decode-from outputs/runs/meter_v3_tp/decode.json" ;;
     meter_v3_ft) echo "--tune --tempo-prior --level" ;;
-    meter_v4_gq|meter_v4_gq_both|meter_v4_gq_posh|meter_v3_gqft|meter_v4_gql) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
+    meter_v4_gq|meter_v4_gq_both|meter_v4_gq_posh|meter_v3_gqft|meter_v4_gql|meter_v4_gq_s1|meter_v4_gq_s2|meter_v4_gq_p12k|meter_v4_gq_syn_p12k) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
     # its decoder tuned for the tracker it was trained for (tested with it by the trackers task)
     meter_v4_gq_pm|meter_v4_gq_pm_s1|meter_v4_gq_pm_g30) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s.json" ;;
     meter_v4_gq_pmho) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_ho.json" ;;
@@ -196,7 +209,7 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
   echo "$out"
 }
 
-task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo, levelexp, refine, gqbase, trackers, beatdecode, localtempo}
+task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo, levelexp, refine, gqbase, trackers, beatdecode, localtempo, ensemble}
 shift
 case "$task" in
   meters)
@@ -258,6 +271,26 @@ case "$task" in
     ln -sf "../$m/best.pt" "outputs/runs/$lt/best.pt"
     for f in config.json status.json decode.json; do cp "outputs/runs/$m/$f" "outputs/runs/$lt/$f"; done
     python scripts/eval_meter.py --run "$lt" --local-tempo || exit 1
+    exit 0 ;;
+  ensemble)   # <name> <none|tta> <member>...: an ensemble run (scripts/make_ensemble.py), its own decoder tuned, evaluated
+    e=${1:?ensemble <name> <none|tta> <member>...}; v=${2:?ensemble <name> <none|tta> <member>...}
+    shift 2
+    for m in "$@"; do
+      if ! done_run "$m" || [ ! -f "outputs/runs/$m/best.pt" ]; then echo "$e: member $m not finished, skipped"; exit 1; fi
+    done
+    python scripts/make_ensemble.py --name "$e" --views "$v" --members "$@" || exit 1
+    # ENS_KIND=pm2s: members trained for the released PM2S's beats (meter_v4_gq_pm...): tuned with its
+    # errors and tested with its beats, as meter_eval_flags / the trackers task do for them
+    tune="--tune --tempo-prior"; [ "${ENS_KIND:-bt}" = pm2s ] && tune="$tune --tune-noise configs/beat_noise_pm2s.json"
+    if [ ! -f "outputs/runs/$e/eval_meter.json" ] || [ ! -f "outputs/runs/$e/decode.json" ]; then
+      # shellcheck disable=SC2086
+      python scripts/eval_meter.py --run "$e" $tune || exit 1   # as its members (meter_eval_flags)
+    fi
+    if [ "${ENS_KIND:-bt}" = pm2s ]; then
+      python scripts/eval_meter.py --run "$e" --tracker pm2s || exit 1
+    else   # Beat This!'s real beats of Gangqinpu's test recordings (gangqinpu_real), as the trackers task does
+      python scripts/eval_meter.py --run "$e" --real-tracked --conditions gangqinpu || exit 1
+    fi
     exit 0 ;;
   grids)
     ok=0

@@ -928,17 +928,137 @@ def predict_logp(model, notes: np.ndarray, beat_t: np.ndarray, beat_d: np.ndarra
                  aux=None) -> dict | None:
     """The model's per-beat log-probabilities {bar, step, ts} for a whole performance (None with
     fewer than 2 beats). ``aux``: a second tracker's (times, downbeats), for a model that reads
-    one (``uses_aux``)."""
+    one (``uses_aux``). A ``MeterEnsemble``: every member on every one of its views of the
+    performance (``view_of``), their probabilities averaged (``mean_logp``); a single model is
+    the one member and the one view (the performance as it is)."""
     import torch
     beat_t = np.asarray(beat_t, np.float64)
-    feats = beat_features(notes, beat_t, beat_d, aux)
-    if len(feats) < 2:
+    if len(beat_t) < 2:
         return None
-    model.eval()
+    members = list(getattr(model, "members", None) or [model])
+    views = tuple(getattr(model, "views", None) or (IDENTITY_VIEW,))
+    outs = []
     with torch.no_grad():
-        x, mask, nin, _ = collate([(feats, None, beat_t, note_inputs(notes, beat_t))], device)
-        out = model(x, mask, nin)
-        return logp_of(out)
+        for view in views:
+            vn, vt, va = view_of(notes, beat_t, aux, view)
+            feats = beat_features(vn, vt, beat_d, va)
+            x, mask, nin, _ = collate([(feats, None, vt, note_inputs(vn, vt))], device)
+            for m in members:
+                m.eval()
+                outs.append(logp_of(m(x, mask, nin)))
+    return outs[0] if len(outs) == 1 else mean_logp(outs)
+
+
+# ---------------------------------------------------------------------------------------------
+# ensembles: several meter models, and the same performance seen several ways (test-time views)
+# ---------------------------------------------------------------------------------------------
+# Meter models of one recipe differ a lot from seed to seed (third round: time-signature accuracy
+# 0.57-0.64 on PERiScoPe, up to 0.09 apart on the real test set; eighth round: up to ~0.9 MUSTER on
+# whole pieces), and a larger model overfits. Averaging the probabilities of several seeds is the
+# usual answer to that variance. A view is the performance transposed and stretched in time as the
+# training augmentation does (Augment), so the model's answers on it are as valid as on the input;
+# averaging over views is a cheaper ensemble of the same model.
+
+IDENTITY_VIEW = (0, 1.0)            # (semitones, time factor): the performance as it is
+TTA_VIEWS = ((0, 1.0), (-3, 1.0), (3, 1.0), (0, 0.9), (0, 1.1))
+ENSEMBLE_FILE = "ensemble.json"     # in a run folder in place of best.pt: the members and views
+
+
+def view_of(notes: np.ndarray, beat_t: np.ndarray, aux, view) -> tuple:
+    """(notes, beat times, aux) of the performance transposed by ``view[0]`` semitones (kept on the
+    keyboard, A0-C8: the shift is clipped as Augment does) and every time multiplied by
+    ``view[1]``; the identity view returns the inputs themselves. The beats stay the same beats in
+    the same order, so the model's per-beat outputs line up with the original's."""
+    k, s = int(view[0]), float(view[1])
+    if k == 0 and s == 1.0:
+        return notes, beat_t, aux
+    n = np.array(notes, np.float64, copy=True)
+    if len(n) and k:
+        k = min(max(k, int(21 - n[:, 0].min())), int(108 - n[:, 0].max()))
+        n[:, 0] += k
+    n[:, 1:3] *= s
+    a = None if aux is None else (np.asarray(aux[0], np.float64) * s, aux[1])
+    return n.astype(np.float32), np.asarray(beat_t, np.float64) * s, a
+
+
+def mean_logp(lps: list) -> dict:
+    """The log of the mean probability of every head over several ``logp_of`` outputs (a mixture
+    of the members and views); with a tempo head in all of them, the mixture's mean and std of
+    the piece's log written tempo."""
+    out = {}
+    for h in lps[0]:   # the heads every member has (a position-in-bar head only when all have one)
+        if h == "tempo" or any(h not in lp for lp in lps):
+            continue
+        a = np.stack([lp[h] for lp in lps])
+        m = a.max(0)
+        out[h] = m + np.log(np.exp(a - m).mean(0))
+    if all("tempo" in lp for lp in lps):
+        mu = np.array([lp["tempo"][0] for lp in lps], np.float64)
+        sd = np.array([lp["tempo"][1] for lp in lps], np.float64)
+        out["tempo"] = np.array([mu.mean(), math.sqrt(float((sd ** 2).mean() + mu.var()))])
+    return out
+
+
+class MeterEnsemble:
+    """Several meter models read together (``predict_logp``): ``members`` (built, loaded, in eval
+    mode), ``views`` ((semitones, time factor) pairs). ``cfg`` is the first member's: every member
+    must read the same evidence (all or none a second tracker: ``uses_aux``). Quacks like a model
+    where the pipeline and the scripts use one (.cfg, .eval(), .to(), .parameters())."""
+
+    def __init__(self, members: list, views=(IDENTITY_VIEW,), names=None):
+        if not members:
+            raise ValueError("an ensemble needs at least one member")
+        if len({uses_aux(m.cfg) for m in members}) > 1:
+            raise ValueError("the members do not read the same evidence (some read a second tracker)")
+        self.members = list(members)
+        self.views = tuple((int(k), float(s)) for k, s in views)
+        self.names = list(names or [])
+        self.cfg = members[0].cfg
+
+    def eval(self):
+        for m in self.members:
+            m.eval()
+        return self
+
+    def to(self, device):
+        self.members = [m.to(device) for m in self.members]
+        return self
+
+    def parameters(self):
+        for m in self.members:
+            yield from m.parameters()
+
+    @staticmethod
+    def spec(path) -> dict:
+        import json
+        from pathlib import Path
+        d = json.loads(Path(path).read_text())
+        if not d.get("members"):
+            raise ValueError(f"{path}: no members")
+        return d
+
+
+def load_meter(ckpt, device="cpu"):
+    """A meter model from its checkpoint, built and in eval mode; a run folder with an
+    ``ensemble.json`` and no checkpoint (scripts/make_ensemble.py) gives a ``MeterEnsemble``: its
+    members' checkpoints (paths relative to the runs folder, the ensemble folder's parent) and its
+    views."""
+    from pathlib import Path
+
+    import torch
+    ckpt = Path(ckpt)
+    ens = ckpt.parent / ENSEMBLE_FILE
+    if ens.exists() and not ckpt.exists():
+        spec = MeterEnsemble.spec(ens)
+        runs = ckpt.parent.parent
+        members = [load_meter(runs / p, device) for p in spec["members"]]
+        if any(isinstance(m, MeterEnsemble) for m in members):
+            raise ValueError(f"{ens}: a member is an ensemble itself (list its members instead)")
+        return MeterEnsemble(members, spec.get("views") or (IDENTITY_VIEW,), spec["members"])
+    ck = torch.load(ckpt, map_location=device, weights_only=False)
+    model = build_meter_model(ck["config"]).to(device)
+    model.load_state_dict(ck["model"])
+    return model.eval()
 
 
 def logp_of(out: dict, b: int = 0) -> dict:

@@ -605,7 +605,7 @@ class V2Pipeline(_FrontEnd):
         split as before, and the stats say so). All off by default:
         the scoring script measures each as its own system."""
         from .labeller import load_labeller
-        from .meter import DecodeConfig, build_meter_model
+        from .meter import DecodeConfig, load_meter
         from .notelabels import LabelSpace
         labeller_ckpt, meter_ckpt = Path(labeller_ckpt), Path(meter_ckpt)
         if device == "auto":
@@ -614,9 +614,7 @@ class V2Pipeline(_FrontEnd):
         self.amp = self.device.type == "cuda" and torch.cuda.is_bf16_supported()
         self.labeller = load_labeller(labeller_ckpt, self.device)
         self.cfg = self.labeller.cfg
-        ck = torch.load(meter_ckpt, map_location=self.device, weights_only=False)
-        self.meter = build_meter_model(ck["config"]).to(self.device).eval()
-        self.meter.load_state_dict(ck["model"])
+        self.meter = load_meter(meter_ckpt, self.device)   # an ensemble run: its members and views (src/meter.py)
         dfile = meter_ckpt.parent / "decode.json"
         self.decode_cfg = (DecodeConfig.from_dict(json.loads(dfile.read_text())["decode"]) if dfile.exists()
                            else DecodeConfig())

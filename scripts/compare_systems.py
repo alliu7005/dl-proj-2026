@@ -125,6 +125,16 @@ PAIRS = [  # (A, B, what A changes)
     ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_jf_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd", "nl_gq_mc + decoding: the short-bar fix"),
     ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd",
      "nl_gq_mc + decoding: every rule"),
+    # eleventh round (pace/v2_ensemble.sh): meter ensembles against the release's single meter model
+    (GQ_NL + "_meter_v4_gq_s1_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "meter_v4_gq's second seed (chance)"),
+    (GQ_NL + "_meter_v4_gq_s2_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "meter_v4_gq's third seed (chance)"),
+    (GQ_NL + "_meter_v4_gq_tta_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "the release's meter model on 5 views (TTA)"),
+    (GQ_NL + "_meter_v4_gq_ens3_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "3 meter seeds averaged"),
+    (GQ_NL + "_meter_v4_gq_ens3t_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "3 meter seeds x 5 views averaged"),
+    (GQ_NL + "_meter_v4_gq_ens4_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "4 meter models averaged"),
+    (GQ_NL + "_meter_v4_gq_ens3t_d95_tidy", GQ_NL + "_meter_v4_gq_ens3_d95_tidy", "the views on top of 3 seeds"),
+    (GQ_NL + "_meter_v4_gq_d80_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "the release deleting above p 0.8"),
+    (GQ_NL + "_meter_v4_gq_ens3t_d80_tidy", GQ_NL + "_meter_v4_gq_d95_tidy", "3 seeds x 5 views, deleting above p 0.8"),
 ]
 
 

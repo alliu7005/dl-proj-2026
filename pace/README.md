@@ -846,6 +846,90 @@ To bring the results back:
 cd ~/scratch/dl-proj-2026 && tar czf v2_decode2.tgz outputs/rule_verdict.json outputs/rule_verdict.md outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md slurm-d2*.out 2>/dev/null; ls -la v2_decode2.tgz
 ```
 
+## 4w. The pilot: every idea at small scale (before 4v)
+
+Before any full-scale run, `pace/v2_pilot.sh` tries each idea for beating the release cheaply, and
+`outputs/pilot/report.md` gives each a go / no go (`scripts/pilot_report.py`):
+
+| | idea | at pilot scale |
+|---|---|---|
+| A | meter ensembles | no training: the release's meter model on 5 views of each performance; round 7's three PM2S meter models averaged |
+| B | synthetic performances of written scores (PDMX) | 3,000 scores; meter_v4_gq's recipe for 12k steps without and with them |
+| C | PM2S retrained with stable optimisation | 16k steps at two rates: does the loss stay down |
+| D | deleting above p 0.8 | on the release |
+| E | choosing seq2seq or v2 per piece | its ceiling, from the scores |
+
+**Before you start:** `git fetch && git checkout michael && git pull`; the queue empty (8 jobs). For
+B, the scores once, on the login node (compute nodes may have no internet; about 2 GB):
+
+```bash
+python scripts/fetch_pdmx.py --list          # the Zenodo record's files
+python scripts/fetch_pdmx.py --max 20000     # the scores' archive -> data/raw/pdmx/mxl/
+bash pace/v2_pilot.sh
+```
+
+Without the scores, B is skipped (the script says so) and the rest runs. Nothing is published.
+About 4-6 hours; `q1final` writes the report.
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_pilot.tgz outputs/pilot outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/runs/meter_v4_gq*/eval_meter.json outputs/runs/meter_v4_gq*/decode.json outputs/runs/meter_v4_gq_*p12k/log.csv outputs/runs/pm2s_pilot*/log.csv data/processed/meter/synthetic_report.json slurm-q1*.out slurm-met_meter_v4_gq_*p12k*.log slurm-pm2s_pilot*.log 2>/dev/null; ls -la v2_pilot.tgz
+```
+
+```bash
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_pilot.tgz . && tar xzf v2_pilot.tgz
+```
+
+## 4v. Eleventh round: meter ensembles (any time after 4q)
+
+The grid is v2's bottleneck: the labeller's window onset F1 is 0.78-0.86 on the true grid and
+0.26-0.49 on the meter models' grids. And meter models of one recipe differ a lot from seed to seed
+(time-signature accuracy up to 0.09 apart; ~0.9 MUSTER on whole pieces), more than most changes
+measured, while a larger model overfits. This round averages several meter models' probabilities
+before the decoder (`src/meter.py` MeterEnsemble, `scripts/make_ensemble.py`), each ensemble with its
+own decoder tuned on validation, and measures them on whole pieces against the release's
+`nl_gq` + `meter_v4_gq`. Nothing is published (`PUBLISH=0`).
+
+**Before you start:** `git fetch && git checkout michael && git pull` (this round's code is on `michael`), and the pilot (4w) first;
+room for 7 jobs in the queue. The script lists any earlier round's file it needs and stops if one is
+missing. `nl_gq` and `meter_v4_gq` come from the model repo (`scripts/install_run.py`) when this
+account has not trained them; when this account's `meter_v4_gq` is a different training of the same
+recipe, the published one joins as a fourth member (`meter_v4_gq_ens4`).
+
+```bash
+bash pace/v2_ensemble.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `e1tests` | the test suites (CPU) | - |
+| `e1prep` | models from the repo where missing; Gangqinpu's whole test pieces if missing; `meter_v4_gq_tta` (the release's model on 5 views: as is, -3 / +3 semitones, x0.9 / x1.1 time) | `e1tests` |
+| `e1train` | `meter_v4_gq_s1`, `meter_v4_gq_s2` (the release's recipe, seeds 1 and 2), about 3 h | `e1tests` |
+| `e1ens` | `meter_v4_gq_ens3` (3 seeds), `meter_v4_gq_ens3t` (3 seeds x 5 views), `meter_v4_gq_ens4` (if made) | `e1train`, `e1prep` |
+| `e1asap`, `e1gq` | whole pieces with `nl_gq` at the release's settings (`tidy,d95`), every meter model above; and `d80` on the release and on `ens3t` | `e1ens` (finished or not), `e1prep` |
+| `e1final` | Beyer & Dai's metrics on both test sets, `paired.md`, `outputs/round11/report.md` | `e1asap`, `e1gq` (finished or not) |
+
+**What to check:** `outputs/round11/report.md`: the meter scores of every seed and ensemble, the
+whole pieces paired against the release, and the verdict (better beyond chance on a condition and
+worse on none). The single seeds against the release show how far chance alone moves it.
+
+**If something goes wrong:**
+- *A seed did not finish in 7.5 h* (`e1ens` and after are cancelled): `bash pace/v2_ensemble.sh` again
+  (it resumes from `last.pt`; what finished is kept).
+- *Only the ensembles and the evaluation again:* `STAGE=eval bash pace/v2_ensemble.sh`.
+- *`e1prep` failed on the download* (a private repo needs `hf auth login` once): log in and run again.
+
+To bring the results back (PACE, then your machine, from the repo folder):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_ensemble.tgz outputs/round11 outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/runs/meter_v4_gq*/eval_meter.json outputs/runs/meter_v4_gq*/decode.json outputs/runs/meter_v4_gq_*/config.json outputs/runs/meter_v4_gq_s*/log.csv slurm-e1*.out slurm-met_meter_v4_gq_s*.log 2>/dev/null; ls -la v2_ensemble.tgz
+```
+
+```bash
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_ensemble.tgz . && tar xzf v2_ensemble.tgz
+```
+
 ## 5. Compare the runs and bring results back
 
 ```bash

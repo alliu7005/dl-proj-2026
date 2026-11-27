@@ -288,6 +288,11 @@ def main(argv=None):
     ap.add_argument("--gangqinpu-share", type=float, default=0.5,
                     help="share of every batch drawn from Gangqinpu (0 = in proportion to its size, like the others)")
     ap.add_argument("--val-gangqinpu", type=int, default=150, help="Gangqinpu validation performances (fixed draw)")
+    ap.add_argument("--synthetic", action=argparse.BooleanOptionalAction, default=False,
+                    help="also train on synthetic performances of written scores (scripts/build_synthetic_meter.py: "
+                         "meter/train_synthetic.pkl; src/synthetic.py)")
+    ap.add_argument("--synthetic-share", type=float, default=0.25,
+                    help="the share of every batch drawn from the synthetic performances (with --synthetic)")
     ap.add_argument("--beat-noise", default="configs/beat_noise.json",
                     help="the tracker's fitted errors the ground-truth beats get (configs/beat_noise_pm2s.json: PM2S)")
     ap.add_argument("--real-beats", choices=("tracked", "simulated"), default="tracked",
@@ -339,6 +344,12 @@ def main(argv=None):
         if not sources["gangqinpu"]:
             raise SystemExit(f"--gangqinpu: no {data / 'meter' / 'train_gangqinpu.pkl'} "
                              "(scripts/build_meter_data.py --gangqinpu <release> --gangqinpu-only)")
+    if args.synthetic:
+        sources["synthetic"] = load(data, "train_synthetic")
+        if not sources["synthetic"]:
+            raise SystemExit(f"--synthetic: no {data / 'meter' / 'train_synthetic.pkl'} (scripts/build_synthetic_meter.py)")
+        if not 0.0 < args.synthetic_share < 1.0 or args.synthetic_share + (args.gangqinpu_share if args.gangqinpu else 0) >= 1:
+            raise SystemExit("--synthetic-share must be in (0, 1), and with --gangqinpu-share below 1")
     if not 0.0 <= args.gangqinpu_share < 1.0:
         raise SystemExit("--gangqinpu-share must be in [0, 1)")
     tracked_counts, aux_counts = {}, {}
@@ -454,6 +465,8 @@ def main(argv=None):
         os.replace(st, run / "status.json")
 
     shares = {"gangqinpu": args.gangqinpu_share} if args.gangqinpu and args.gangqinpu_share > 0 else {}
+    if args.synthetic:   # never validated on: the selection stays on the real sources
+        shares["synthetic"] = args.synthetic_share
     stream = Stream(train, mixed_weights(sources, args.balance, shares), noise, note_noise, args.batch, args.chunk,
                     args.chunk_min or max(args.chunk // 4, 2), args.seed * 100003 + step,
                     Augment() if args.augment else None,

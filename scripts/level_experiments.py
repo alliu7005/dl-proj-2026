@@ -34,7 +34,7 @@ from scripts.eval_meter import CONDITIONS, SEED, VAL, tracked  # noqa: E402
 from scripts.train import pick_device  # noqa: E402
 from scripts.train_meter import load  # noqa: E402
 from src.beats import BeatNoise  # noqa: E402
-from src.meter import (LEVEL_TOL, LEVELS, DecodeConfig, build_meter_model, grid_from_logp, level_ratio,  # noqa: E402
+from src.meter import (LEVEL_TOL, LEVELS, DecodeConfig, load_meter, grid_from_logp, level_ratio,  # noqa: E402
                        piece_qpm, predict_logp, scale_grid)
 
 STAYS = (0.0, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0)
@@ -128,9 +128,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     device = pick_device(args.device)
     data, run = Path(args.data), Path(args.runs_dir) / args.meter
-    ck = torch.load(run / "best.pt", map_location=device, weights_only=False)
-    model = build_meter_model(ck["config"]).to(device)
-    model.load_state_dict(ck["model"])
+    model = load_meter(run / "best.pt", device)   # an ensemble run too (scripts/make_ensemble.py)
     dfile = run / "decode.json"
     cfg = DecodeConfig.from_dict(json.loads(dfile.read_text())["decode"]) if dfile.exists() else DecodeConfig()
     cfg = DecodeConfig(**{**cfg.to_dict(), "level_weight": 0.0, "level_model_weight": 0.0})   # as decoded

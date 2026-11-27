@@ -68,6 +68,13 @@ scripts/fetch_gangqinpu.py       v2: download the Gangqinpu release's Parquet (g
 scripts/compare_beats.py         PM2S against Beat This! on the whole-piece test inputs, scored against the ASAP beat annotations
 scripts/fit_pm2s_noise.py        PM2S's beat-tracking errors fitted on Gangqinpu -> configs/beat_noise_pm2s.json (training a meter model for PM2S)
 scripts/train_pm2s.py            PM2S's beat model retrained from scratch on our training splits only (pm2s_ho; PM2S_WEIGHTS / PM2S_TAG use it); --betas/--eps/--clip/--schedule cosine/--warmup: the stable settings
+src/synthetic.py                 v2: synthetic performances of written scores for the meter model (tempo, rubato, timing, articulation, velocity; exact grids)
+scripts/fetch_pdmx.py            PDMX's public-domain MusicXML scores from Zenodo -> data/raw/pdmx/mxl (resumable; login node)
+scripts/build_synthetic_meter.py v2: piano scores rendered (src/synthetic.py) -> data/processed/meter/{train,val}_synthetic.pkl + synthetic_report.json
+scripts/pilot_report.py          the pilot's report: each idea at small scale with a go / no go -> outputs/pilot/report.md
+scripts/make_ensemble.py         v2: a meter run that is several meter models (and / or views of the performance) averaged before the decoder (src/meter.py MeterEnsemble)
+scripts/install_run.py           a run published to the model repo installed as a finished run under outputs/runs (a model trained on another account)
+scripts/ensemble_report.py       the eleventh round's report: seeds and ensembles on the meter scores and whole pieces, paired against the release -> outputs/round11/report.md
 scripts/pick_run.py              the best of several finished runs by their own validation score, linked under one name (chosen.json)
 scripts/fetch_gangqinpu_audio.py Gangqinpu's recordings from the URLs the release lists (politely, resumable; for Beat This! on real audio)
 scripts/build_gangqinpu_windows.py v2: Gangqinpu's written scores as labeller / seq2seq windows -> data/processed/{train,val,test}_gangqinpu (+ report.json)
@@ -92,6 +99,8 @@ pace/v2_release.sh               the release: its configuration scored on whole 
 pace/v2_level.sh                 v2 fifth round: the written-tempo head for the note-value level, trained, tuned, scored
 pace/v2_gangqinpu.sh             v2 sixth round: meter models trained with Gangqinpu; the grid's beat times taken from the notes
 pace/v2_pm2s.sh                  v2 seventh round: PM2S retrained without our test pieces, its beats on whole pieces, a meter model for it
+pace/v2_pilot.sh                 v2 pilot: ensembles of trained models, synthetic data (12k steps), stable PM2S (16k steps), d80, per-piece choice: go / no go (8 jobs)
+pace/v2_ensemble.sh              v2 eleventh round: two more meter_v4_gq seeds, meter ensembles (seeds, test-time views), whole pieces against the release (7 jobs)
 pace/v2_decode2.sh               v2 tenth round follow-up: each correction rule added to the models alone (nl_gq, nl_gq_mc), the rule verdict published (4 jobs)
 pace/v2_decode.sh                v2 tenth round: beat decoding tuned, the label audit, nl_gq_mc (contradicted labels masked), meter_v4_gq_lt (local tempo), every rule on whole pieces (8 jobs)
 pace/v2_timing.sh                the timing check on whole pieces, ASAP and Gangqinpu (3 jobs; pace/v2_pm2s2.sh measures it too)
@@ -113,6 +122,8 @@ tests/test_gangqinpu_scores.py   v2: Gangqinpu's written scores (ties, graces, p
 tests/test_pm2s.py               PM2S: post-processing, the tracker on random weights, the weights' hash, beat_source, system names
 tests/test_publish.py            publishing: archive, the gate, --force, refusals, the demo's update + swap, the batch jobs' hook
 tests/test_readable.py           the readability rules: jumps (and what is no jump), lengths (and what is left), stems and hidden rests, the switches
+tests/test_synthetic.py          synthetic performances: rendering a written score, the build script, the PDMX unpacking, pace/v2_pilot.sh
+tests/test_ensemble.py           meter ensembles: views, the probability mixture, ensemble runs loading like trained ones, make_ensemble.py, pace/v2_ensemble.sh
 tests/test_rule_verdict.py       the rule verdict: its decisions, publishing it, the demo following it, pace/v2_decode2.sh
 tests/test_beat_decode.py        the beat decoding, its tuner, the contradicted-label audit and mask, the local tempo term, the switches, pace/v2_decode.sh
 tests/test_timing.py             the timing check: moved / kept notes, meters, lengths, whole beats (and what stays), the pipeline's switches, pace/v2_timing.sh

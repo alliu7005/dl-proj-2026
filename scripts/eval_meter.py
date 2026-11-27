@@ -83,7 +83,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.train import pick_device  # noqa: E402
 from scripts.train_meter import load  # noqa: E402
 from src.beats import MATCH_TOL, BeatNoise, f_measure, load_beats  # noqa: E402
-from src.meter import (DecodeConfig, build_meter_model, choose_level, cover_notes, grid_from_logp,  # noqa: E402
+from src.meter import (DecodeConfig, choose_level, cover_notes, grid_from_logp, load_meter,  # noqa: E402
                        grid_scores, oracle_logp, perf_key, predict_logp, refine_grid, uses_aux)
 from src.notelabels import estimate_key  # noqa: E402
 
@@ -294,15 +294,13 @@ def main(argv=None):
                                                              "tracked beats (src/meter.py oracle_logp)"}, indent=1))
         model = None
     else:
-        ck = torch.load(run / args.ckpt, map_location=device, weights_only=False)
-        model = build_meter_model(ck["config"]).to(device)
-        if uses_aux(ck["config"]):
+        model = load_meter(run / args.ckpt, device)   # an ensemble run (scripts/make_ensemble.py): its members and views
+        if uses_aux(model.cfg):
             if args.tracker == "pm2s":
                 raise SystemExit(f"{args.run} reads PM2S as its second tracker: test it with Beat This!'s beats "
                                  "(not --tracker pm2s)")
             from src.pm2s_beats import PM2SBeats
             aux_tracker = PM2SBeats(device=str(device) if str(device).startswith("cuda") else "cpu")
-        model.load_state_dict(ck["model"])
     aux_of = None
     if aux_tracker is not None:
         aux_cache = {}
