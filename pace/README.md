@@ -895,7 +895,7 @@ bash pace/v2_compound.sh
 To bring the results back:
 
 ```bash
-cd ~/scratch/dl-proj-2026 && tar czf v2_compound.tgz configs/beat_noise_levels.json configs/beat_noise_bt_gangqinpu_levels.json outputs/meter_ts.md outputs/meter_ts.json outputs/runs/meter_v5_*/eval_meter.json outputs/runs/meter_v5_*/decode.json outputs/runs/meter_v5_*/config.json outputs/runs/meter_v5_*/log.csv outputs/system_eval/results.md outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/paired.md slurm-cm*.out 2>/dev/null; ls -la v2_compound.tgz
+cd ~/scratch/dl-proj-2026 && tar czf v2_compound.tgz configs/beat_noise_levels.json configs/beat_noise_bt_gangqinpu_levels.json outputs/meter_ts.md outputs/meter_ts.json outputs/runs/meter_v5_*/eval_meter.json outputs/runs/meter_v5_*/decode.json outputs/runs/meter_v5_*/config.json outputs/runs/meter_v5_*/log.csv outputs/runs/meter_v5_*/meter_scores_*.json outputs/runs/meter_v4_gq/eval_meter.json outputs/runs/meter_v4_gq/meter_scores_*.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-cm*.out slurm-met_meter_v5_*.log 2>/dev/null; ls -la v2_compound.tgz
 ```
 
 ## 5. Compare the runs and bring results back
