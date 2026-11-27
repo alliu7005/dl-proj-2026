@@ -170,6 +170,38 @@ def test_build_reads_extra_folders():
         assert [(m["id"], m["extra"]) for _, _, m in by["s.xml"]] == [("a", False), ("b", True)]
 
 
+def test_sources_and_leaving_aria_out():
+    """Each PianoCoRe row's source from its transcriber (Aria-AMT's: aria_real; Transkun's, ours of a
+    recording included: transkun_real), none of them "clean" (the only source given the noise);
+    the meter model trained with --exclude-sources aria_real never sees those performances."""
+    import pickle
+
+    from scripts.build_dataset import pianocore_source
+    from scripts.train_meter import main as train
+    from tests.test_tracked import build, small_release
+    assert pianocore_source({"capture_model": "Aria-AMT"}) == "aria_real"
+    assert pianocore_source({"capture_model": "Transkun V2"}) == "transkun_real"
+    assert pianocore_source({"capture_model": "ATEPP", "transcription_midi_bytes": b"x"}) == "transkun_real"
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        data = build(tmp, small_release(tmp))
+        f = data / "meter" / "train_gangqinpu.pkl"
+        perfs = pickle.load(open(f, "rb"))
+        for p in perfs[:3]:
+            p["source"] = "aria_real"
+        pickle.dump(perfs, open(f, "wb"))
+        runs = tmp / "runs"
+        tiny = ["--gangqinpu", "--no-periscope", "--steps", "2", "--eval-every", "2", "--d-model", "32", "--layers", "1",
+                "--workers", "0", "--batch", "4", "--chunk", "64", "--device", "cpu", "--normal-priority",
+                "--data", str(data), "--runs-dir", str(runs)]
+        train(["--name", "with", *tiny])
+        train(["--name", "without", *tiny, "--exclude-sources", "aria_real"])
+        n = lambda r: json.loads((runs / r / "config.json").read_text())["data"]["train_by_source"]["gangqinpu"]  # noqa: E731
+        assert (n("with"), n("without")) == (8, 5), (n("with"), n("without"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_piece_counts():
     from src.dataset import piece_counts
     meta = [{"composition": "A", "performance": "1"}, {"composition": "A", "performance": "1"},

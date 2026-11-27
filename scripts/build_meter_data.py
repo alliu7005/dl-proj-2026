@@ -150,7 +150,7 @@ def from_alignment(split_dir: Path, vocab_path: Path, dataset: str, workers: int
                 continue
             perfs.append({"performance": perf, "segment": k, "segments": len(segs), "span": (float(lo), float(hi)),
                           "piece": ws[0][1], "dataset": dataset, "notes": seg_notes, "gt": gt, "beats": None,
-                          "real_notes": ws[0][2] != "clean"})
+                          "real_notes": ws[0][2] != "clean", "source": ws[0][2]})
     return perfs
 
 

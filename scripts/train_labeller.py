@@ -153,6 +153,8 @@ def main(argv=None):
     ap.add_argument("--piece-balance", action="store_true",
                     help="each window weighed by 1 / its work's performances: works with many performances "
                          "(PERiScoPe, ATEPP) do not dominate (src/dataset.py piece_counts)")
+    ap.add_argument("--exclude-sources", default="",
+                    help="never draw training windows of these sources (comma-separated), e.g. aria_real")
     ap.add_argument("--gangqinpu-share", type=float, default=0.0,
                     help="share of training windows from train_gangqinpu (scripts/build_gangqinpu_windows.py); 0 = none")
     ap.add_argument("--mask-contradicted", action="store_true",
@@ -184,7 +186,8 @@ def main(argv=None):
     ctx = {"context_before": args.context_before, "context_after": args.context_after}
 
     # ---- data (training sets only: weights by work)
-    tctx = {**ctx, "piece_balance": bool(args.piece_balance)}
+    tctx = {**ctx, "piece_balance": bool(args.piece_balance),
+            "exclude_sources": tuple(x for x in args.exclude_sources.split(",") if x)}
     nm = NoiseModel.from_json(args.noise)
     if has_split(data, "train_transcribed"):
         train = MixedTrainDataset(str(data / "train"), str(data / "train_transcribed"), vocab_path, noise=nm,

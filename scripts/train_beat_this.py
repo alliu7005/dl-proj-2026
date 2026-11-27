@@ -6,6 +6,9 @@ package's BeatDataModule and PLBeatThis, settings as its launch_scripts/train.py
     # fine-tuned on our piano data (scripts/export_beat_this.py): every fold, and fold k left out
     python scripts/train_beat_this.py --name bt_ft_full --data data/beat_this_ft --init outputs/beat_this/bt_noasap/final.ckpt --finetune
     python scripts/train_beat_this.py --name bt_ft_fold0 --data data/beat_this_ft --init outputs/beat_this/bt_noasap/final.ckpt --finetune --fold 0
+    # the multi-task variant (src/bt_multitask.py: a time-signature head too), on every fold, as a set of its own
+    python scripts/train_beat_this.py --name bt_ftm_full --data data/beat_this_ft --init outputs/beat_this/bt_noasap/final.ckpt --finetune --multitask
+    python scripts/train_beat_this.py --assemble bt_ftm --full bt_ftm_full --full-only
     # the fine-tuned models as one set (src/bt_models.py: each performance tracked by the model that never heard its piece)
     python scripts/train_beat_this.py --assemble bt_ft --full bt_ft_full --fold-runs bt_ft_fold0,bt_ft_fold1,bt_ft_fold2,bt_ft_fold3 --pieces data/beat_this_ft/pieces.json
 
@@ -18,6 +21,8 @@ optimiser and schedule. --finetune: a fine-tuning recipe (lr 1e-4, 200 warmup st
 no precomputed pitch / tempo variants, which our export does not make). --max-hours stops cleanly
 before a job's limit; run again, it resumes (last.ckpt). Writes outputs/beat_this/<name>/: last.ckpt
 (to resume), final.ckpt (the weights only: beat_this.inference loads it), status.json, metrics.csv.
+--multitask: a head for each frame's time signature as well (the export's .meter files;
+src/bt_multitask.py), its loss added (--meter-weight); dropped from final.ckpt.
 Needs pytorch-lightning (pip install pytorch-lightning).
 """
 from __future__ import annotations
@@ -75,10 +80,12 @@ def stage(data_dirs: list, run: Path, datasets: list | None, exclude: list) -> l
 
 def save_weights(ckpt_path: Path, out: Path):
     """A Lightning checkpoint -> its weights and hyper-parameters only (beat_this.inference.load_model
-    reads it; no optimiser state)."""
+    reads it; no optimiser state; the multi-task variant's time-signature head left out)."""
     import torch
+
+    from src.bt_multitask import strip_head
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    torch.save({"state_dict": ck["state_dict"], "hyper_parameters": dict(ck["hyper_parameters"])}, out)
+    torch.save({"state_dict": strip_head(ck["state_dict"]), "hyper_parameters": dict(ck["hyper_parameters"])}, out)
 
 
 def assemble(args) -> Path:
@@ -87,6 +94,13 @@ def assemble(args) -> Path:
     pieces = json.loads(Path(args.pieces).read_text())
     k = int(pieces["k"])
     fold_runs = [r for r in args.fold_runs.split(",") if r]
+    if args.full_only:   # one model for everything (evaluation only: no cross-fitted training beats)
+        if not (runs / args.full / "final.ckpt").exists():
+            raise SystemExit(f"{runs / args.full}: not finished (no final.ckpt)")
+        out = write_models(runs / args.assemble, k, str((runs / args.full / "final.ckpt").resolve()), {}, {})
+        ModelSet(runs / args.assemble)
+        print(f"wrote {out}: {args.full} alone", flush=True)
+        return out
     if len(fold_runs) != k:
         raise SystemExit(f"--fold-runs: {len(fold_runs)} runs for k={k} folds")
     for r in [args.full, *fold_runs]:
@@ -137,6 +151,9 @@ def main(argv=None):
     ap.add_argument("--assemble", default=None, help="write a model set (models.json) of finished runs")
     ap.add_argument("--full", default=None)
     ap.add_argument("--fold-runs", default="")
+    ap.add_argument("--full-only", action="store_true", help="--assemble: the full model alone (for evaluation)")
+    ap.add_argument("--multitask", action="store_true", help="a time-signature head too (src/bt_multitask.py)")
+    ap.add_argument("--meter-weight", type=float, default=0.2, help="--multitask: the time-signature loss's weight")
     ap.add_argument("--pieces", default="data/beat_this_ft/pieces.json")
     args = ap.parse_args(argv)
     if args.assemble:
@@ -173,28 +190,41 @@ def main(argv=None):
     if not args.no_mask:
         aug["mask"] = {"kind": "permute", "min_count": 1, "max_count": 6, "min_len": 0.1, "max_len": 2,
                        "min_parts": 5, "max_parts": 9}
+    if args.multitask:
+        if "tempo" in aug:
+            raise SystemExit("--multitask: without tempo augmentation (--no-tempo, or --finetune)")
+        from src.bt_multitask import patch_dataset
+        patch_dataset()   # its items carry each frame's meter targets (the export's .meter files)
+        from beat_this.dataset.dataset import BeatDataModule  # noqa: F811  (the module's name, now patched)
     dm = BeatDataModule(run / "data", batch_size=args.batch_size, train_length=args.train_length, spect_fps=50,
                         num_workers=args.num_workers, test_dataset="gtzan",
                         length_based_oversampling_factor=args.oversampling, augmentations=aug,
                         no_val=args.no_val, fold=args.fold)
     dm.setup(stage="fit")
     pos_weights = dm.get_train_positive_weights(widen_target_mask=3)
-    model = PLBeatThis(spect_dim=128, fps=50, transformer_dim=512, ff_mult=4, n_layers=6, stem_dim=32,
+    module = PLBeatThis
+    extra = {}
+    if args.multitask:
+        from src.bt_multitask import multitask_module
+        module, extra = multitask_module(), {"meter_weight": args.meter_weight}
+    model = module(spect_dim=128, fps=50, transformer_dim=512, ff_mult=4, n_layers=6, stem_dim=32,
                        dropout={"frontend": 0.1, "transformer": 0.2}, lr=lr, weight_decay=0.01,
                        pos_weights=pos_weights, head_dim=32, loss_type="shift_tolerant_weighted_bce",
                        warmup_steps=warmup, max_epochs=epochs, use_dbn=False, eval_trim_beats=5,
-                       sum_head=True, partial_transformers=True)
+                       sum_head=True, partial_transformers=True, **extra)
     resume = run / "last.ckpt"
     if args.init and not resume.exists():
         state = load_checkpoint(args.init, device="cpu")["state_dict"]
         missing, unexpected = model.load_state_dict(state, strict=False)
+        missing = [k for k in missing if ".meter_ts." not in k]   # the new head: starts fresh
         if missing or unexpected:
             raise SystemExit(f"--init {args.init}: weights do not fit (missing {missing[:5]}, unexpected {unexpected[:5]})")
     status = {"name": args.name, "datasets": names, "fold": args.fold, "init": args.init, "lr": lr, "warmup": warmup,
               "max_epochs": epochs, "augmentations": sorted(aug), "no_val": args.no_val, "seed": args.seed,
               "train_items": len(dm.train_dataset) if hasattr(dm, "train_dataset") else None,
               "val_items": len(dm.val_dataset) if getattr(dm, "val_dataset", None) is not None else None,
-              "pos_weights": pos_weights, "done": False}
+              "pos_weights": pos_weights, "multitask": bool(args.multitask),
+              "meter_weight": args.meter_weight if args.multitask else None, "done": False}
     (run / "status.json").write_text(json.dumps(status, indent=1, default=str))
     print(f"{args.name}: {json.dumps(status, default=str)}", flush=True)
     device = args.device

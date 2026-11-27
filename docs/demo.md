@@ -137,6 +137,20 @@ default in between jobs. When it is offline, it runs on what is there.
   before their main note, and a rolled chord spreads upwards, 35 ms a note, across both staves
   when the roll runs through both. music21's MIDI export alone had left some grace notes out, and
   struck others with their main note and held them for seconds; it played rolled chords as blocks.
+- **Tempo** (`src/tempo.py`, v2; `--no-tempo-marks`, `--constant-tempo`): the score's tempo is read
+  from the grid, which knows how long the performer took for every beat.
+  - Each bar's tempo is smoothed (a running median over 3 bars, so one odd bar, usually a grid error,
+    is not taken for the pianist) and pulled back towards the recording so it does not drift away.
+  - Printed marks: one at the start, and a new one where that tempo changes by more than 15% for at
+    least 4 bars, each the median of its section, in the time signature's beat unit (a dotted quarter
+    in 6/8, a half in 2/2). It starts at the first bar played at the new tempo.
+  - Shorter changes are printed as words: "rit." where the tempo falls more than 10% below the mark,
+    "accel." above it, "a tempo" once it is back within 5%.
+  - The score MIDI plays what is printed: each mark steady, and from a "rit." / "accel." to its
+    "a tempo" the smoothed performer's tempo. Within a section it can drift from the recording by the
+    pianist's rubato; the page's playback bar follows the score MIDI's own clock (`score_follow` in
+    `result.json`). `--constant-tempo`: the old single tempo for the whole piece (`playback_qpm`).
+  - The MusicXML the benchmark scores has no marks (`system_scores.py` builds without them).
 - **Grace notes** before one note are written as a run, each its own note in the order played:
   unslashed sixteenths for two or more, a slashed eighth for one (`src/preprocessing/detokenize.py`).
   They had been written as one grace chord. The tokens to MusicXML to tokens round trip now matches

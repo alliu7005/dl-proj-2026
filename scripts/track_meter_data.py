@@ -25,7 +25,8 @@ Trackers and where they run (never on music they were trained on):
               job run again goes on where it stopped), and --merge N joins the parts.
 With --models <set> (src/bt_models.py: our Beat This!, fine-tuned and cross-fitted) beat_this and
 beat_this_render track each performance with the model that never heard its piece, stored as
-beat_this_<tag> / beat_this_render_<tag> (--tag, default the set's folder name).
+beat_this_<tag> / beat_this_render_<tag> (--tag, default the set's folder name). Several sets,
+comma-separated (--models a,b --tag ft,ftm): each performance is rendered once and tracked by each.
 Both track a whole Gangqinpu performance once; each of its segments keeps the beats inside its span.
 Stored as src/beats.py save_beats files keyed like the performances (src/meter.py perf_key).
 tracked_report.json: each tracker's beat / downbeat F-measure against the alignment-timed beats per
@@ -89,16 +90,19 @@ def _source(p: dict, asap_root: Path | None):
 
 
 def render_track(perfs: list, render, track, checkpoint_of, asap_root: Path | None = None, log=print,
-                 workers: int = 1) -> dict:
+                 workers: int = 1, more: list | None = None):
     """Each performance rendered (``render(source, wav, key)``, src/render.py Renderer) and tracked
     (``track(wav, checkpoint)``) -> {perf_key: (times, down)} on the performance's clock, cropped to
     its span. An ASAP performance renders its own MIDI file (``asap_root`` / performance: velocities
     and pedal as played); the others their notes, from just before the first (``PAD``). A
     performance that fails to render or track is left out (and logged). ``workers`` renders run at
-    once (FluidSynth processes, one core each) while the tracker takes the finished ones in order."""
+    once (FluidSynth processes, one core each) while the tracker takes the finished ones in order.
+    ``more``: further (track, checkpoint_of) pairs run on the same render (rendered once, tracked by
+    each); then a list of result dicts is returned, the first for ``track``."""
     from collections import deque
     from concurrent.futures import ThreadPoolExecutor
-    out = {}
+    pairs = [(track, checkpoint_of)] + list(more or [])
+    outs = [{} for _ in pairs]
     with tempfile.TemporaryDirectory() as tmp, ThreadPoolExecutor(max(1, workers)) as pool:
         todo = iter([(i, p, *s) for i, p in enumerate(perfs) for s in [_source(p, asap_root)] if s is not None])
         pending = deque()
@@ -117,17 +121,18 @@ def render_track(perfs: list, render, track, checkpoint_of, asap_root: Path | No
             key = perf_key(p)
             try:
                 fut.result()
-                t, d = track(wav, checkpoint_of(p))
+                for (tr, ck), out in zip(pairs, outs):
+                    t, d = tr(wav, ck(p))
+                    beats = (np.asarray(t, np.float64) + t0, np.asarray(d, bool))
+                    c = crop(beats, p["span"]) if p.get("span") else (beats if len(beats[0]) >= 2 else None)
+                    if c is not None:
+                        out[key] = c
             except Exception as e:  # noqa: BLE001
                 log(f"{key}: render / track failed: {e}")
                 continue
             finally:
                 wav.unlink(missing_ok=True)
-            beats = (np.asarray(t, np.float64) + t0, np.asarray(d, bool))
-            c = crop(beats, p["span"]) if p.get("span") else (beats if len(beats[0]) >= 2 else None)
-            if c is not None:
-                out[key] = c
-    return out
+    return outs if more else outs[0]
 
 
 def part_path(path: Path, k: int, n: int) -> Path:
@@ -184,23 +189,27 @@ def main(argv=None, beat_this=None, pm2s=None, render=None, track=None):
     if any(t not in TRACKERS for t in trackers):
         raise SystemExit(f"--trackers: from {TRACKERS}")
     meter = Path(args.data) / "meter"
-    ms = None
+    sets = [(None, "")]                   # (model set, suffix of the stored trackers): the released Beat This!
     if args.models:
         from src.bt_models import ModelSet
-        ms = ModelSet(args.models)
+        paths = [x for x in args.models.split(",") if x]
+        tags = [x for x in (args.tag or "").split(",") if x] or [Path(x).name for x in paths]
+        if len(tags) != len(paths):
+            raise SystemExit(f"--tag: one per --models set ({len(paths)}), not {len(tags)}")
+        sets = [(ModelSet(m), f"_{t}") for m, t in zip(paths, tags)]
         if "pm2s" in trackers:
             raise SystemExit("--models is our Beat This!: not with pm2s")
     elif args.tag:
         raise SystemExit("--tag goes with --models")
-    suffix = f"_{args.tag or Path(args.models).name}" if ms else ""
+    ms, suffix = sets[0]
 
-    def tname(t: str) -> str:   # the stored tracker's name
-        return t + suffix if t in ("beat_this", RENDER) else t
+    def tname(t: str, sfx: str | None = None) -> str:   # the stored tracker's name
+        return t + (suffix if sfx is None else sfx) if t in ("beat_this", RENDER) else t
     shard = parse_shard(args.shard)
     if (shard or args.merge) and trackers != [RENDER]:
         raise SystemExit(f"--shard / --merge are for --trackers {RENDER} alone")
     if args.merge:
-        return merge(meter, args.splits.split(","), args.merge, tname(RENDER))
+        return {sfx: merge(meter, args.splits.split(","), args.merge, tname(RENDER, sfx)) for _, sfx in sets}
     if "beat_this" in trackers and beat_this is None:
         from scripts.track_beats import Tracker
         bt = Tracker(device)
@@ -223,6 +232,7 @@ def main(argv=None, beat_this=None, pm2s=None, render=None, track=None):
         checkpoint_of = lambda p: checkpoint_for(p["performance"], folds) if p.get("dataset") == "asap" else "final0"  # noqa: E731
         if ms is not None:   # the fine-tuned model that never heard the performance's piece
             checkpoint_of = ms.checkpoint_for
+        more = [(track, m.checkpoint_for) for m, _ in sets[1:]]   # further sets: the same render
     report, t0 = {}, time.perf_counter()
     for split in args.splits.split(","):
         # Gangqinpu: whole performances tracked once, each segment keeps its span
@@ -234,6 +244,7 @@ def main(argv=None, beat_this=None, pm2s=None, render=None, track=None):
             for p in perfs:
                 by_perf[p["performance"].split("/", 1)[1]].append(p)
             got = {t: {} for t in trackers}
+            got_more = {sfx: {} for _, sfx in sets[1:]}   # beat_this by the further model sets
             if "pm2s" in trackers and split_files(Path(args.release), split):
                 for row in iter_rows(Path(args.release), split, columns=["sample_id", "performance_notes", "alignment",
                                                                          "source", "audio_url"]):
@@ -252,6 +263,7 @@ def main(argv=None, beat_this=None, pm2s=None, render=None, track=None):
                         continue
                     try:
                         whole = beat_this(wav) if ms is None else beat_this(wav, ms.checkpoint_for(segs[0]))
+                        wholes = {sfx: beat_this(wav, m.checkpoint_for(segs[0])) for m, sfx in sets[1:]}
                     except Exception as e:  # noqa: BLE001  (an unreadable download: skipped, counted)
                         print(f"{name} {sid}: Beat This! failed: {e}", flush=True)
                         continue
@@ -259,10 +271,18 @@ def main(argv=None, beat_this=None, pm2s=None, render=None, track=None):
                         c = crop(whole, p["span"])
                         if c is not None:
                             got["beat_this"][perf_key(p)] = c
+                        for sfx, wh in wholes.items():
+                            c = crop(wh, p["span"])
+                            if c is not None:
+                                got_more[sfx][perf_key(p)] = c
             rep = {"segments": len(perfs)}
             for t, beats in got.items():
                 save_beats(tracked_path(meter, name, tname(t)), beats)
-                rep[t] = summarize(perfs, beats)
+                rep[tname(t)] = summarize(perfs, beats)
+            for sfx, beats in got_more.items():   # the further model sets' beats of the recordings
+                if "beat_this" in trackers:
+                    save_beats(tracked_path(meter, name, tname("beat_this", sfx)), beats)
+                    rep[tname("beat_this", sfx)] = summarize(perfs, beats)
             if len(trackers) == 2:   # like for like: the segments both trackers have
                 both = [p for p in perfs if all(perf_key(p) in got[t] for t in trackers)]
                 rep["both"] = {t: summarize(both, got[t]) for t in trackers}
@@ -288,30 +308,37 @@ def main(argv=None, beat_this=None, pm2s=None, render=None, track=None):
                 if not f.exists():
                     continue
                 perfs = pickle.load(open(f, "rb"))
-                out = tracked_path(meter, name, tname(RENDER))
                 if shard:   # every N-th from the K-th; what an earlier run of this shard did is kept
                     perfs = perfs[shard[0]::shard[1]]
-                    out = part_path(out, *shard)
-                beats = load_beats(out) if shard else {}
-                todo = [p for p in perfs if perf_key(p) not in beats]
-                print(f"{name} ({RENDER}): {len(todo)} of {len(perfs)} performances to render and track", flush=True)
+                outs = []
+                for _, sfx in sets:
+                    o = tracked_path(meter, name, tname(RENDER, sfx))
+                    outs.append(part_path(o, *shard) if shard else o)
+                beats = [load_beats(o) if shard else {} for o in outs]
+                todo = [p for p in perfs if any(perf_key(p) not in b for b in beats)]
+                print(f"{name} ({RENDER}): {len(todo)} of {len(perfs)} performances to render and track"
+                      + (f" ({len(sets)} trackers)" if len(sets) > 1 else ""), flush=True)
                 for a in range(0, len(todo), max(1, args.save_every)):
-                    beats.update(render_track(todo[a:a + args.save_every], render, track, checkpoint_of,
-                                              Path(args.asap), workers=args.workers))
-                    save_beats(out, beats)
+                    got_r = render_track(todo[a:a + args.save_every], render, track, checkpoint_of,
+                                         Path(args.asap), workers=args.workers, more=more)
+                    for b, g, o in zip(beats, got_r if more else [got_r], outs):
+                        b.update(g)
+                        save_beats(o, b)
                     print(f"  {name}: {min(a + args.save_every, len(todo))} of {len(todo)} done "
                           f"({time.perf_counter() - t0:.0f} s)", flush=True)
-                save_beats(out, beats)
-                report.setdefault(name, {"segments": len(perfs)})[RENDER] = summarize(perfs, beats)
-                print(f"{name} ({RENDER}): " + json.dumps(report[name][RENDER]), flush=True)
+                for (_, sfx), b, o in zip(sets, beats, outs):
+                    save_beats(o, b)
+                    report.setdefault(name, {"segments": len(perfs)})[tname(RENDER, sfx)] = summarize(perfs, b)
+                    print(f"{name} ({tname(RENDER, sfx)}): " + json.dumps(report[name][tname(RENDER, sfx)]), flush=True)
     meter.mkdir(parents=True, exist_ok=True)
     from src.pm2s_beats import tagged, weights_tag   # other PM2S weights: tracked_report_<tag>.json
     report_name = (tagged("tracked_report") if "pm2s" in trackers else "tracked_report") + ".json"
     if trackers == [RENDER]:   # alone: its own report, the others' kept
-        report_name = (f"tracked_report_render{suffix}.json" if not shard
-                       else f"tracked_report_render{suffix}.part{shard[0]}of{shard[1]}.json")
+        every = "".join(sfx for _, sfx in sets)   # all the model sets' tags
+        report_name = (f"tracked_report_render{every}.json" if not shard
+                       else f"tracked_report_render{every}.part{shard[0]}of{shard[1]}.json")
     elif suffix:
-        report_name = f"tracked_report{suffix}.json"
+        report_name = f"tracked_report{''.join(sfx for _, sfx in sets)}.json"
     (meter / report_name).write_text(json.dumps({"trackers": trackers, "device": device,
                                                            "pm2s_tag": weights_tag() if "pm2s" in trackers else None,
                                                            "seconds": round(time.perf_counter() - t0, 1),

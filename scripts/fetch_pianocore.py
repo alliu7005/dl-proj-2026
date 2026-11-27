@@ -16,7 +16,10 @@ which scripts/build_dataset.py reads as an extra source: it never adds to the te
 --have: the folders already fetched (their performances are not fetched again, and count towards
 the cap); --total-per-work: at most this many performances of a work over all of them together;
 different performers first (a second recording by the same pianist only when a work has no
-other). ATEPP and GiantMIDI-Piano rows are then given their recordings and our own transcriptions
+other).     python scripts/fetch_pianocore.py --source Aria-MIDI --out-name aria --have periscope,periscope_more,atepp --new-works-only --per-work 10
+(Aria-MIDI: the works none of the others has, its own transcriptions as they are: no recordings are
+linked, and the build gives them their own source, aria_real, never noised.) ATEPP and
+GiantMIDI-Piano rows are then given their recordings and our own transcriptions
 (scripts/fetch_pianocore_audio.py, scripts/retranscribe_pianocore.py).
 
 Writes ``<out>/<out-name>/rows-<shard>-<rg>.parquet`` and ``<out>/periscope/scores-<shard>-<rg>*.parquet``
@@ -66,6 +69,8 @@ def main():
     ap.add_argument("--per-work", type=int, default=10, help="performances per work from this fetch")
     ap.add_argument("--out-name", default="periscope", help="the folder under --meta-dir")
     ap.add_argument("--have", default="", help="folders already fetched (comma-separated): not fetched again, counted in the cap")
+    ap.add_argument("--new-works-only", action="store_true",
+                    help="only works none of the --have folders holds (new pieces, not more performances)")
     ap.add_argument("--total-per-work", type=int, default=0,
                     help="at most this many performances per work over --have and this fetch (0: --per-work alone)")
     ap.add_argument("--seed", type=int, default=0)
@@ -92,6 +97,8 @@ def main():
         for w, n in hs["work_key"].value_counts().items():
             have_per_work[w] = have_per_work.get(w, 0) + int(n)
     sel = sel[~sel["id"].isin(have_ids)]
+    if args.new_works_only:
+        sel = sel[~sel["work_key"].isin(set(have_per_work))]
     sel = select(sel, args.per_work, args.total_per_work, have_per_work, args.seed)
     sel = sel.sort_values(["shard", "row_group", "row_in_group"])
     sel.to_parquet(out / "selection.parquet")

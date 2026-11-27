@@ -73,6 +73,15 @@ def load_pianocore(pc_dir) -> dict[str, list[tuple[str, int, dict]]]:
     return by_score
 
 
+def pianocore_source(row: dict) -> str:
+    """A PianoCoRe row's source tag: transkun_real for Transkun V2's notes (PERiScoPe's, or ours of
+    a re-transcribed recording), else <transcriber>_real (Aria-AMT's: aria_real). Every *_real
+    source is a real transcription: never given the synthetic noise (only "clean" is)."""
+    if row.get("transcription_midi_bytes") or (row.get("capture_model") or "Transkun V2") == "Transkun V2":
+        return "transkun_real"
+    return (str(row.get("capture_model")).split("-")[0].split()[0].lower() or "other") + "_real"
+
+
 def process_pianocore_score(pc_dir: str, score_path: str, items, cfg: SegmentConfig, split: str,
                             cid: str, shard_dir: str, min_score_match: float):
     import warnings
@@ -103,13 +112,15 @@ def process_pianocore_score(pc_dir: str, score_path: str, items, cfg: SegmentCon
     for f, i, m in items:
         perf = m["id"]
         try:
-            res = pianocore_performance(row(f, i), measures, shift)
+            r = row(f, i)
+            source = pianocore_source(r)
+            res = pianocore_performance(r, measures, shift)
             if isinstance(res, str):
                 s, st = [], {"skipped": res}
             else:
                 notes, pedal, tl, info = res
                 meta = {"dataset": "pianocore", "piece": key, "composition": cid, "performance": perf,
-                        "split": split, "source": "transkun_real"}
+                        "split": split, "source": source}
                 seed = int(hashlib.sha1(perf.encode()).hexdigest()[:8], 16)
                 s, st = segment_windows(notes, pedal, tl, measures, cfg, meta, train=split == "train", seed=seed)
                 st.update(info, score_match=round(match, 3))

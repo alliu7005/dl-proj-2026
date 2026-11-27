@@ -32,6 +32,10 @@ src/beat_decode.py               beat-level decoding of the labeller's splits of
 src/readable.py                  the readability rules: bars the meter decoder stretched with a jump shortened (fix_jumps), 16th rests closed / overlaps trimmed (readable_lengths), stems by voice and the other voices' rests hidden (stem_voices)
 src/glissando.py                 glissandos: found in the notes (fast one-way runs on one key colour), their two ends in the score, the gliss. line, the swept notes in the score MIDI
 src/synth.py                     MIDI -> audio (additive piano), so Beat This! can track a MIDI input
+src/tempo.py                     the score's tempo from the grid: tempo marks and rit. / accel. / a tempo printed, the score MIDI played at them
+src/render.py                    performances -> audio with a sampled piano (FluidSynth + SoundFonts), for the beat tracker
+src/bt_models.py                 our Beat This! model sets: folds by piece, the model that never heard a piece (cross-fitting)
+src/bt_multitask.py              the multi-task Beat This!: a time-signature head per frame (trained, then dropped), its targets and dataset
 src/release.py                   the released models (models/), their settings, where the demo and the CLI find them
 scripts/export_models.py         the release from the training runs: no optimizer state, the right vocabulary, manifest + sha256, load check
 scripts/check_env.py             loads each package the demo needs in its own process: what is missing, failing, or blocked by Windows' Application Control (Smart App Control), with the blocked paths
@@ -75,6 +79,13 @@ scripts/fetch_gangqinpu_audio.py Gangqinpu's recordings from the URLs the releas
 scripts/build_gangqinpu_windows.py v2: Gangqinpu's written scores as labeller / seq2seq windows -> data/processed/{train,val,test}_gangqinpu (+ report.json)
 scripts/gangqinpu_inputs.py      whole-piece inputs + references from Gangqinpu's test split (aligned notes, Transkun on the recording, Beat This!'s beats) -> outputs/system_eval_gangqinpu
 scripts/track_meter_data.py      Beat This! on Gangqinpu's recordings, PM2S on the notes: real beats stored for training (--tracked) and testing
+scripts/compare_render.py        Beat This! on MAESTRO recordings vs on renders of the same performances (does a SoundFont stand in?)
+scripts/fetch_beat_this_data.py  Beat This!'s published training data (spectrograms, annotations) without ASAP
+scripts/export_beat_this.py      the v6 data in Beat This!'s format: recordings and renders, classical / modern balanced, folds by piece, .meter targets
+scripts/train_beat_this.py       Beat This! from scratch or fine-tuned (--init, --fold, --multitask); --assemble: a model set
+scripts/track_eval_beats.py      the evaluation's recordings tracked by a model set (the full model; a fine-tuned test piece refused)
+scripts/fetch_pianocore_audio.py ATEPP / GiantMIDI-Piano recordings from YouTube (their metadata's links)
+scripts/retranscribe_pianocore.py those recordings re-transcribed with Transkun, put on the original transcription's clock (score map kept)
 scripts/train_meter.py           v2: train the meter model (ASAP + real + PERiScoPe, per-source validation)
 scripts/eval_meter.py            v2: tune its decoder on validation, score its grids (clean / real / periscope), save them for the labeller; --oracle: the best grid the tracked beats allow
 pace/train.sbatch                PACE GPU job: train + evaluate
@@ -101,6 +112,10 @@ pace/v2_decode.sh                v2 tenth round: beat decoding tuned, the label 
 pace/v2_timing.sh                the timing check on whole pieces, ASAP and Gangqinpu (3 jobs; pace/v2_pm2s2.sh measures it too)
 pace/v2_pm2s2.sh                 v2 ninth round: PM2S retrained with stable optimisation (two learning rates, the better picked), its meter model, MIDI input on ASAP and Gangqinpu
 pace/v2_gqlabel.sh               v2 eighth round: the labeller trained with Gangqinpu's scores, whole pieces on Gangqinpu's test split, meter_v4_gq longer, the meter model's second seed
+pace/v2_render.sh                Beat This! (released) on renders of every training performance; meter models on those beats (4x)
+pace/v2_data.sh                  the v6 data (more PERiScoPe, ATEPP / GiantMIDI-Piano re-transcribed, Aria-MIDI's new works, all Gangqinpu recordings) and the v6 models (4y)
+pace/V6_RUNBOOK.md               exactly what to run on PACE for 4y-4z, in order, with a check after each step
+pace/v2_btft.sh                  our Beat This!: from scratch without ASAP, fine-tuned plain and multi-task, cross-fitted; meter_v6_ft / _ftm (4z)
 tests/test_scoreformer.py        model checks + chained prompts == training prompts
 tests/test_decoding.py           chained / guarded / meter / time-signature search with a stand-in model
 tests/test_pipeline.py           demo pipeline end to end: windowing, every mode, output budget, banned tokens
@@ -127,6 +142,11 @@ tests/test_playback.py           grace notes and rolled chords in the score MIDI
 tests/test_glissando.py          glissandos: the detector (and what it must not take), the ends, the line and the MIDI, V2Pipeline on / off, the switches
 tests/test_pm2s_train.py         PM2S retrained: targets, augmentation, training and resuming, the stable settings, the weights' tag, pick_run.py, pace/v2_pm2s.sh and v2_pm2s2.sh, --real-beats synth
 tests/test_tracked.py            real tracker output: the recordings' download, tracking the data, the real / simulated mix, real beats at test
+tests/test_tempo.py              the grid's tempo: per-bar and printed marks, rit. / a tempo, the score MIDI played at them, a pickup
+tests/test_render.py             FluidSynth renders, the rendered tracker in the meter data (shards, resume, merge), trackers in order of preference
+tests/test_bt.py                 our Beat This!: folds, model sets, the export and its mix, the download, tracking by one or two sets, training / assembling
+tests/test_bt_multitask.py       the multi-task Beat This!: frame targets, the head, its loss, stripping it, the .meter files, its dataset
+tests/test_data_v6.py            the v6 data: capped performer-diverse selection, links, the two-step re-transcription alignment, extra folders, sources, leaving Aria out
 tests/test_v2_system.py          v2 system: onset-scale F1, rescoring, the export (per-bar fallbacks, overflow, spelling, playback tempo, grace notes, rests), the synthesizer, V2Pipeline (staves, grace notes, deletion threshold, length tidying), the demo, pace/v2.sh, v2_round4.sh and v2_jobs.sh
 tests/test_preprocessing.py      scores -> training data: chord ties, pickups, composition ids, time maps; plan.py leaves v2 runs alone
 tests/test_compare_runs.py       the comparison tables: bold best, dashes, alignment, margin order, CSV; the paired system comparison

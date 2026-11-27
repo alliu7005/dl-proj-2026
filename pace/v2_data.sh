@@ -14,6 +14,9 @@
 #   - ATEPP and GiantMIDI-Piano (~4,700 within the same cap, 390 h, 794 works): their recordings
 #     fetched from YouTube (their metadata links them) and re-transcribed with Transkun V2, so every
 #     input carries the test-time transcriber's errors; a recording that does not match is dropped;
+#   - Aria-MIDI's works none of those has (~220 works, ~1,000 performances at 10 per work, ~63 h):
+#     its own transcriptions as they are (no recordings are linked), source aria_real, never given
+#     the Transkun-like noise; the runs *_noaria train without them, to see what they bring;
 #   - every Gangqinpu training recording (17.6k; 3,000 so far): real tracked beats and real pop audio.
 # Not overfitting by work or by performance:
 #   - splits stay by work, so a work's performances from every source share its split; the new
@@ -32,7 +35,7 @@
 # Stage 1 (fetch)                                                                         waits for
 #   dtests   the tests (CPU)                                                               -
 #   dpc      PianoCoRe rows: periscope_more (PERiScoPe to 30 per work), atepp              dtests (ok)
-#            (ATEPP, GiantMIDI-Piano; to 30 per work over all three)
+#            (ATEPP, GiantMIDI-Piano; to 30 per work over all three), aria (Aria-MIDI's new works)
 #   dyt1-3   their recordings from YouTube, 3 s apart (three chained jobs; they resume)    dpc (ok), then each other
 #   dgq1-2   every Gangqinpu training recording (two chained jobs; they resume)             dtests (ok)
 # Stage 2 (build)
@@ -42,8 +45,9 @@
 #   dtrack   Beat This! on every Gangqinpu recording (its real beats for the meter model)   drebuild (ok)
 # Stage 3 (train)
 #   mtests   the tests                                                                      -
-#   mnl      nl_v6 (base); mnll: nl_v6_large                                                mtests (ok)
-#   mmeter   meter_v6, meter_v6_s1, meter_v6_ne; mmeterl: meter_v6_large, _large_s1       mtests (ok)
+#   mnl      nl_v6, nl_v6_noaria (base); mnll: nl_v6_large                                  mtests (ok)
+#   mmeter   meter_v6, meter_v6_s1, meter_v6_ne, meter_v6_noaria; mmeterl: meter_v6_large, mtests (ok)
+#            meter_v6_large_s1
 #   mresume  any not finished: resumed                                                     the four (any)
 #   meval    whole pieces, ASAP and Gangqinpu: each v6 labeller on each v6 meter, and     mresume (any)
 #            nl_gq_mc + meter_v4_gq (the release) to compare
@@ -53,6 +57,7 @@ GPUS=${GPUS:-cuda13}
 G=(--gres=gpu:1 "--constraint=$GPUS")
 STAGE=${STAGE:-fetch}
 PER_WORK=${PER_WORK:-30}
+ARIA_PER_WORK=${ARIA_PER_WORK:-10}       # Aria-MIDI's new works: performances per work
 PC=data/raw/pianocore
 OLD=${OLD:-data/processed_pre_v6}
 BD=${BD:-$HOME/scratch/beyer_dai}
@@ -81,9 +86,9 @@ if [ "$STAGE" = fetch ]; then
   echo "the tests: job $tests"
   submit dpc -c 4 --mem=32G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; \
 python scripts/fetch_pianocore.py --out-name periscope_more --have periscope --per-work 1000 --total-per-work $PER_WORK && \
-python scripts/fetch_pianocore.py --source ATEPP,GiantMIDI-Piano --out-name atepp --have periscope,periscope_more --per-work 1000 --total-per-work $PER_WORK"
+python scripts/fetch_pianocore.py --source ATEPP,GiantMIDI-Piano --out-name atepp --have periscope,periscope_more --per-work 1000 --total-per-work $PER_WORK && python scripts/fetch_pianocore.py --source Aria-MIDI --out-name aria --have periscope,periscope_more,atepp --new-works-only --per-work $ARIA_PER_WORK"
   pc=$ID
-  echo "PianoCoRe rows (PERiScoPe to $PER_WORK per work; ATEPP, GiantMIDI-Piano): job $pc"
+  echo "PianoCoRe rows (PERiScoPe to $PER_WORK per work; ATEPP, GiantMIDI-Piano; Aria-MIDI's new works): job $pc"
   YT="python scripts/fetch_pianocore_audio.py --dir $PC/atepp ${COOKIES:+--cookies $COOKIES}"
   dep="--dependency=afterok:$pc"
   for k in 1 2 3; do
@@ -143,17 +148,17 @@ fi
 [ -e "$OLD" ] || { echo "no $OLD: stage 2 has not rebuilt the data"; exit 1; }
 submit mtests -c 8 --mem=64G -t 2:00:00 --wrap="$ENV; python -m tests.test_data_v6 && python -m tests.test_meter && python -m tests.test_v2_system"
 tests=$ID
-submit mnl "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v6"
+submit mnl "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v6 nl_v6_noaria"
 a=$ID
 submit mnll "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v6_large"
 b=$ID
-submit mmeter "${G[@]}" -c 24 --mem=128G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS meters meter_v6 meter_v6_s1 meter_v6_ne"
+submit mmeter "${G[@]}" -c 32 --mem=160G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS meters meter_v6 meter_v6_s1 meter_v6_ne meter_v6_noaria"
 c=$ID
 submit mmeterl "${G[@]}" -c 16 --mem=128G -t 8:00:00 "--dependency=afterok:$tests" --wrap="$ENV; PUBLISH=0 $JOBS meters meter_v6_large meter_v6_large_s1"
 d=$ID
-echo "nl_v6 (job $a), nl_v6_large (job $b), meter_v6 / _s1 / _ne (job $c), meter_v6_large / _s1 (job $d)"
+echo "nl_v6 / _noaria (job $a), nl_v6_large (job $b), meter_v6 / _s1 / _ne / _noaria (job $c), meter_v6_large / _s1 (job $d)"
 submit mresume "${G[@]}" -c 24 --mem=128G -t 8:00:00 "--dependency=afterany:$a:$b:$c:$d" \
-  --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v6 nl_v6_large; PUBLISH=0 $JOBS meters meter_v6 meter_v6_s1 meter_v6_ne meter_v6_large meter_v6_large_s1"
+  --wrap="$ENV; PUBLISH=0 $JOBS labellers nl_v6 nl_v6_noaria nl_v6_large; PUBLISH=0 $JOBS meters meter_v6 meter_v6_s1 meter_v6_ne meter_v6_noaria meter_v6_large meter_v6_large_s1"
 res=$ID
 echo "any not finished: resumed: job $res"
 GQOUT=outputs/system_eval_gangqinpu
@@ -162,8 +167,9 @@ SPECS="nl_gq_mc+meter_v4_gq:tidy,d95,bd,missing"
 for nl in nl_v6 nl_v6_large; do
   for m in meter_v4_gq meter_v6 meter_v6_s1 meter_v6_ne meter_v6_large meter_v6_large_s1; do SPECS="$SPECS $nl+$m:tidy,d95,bd"; done
 done
+SPECS="$SPECS nl_v6_noaria+meter_v6_noaria:tidy,d95,bd"   # the same without Aria-MIDI's works
 submit meval "${G[@]}" -c 8 --mem=48G -t 8:00:00 "--dependency=afterany:$res" \
-  --wrap="$ENV; $JOBS trackers meter_v6 meter_v6_s1 meter_v6_ne meter_v6_large meter_v6_large_s1; $JOBS systems $SPECS; $GQSYS $JOBS systems $SPECS"
+  --wrap="$ENV; $JOBS trackers meter_v6 meter_v6_s1 meter_v6_ne meter_v6_noaria meter_v6_large meter_v6_large_s1; $JOBS systems $SPECS; $GQSYS $JOBS systems $SPECS"
 evl=$ID
 echo "whole pieces, ASAP and Gangqinpu: job $evl"
 BDENV="module load anaconda3; eval \"\$(conda shell.bash hook)\"; conda activate bd311; export PYTHONUNBUFFERED=1; cd \"\$SLURM_SUBMIT_DIR\""

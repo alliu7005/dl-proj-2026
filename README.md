@@ -73,6 +73,8 @@ Beat This!, and the system chosen on the page.
 - **What the page shows:** the engraved score (OpenSheetMusicDisplay), players for the recording,
   the transcription and the score, and a bar that follows the music. Downloads: MusicXML, the
   score's MIDI, the transcription and the tokens.
+- **Tempo:** v2 prints tempo marks from the grid (and rit. / accel. where the pianist slows or
+  speeds up for a few bars), and the score's MIDI plays at them ([docs/demo.md](docs/demo.md)).
 - **v2 options:** how sure the labeller must be to leave a note out as a transcription error
   ("only when sure", p > 0.95, is the default).
 - **seq2seq options:** the decoding mode (meter, guarded, chained, none, time-signature search).
@@ -135,7 +137,7 @@ Each one has the vocabulary it was trained with beside it. Without `models/`, th
 | [docs/baselines.md](docs/baselines.md) | beat-snap and XGBoost baselines, the note-level error detector |
 | [docs/model_card.md](docs/model_card.md) | the released models (the Hugging Face page) |
 | [docs/repo_layout.md](docs/repo_layout.md) | what every file does |
-| [pace/README.md](pace/README.md) | running on PACE: setup, every batch, GPUs, job limits, bringing results back |
+| [pace/README.md](pace/README.md) | running on PACE: setup, every batch, GPUs, job limits, bringing results back; the run order of the v6 data, our Beat This! and the retrained models ([pace/V6_RUNBOOK.md](pace/V6_RUNBOOK.md): exactly what to run) |
 
 ## Repo map
 

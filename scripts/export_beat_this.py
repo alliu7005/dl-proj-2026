@@ -28,13 +28,19 @@ The layout is Beat This!'s (its BeatDataModule reads it):
   annotations/<dataset>/single.split                     item, train / val (the validation pieces)
   annotations/<dataset>/8-folds.split                    item, fold (training pieces only; K folds,
                                                          the name Beat This! reads for --fold)
+  annotations/<dataset>/annotations/meter/<item>.meter   time, time-signature class
+                                                         (src/bt_multitask.py: the multi-task variant's targets)
   audio/spectrograms/<dataset>.npz                       <item>/track.npy: float16 log-mel spectrogram
                                                          (Beat This!'s: 22.05 kHz, 50 frames/s, 128 bands)
 and pieces.json: every exported training piece with its fold (src/bt_models.py fold_of), for the
 models' models.json.
 
-The mix: four cells, classical / pop x recordings / renders (CELLS), weighed alike by default
-(--shares): Beat This! samples each item in proportion to its length, so a cell's share of training
+The mix: four cells, classical / pop x recordings / renders (CELLS); by default each kind of
+recording counts twice as much as its renders (--shares): the recordings are what the tracker meets
+at test time, the renders add pieces with no recording (PERiScoPe, Aria-MIDI) but should not make it
+better on renders than on recordings, since the meter model's training beats of those pieces come
+from renders (scripts/compare_render.py --models checks it after fine-tuning). Beat This! samples
+each item in proportion to its length, so a cell's share of training
 is its hours times how often its items are listed; the split files list a smaller cell's training
 items several times (at most --max-repeat, so a few hours of recordings are not learnt by heart),
 the largest cell once. The folds are by piece in every dataset, so each fold-out model trains on
@@ -73,7 +79,7 @@ SOURCES = {"asap_render": "", "asap_real": "", "periscope_render": "_periscope",
 CELLS = {"asap_render": "classical_render", "asap_real": "classical_real", "periscope_render": "classical_render",
          "pianocore_real": "classical_real",
          "gangqinpu_render": "pop_render", "gangqinpu_real": "pop_real"}
-DEFAULT_SHARES = "classical_real=1,classical_render=1,pop_real=1,pop_render=1"
+DEFAULT_SHARES = "classical_real=1,classical_render=0.5,pop_real=1,pop_render=0.5"
 DEFAULT_HOURS = ("asap_render=all,asap_real=all,periscope_render=150,pianocore_real=all,gangqinpu_render=150,"
                  "gangqinpu_real=all")
 
@@ -165,6 +171,15 @@ def real_asap_item(p: dict, asap: Path, rec: tuple):
     lo = max(0.0, t[0] - PAD + d)
     x = read_audio(wav, lo, t[-1] + PAD + d)
     return x, t + d - lo, np.asarray(p["gt"]["down"], bool)
+
+
+def meter_classes(gt: dict, n: int):
+    """The time-signature classes (src/bt_multitask.py) of an item's beats: the last ``n`` of its
+    ground truth (an item keeps all of its beats, or a render drops a few at the start); None
+    without them."""
+    if n <= 0 or "ts" not in gt:
+        return None
+    return np.asarray(gt["ts"], np.int64)[-n:]
 
 
 def mix_repeats(hours: dict, shares: dict, max_repeat: int) -> dict:
@@ -263,13 +278,17 @@ class Store:
     def done(self, stem: str) -> bool:
         return stem in self.have and (self.ann / "annotations" / "beats" / f"{stem}.beats").exists()
 
-    def add(self, stem: str, spect: np.ndarray, beats: np.ndarray, down: np.ndarray):
+    def add(self, stem: str, spect: np.ndarray, beats: np.ndarray, down: np.ndarray,
+            ts: np.ndarray | None = None):
         buf = io.BytesIO()
         np.save(buf, spect)
         self.zip.writestr(f"{stem}/track.npy", buf.getvalue())
         self.seconds[stem] = len(spect) / 50
         np.savetxt(self.ann / "annotations" / "beats" / f"{stem}.beats",
                    np.stack([beats, beat_numbers(down)], axis=1), fmt=["%.4f", "%d"], delimiter="\t")
+        if ts is not None:   # the multi-task variant's targets
+            from src.bt_multitask import write_meter
+            write_meter(self.ann / "annotations" / "meter" / f"{stem}.meter", beats, ts)
         self.have.add(stem)
 
     def finish(self):
@@ -395,6 +414,7 @@ def main(argv=None, renderer=None, spect=None):
                     wav.unlink(missing_ok=True)
                     return stem, x, t, d
                 from collections import deque
+                by_stem = dict(todo)
                 jobs, pending = iter(todo), deque()     # a few ahead, so finished audio does not pile up
 
                 def ahead():
@@ -410,6 +430,7 @@ def main(argv=None, renderer=None, spect=None):
                     ahead()
                     try:
                         stem, x, t, d = fut.result()
+                        ts = meter_classes(by_stem[stem]["gt"], 0 if t is None else len(t))
                     except Exception as e:  # noqa: BLE001
                         print(f"  {first}: failed: {e}", flush=True)
                         rep["skipped"] += 1
@@ -417,7 +438,7 @@ def main(argv=None, renderer=None, spect=None):
                     if x is None or len(t) < 4 or len(x) < SR:
                         rep["skipped"] += 1
                         continue
-                    store.add(stem, spect(x), t, d)
+                    store.add(stem, spect(x), t, d, ts)
                     rep["items"] += 1
                     rep["hours"] += len(x) / SR / 3600
                     if (k + 1) % 200 == 0:

@@ -238,6 +238,56 @@ def test_track_with_model_set():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_two_model_sets_one_render():
+    """--models a,b --tag ft,ftm: each performance rendered once and tracked by each set's model
+    that never heard its piece; recordings tracked by both; a file per set; shards merged per set."""
+    from scripts.fetch_gangqinpu_audio import audio_path
+    from scripts.track_meter_data import main as track, part_path, tracked_path
+    from src.beats import load_beats
+    from src.bt_models import fold_of
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        data = build(tmp, small_release(tmp))
+        perfs = pickle.load(open(data / "meter" / "train_gangqinpu.pkl", "rb"))
+        pieces = {p["piece"]: fold_of(p["piece"], 2) for p in perfs}
+        model_set(tmp / "bt_ft", 2, pieces)
+        model_set(tmp / "bt_ftm", 2, pieces)
+        audio_path(tmp / "audio", "train", "tr1").parent.mkdir(parents=True, exist_ok=True)
+        audio_path(tmp / "audio", "train", "tr1").write_bytes(b"x")
+        renders, used = [], []
+
+        def render(source, wav, key):
+            renders.append(key)
+            Path(wav).write_bytes(b"x")
+
+        def tracker(wav, ck):
+            used.append(Path(ck).parent.name + "/" + Path(ck).stem)
+            return np.arange(0.0, 60.0, 0.5), np.arange(120) % 4 == 0
+        common = ["--data", str(data), "--audio", str(tmp / "audio"), "--models", f"{tmp / 'bt_ft'},{tmp / 'bt_ftm'}",
+                  "--tag", "ft,ftm", "--device", "cpu", "--splits", "train"]
+        track([*common, "--trackers", "beat_this_render", "--shard", "0/1"], render=render, track=tracker)
+        assert len(renders) == 8                                            # rendered once each
+        assert sorted(used) == sorted(f"{s}/fold{fold_of(p['piece'], 2)}" for p in perfs for s in ("bt_ft", "bt_ftm"))
+        for tag in ("ft", "ftm"):
+            assert len(load_beats(part_path(tracked_path(data / "meter", "train_gangqinpu", f"beat_this_render_{tag}"), 0, 1))) == 8
+        track([*common, "--trackers", "beat_this_render", "--merge", "1"])
+        for tag in ("ft", "ftm"):
+            assert len(load_beats(tracked_path(data / "meter", "train_gangqinpu", f"beat_this_render_{tag}"))) == 8
+        used.clear()
+        track([*common, "--trackers", "beat_this"], beat_this=tracker)        # the downloaded recording
+        tr1_fold = pieces[next(p["piece"] for p in perfs if p["performance"] == "gangqinpu/tr1")]
+        assert sorted(used) == [f"bt_ft/fold{tr1_fold}", f"bt_ftm/fold{tr1_fold}"], used
+        for tag in ("ft", "ftm"):
+            assert list(load_beats(tracked_path(data / "meter", "train_gangqinpu", f"beat_this_{tag}"))) == ["gangqinpu/tr1"]
+        try:
+            track([*common[:-4], "--tag", "ft", "--trackers", "beat_this"], beat_this=tracker)
+            raise AssertionError("one tag for two sets should be refused")
+        except SystemExit as e:
+            assert "--tag" in str(e)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 class Served(io.BytesIO):
     def __init__(self, data: bytes, status: int = 200):
         super().__init__(data)

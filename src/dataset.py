@@ -309,7 +309,8 @@ class ScoreSegmentDataset(Dataset):
                  use_prompt: bool = True, prompt_dropout: float = 0.1, feature_stats: str | None = "auto",
                  context_noise: ContextNoise | None = None, context_before: int = 0, context_after: int = 0,
                  metrical: bool = False, beats: str | None = None, beat_noise: BeatNoise | None = None,
-                 beat_dropout: float = 0.0, notelabels: bool = False, piece_balance: bool = False):
+                 beat_dropout: float = 0.0, notelabels: bool = False, piece_balance: bool = False,
+                 exclude_sources: tuple = ()):
         """``prompt_dropout``: chance (when training, i.e. with noise or augmentation) of hiding the
         prompt, so the model also works without context (first window of a piece, or after a bad
         window). ``feature_stats``: JSON from ``compute_feature_stats`` (written by build_dataset.py
@@ -396,6 +397,9 @@ class ScoreSegmentDataset(Dataset):
         self.weights = np.where(has_rare, ornament_oversample, 1.0)
         if piece_balance:   # a work counts as much as one of its performances, however many it has
             self.weights = self.weights / piece_counts(self.store.meta)
+        if exclude_sources:   # e.g. aria_real: never drawn in training
+            out = np.array([m.get("source", "clean") in set(exclude_sources) for m in self.store.meta])
+            self.weights = np.where(out, 0.0, self.weights)
 
     def set_epoch(self, epoch: int):
         """Call each epoch so the injected noise differs between epochs but stays reproducible."""
@@ -696,11 +700,12 @@ class MixedTrainDataset(Dataset):
                  ornament_oversample: float = 3.0, context_noise: ContextNoise | None = None,
                  context_before: int = 0, context_after: int = 0, metrical: bool = False,
                  beats: dict | None = None, real_beats: dict | None = None, notelabels: bool = False,
-                 piece_balance: bool = False):
+                 piece_balance: bool = False, exclude_sources: tuple = ()):
         """``beats`` / ``real_beats``: beat arguments of ScoreSegmentDataset (beats, beat_noise,
         beat_dropout) for the clean and the real-transcription part; None = no beat features."""
         ctx = dict(context_noise=context_noise, context_before=context_before, context_after=context_after,
-                   metrical=metrical, notelabels=notelabels, piece_balance=piece_balance)
+                   metrical=metrical, notelabels=notelabels, piece_balance=piece_balance,
+                   exclude_sources=exclude_sources)
         self.synthetic = ScoreSegmentDataset(clean_dir, vocab_path, noise=noise, augment=augment,
                                              seed=seed, ornament_oversample=ornament_oversample, **ctx,
                                              **(beats or {}))

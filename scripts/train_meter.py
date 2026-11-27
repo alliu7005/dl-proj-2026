@@ -295,6 +295,8 @@ def main(argv=None):
     ap.add_argument("--chunk", type=int, default=1024, help="most beats per training sample")
     ap.add_argument("--chunk-min", type=int, default=0, help="fewest beats per training sample (0 = chunk / 4)")
     ap.add_argument("--balance", choices=("piece", "beats"), default="piece")
+    ap.add_argument("--exclude-sources", default="",
+                    help="leave out training performances of these sources (comma-separated), e.g. aria_real")
     ap.add_argument("--compound-weight", type=float, default=1.0,
                     help="draw performances in a compound meter (6/8, 9/8, 12/8, 6/4) this many times as often "
                          "(within each source; 1: as their length says)")
@@ -360,6 +362,13 @@ def main(argv=None):
                              "(scripts/build_meter_data.py --gangqinpu <release> --gangqinpu-only)")
     if not 0.0 <= args.gangqinpu_share < 1.0:
         raise SystemExit("--gangqinpu-share must be in [0, 1)")
+    excluded = {x for x in args.exclude_sources.split(",") if x}
+    if excluded:   # e.g. aria_real: the same model without that transcriber's performances
+        for k in list(sources):
+            before = len(sources[k])
+            sources[k] = [p for p in sources[k] if p.get("source") not in excluded]
+            if len(sources[k]) < before:
+                print(f"{k}: {before - len(sources[k])} performances of {sorted(excluded)} left out", flush=True)
     tracked_list = [t for t in args.tracked.split(",") if t and t != "none"]
     import re
     bad = [t for t in tracked_list if not re.fullmatch(r"(beat_this|beat_this_render)(_[A-Za-z0-9]+)?|pm2s", t)]

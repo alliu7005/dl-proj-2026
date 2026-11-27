@@ -9,6 +9,11 @@ Beat This! fold model that never heard the performance, both compared with ASAP'
 (src/beats.py compare). One performance per piece; never a test piece. A SoundFont whose renders
 track like the recordings (beat F, downbeat F, tempo-octave errors, missed and extra beats) can stand
 in for recordings in the meter model's data (scripts/track_meter_data.py beat_this_render).
+
+--models <set> (our fine-tuned Beat This!, src/bt_models.py): each performance tracked by the set's
+model that never heard its piece (the fold model; the full one fine-tuned on these very performances'
+renders and recordings would flatter both). After fine-tuning it shows whether renders still track
+like recordings, so the meter model's rendered training beats are no cleaner than real ones.
 """
 from __future__ import annotations
 
@@ -27,7 +32,7 @@ from src.beats import compare  # noqa: E402
 from src.preprocessing.performance import estimate_offset, load_performance  # noqa: E402
 
 
-def pick(asap: Path, maestro: Path, folds: dict, splits: dict, ann: dict, n: int) -> list:
+def pick(asap: Path, maestro: Path, folds: dict, splits: dict, ann: dict, n: int, any_model: bool = False) -> list:
     """Up to ``n`` (metadata row, recording, MIDI): one per piece, with a recording here, annotated,
     a held-out fold model, not a test piece."""
     out, seen = [], set()
@@ -36,7 +41,7 @@ def pick(asap: Path, maestro: Path, folds: dict, splits: dict, ann: dict, n: int
         midi = Path(r["maestro_midi_performance"].replace("{maestro}", str(maestro)))
         perf = r["midi_performance"]
         if (r["folder"] in seen or splits.get(r["folder"]) == "test" or perf not in ann or not wav.exists()
-                or not midi.exists() or checkpoint_for(perf, folds) == "final0"):
+                or not midi.exists() or (checkpoint_for(perf, folds) == "final0" and not any_model)):
             continue
         seen.add(r["folder"])
         out.append((r, wav, midi))
@@ -63,6 +68,7 @@ def main(argv=None, tracker=None, renderer_for=None):
     ap.add_argument("--folds", default="data/raw/beat_this/asap_8-folds.split")
     ap.add_argument("--soundfonts", default=None, help="each compared on its own (default: $SOUNDFONTS)")
     ap.add_argument("--fluidsynth", default=None)
+    ap.add_argument("--models", default=None, help="our Beat This! model set instead of the released one")
     ap.add_argument("--out", default="outputs/render_check")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args(argv)
@@ -79,10 +85,14 @@ def main(argv=None, tracker=None, renderer_for=None):
         tracker = lambda wav, ck: tr(wav, ck)  # noqa: E731
     asap, maestro = Path(args.asap), Path(args.maestro)
     folds = load_folds(Path(args.folds))
+    ms = None
+    if args.models:
+        from src.bt_models import ModelSet
+        ms = ModelSet(args.models)
     sp = json.loads(Path(args.splits).read_text()) if Path(args.splits).exists() else {}
     splits = sp.get("asap", sp)
     ann = json.loads((asap / "asap_annotations.json").read_text())
-    chosen = pick(asap, maestro, folds, splits, ann, args.n)
+    chosen = pick(asap, maestro, folds, splits, ann, args.n, any_model=ms is not None)
     if not chosen:
         raise SystemExit(f"no ASAP performance with its MAESTRO recording under {maestro}")
     rows = {"recording": []} | {font.name: [] for font in fonts}
@@ -93,7 +103,7 @@ def main(argv=None, tracker=None, renderer_for=None):
         gt_t = np.asarray(a["performance_beats"], np.float64)
         gt_d = np.isin(np.round(gt_t, 4), np.round(np.asarray(a["performance_downbeats"], np.float64), 4))
         d, match = estimate_offset(load_performance(asap / perf)[0], load_performance(midi)[0])
-        ck = checkpoint_for(perf, folds)
+        ck = checkpoint_for(perf, folds) if ms is None else ms.checkpoint_for(perf)
         line = [f"{perf} ({ck}, offset match {match:.2f})"]
         t, dn = tracker(wav, ck)
         rows["recording"].append({"performance": perf, **compare(gt_t, gt_d, np.asarray(t) - d, dn)})

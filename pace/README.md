@@ -898,6 +898,33 @@ To bring the results back:
 cd ~/scratch/dl-proj-2026 && tar czf v2_compound.tgz configs/beat_noise_levels.json configs/beat_noise_bt_gangqinpu_levels.json outputs/meter_ts.md outputs/meter_ts.json outputs/runs/meter_v5_*/eval_meter.json outputs/runs/meter_v5_*/decode.json outputs/runs/meter_v5_*/config.json outputs/runs/meter_v5_*/log.csv outputs/runs/meter_v5_*/meter_scores_*.json outputs/runs/meter_v4_gq/eval_meter.json outputs/runs/meter_v4_gq/meter_scores_*.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-cm*.out slurm-met_meter_v5_*.log 2>/dev/null; ls -la v2_compound.tgz
 ```
 
+## Run order for 4x-4z: v6 data, our Beat This!, the models retrained
+
+**Step by step, with the exact commands and a "done when" check for each: [V6_RUNBOOK.md](V6_RUNBOOK.md).**
+
+The last rounds build on each other: the models must not train on data or beats from a stage that
+has not run yet (e.g. a meter model on the released Beat This!'s beats when ours is meant). One
+stage at a time, each after the one before has finished (`squeue -u $USER` empty, its outputs there):
+
+| step | command | makes | needs |
+|---|---|---|---|
+| 0 | once on the login node: `pip install yt-dlp pytorch-lightning`, `conda install -c conda-forge fluidsynth`, SoundFonts into `data/raw/soundfonts/` | the tools | - |
+| 1 | `bash pace/v2_data.sh` (4y, stage fetch) | PianoCoRe rows (more PERiScoPe, ATEPP / GiantMIDI-Piano, Aria-MIDI's new works); their YouTube recordings; every Gangqinpu recording | - |
+| 2 | `STAGE=build bash pace/v2_data.sh` | the recordings re-transcribed with Transkun; the **v6 data** (`data/processed`, the old kept as `data/processed_pre_v6`); the released Beat This! on every Gangqinpu recording | step 1 |
+| 3a | `STAGE=train bash pace/v2_data.sh` | the v6 labeller `nl_v6` (+ `_large`, `_noaria`) and meter models (`meter_v6*`, on the released Beat This!'s beats: the baseline) | step 2 |
+| 3b | `bash pace/v2_btft.sh` (4z, stage train) | Beat This!'s data without ASAP; the v6 data in its format (`data/beat_this_ft`); Beat This! from scratch without ASAP (`bt_noasap`) | step 2 (it refuses before) |
+| 4 | `STAGE=finetune bash pace/v2_btft.sh` | the plain and multi-task fine-tunes, each on every fold and with each fold left out (10 models) | step 3b |
+| 5 | `STAGE=use bash pace/v2_btft.sh` | both trackers' beats of every training performance (cross-fitted) and of the test recordings; `meter_v6_ft`, `meter_v6_ftm` trained on them; whole pieces | step 4; step 3a's `nl_v6` for its whole-piece scores |
+
+- 3a and 3b both need only step 2, but together they are 12 jobs, over PACE's limit: submit 3b once
+  3a's jobs have finished (or 3a once 3b's have).
+- The labeller is trained once (3a): it never reads tracked beats (it trains on score grids with simulated
+  tracker timing), so `nl_v6` serves all three trackers; the meter model is retrained for each.
+- 4x (`pace/v2_render.sh`, the released Beat This! on renders) is a separate experiment, not a step of this order.
+- The results to compare at the end (`outputs/system_eval/paired.md`, the Gangqinpu one too): `nl_v6 + meter_v6`
+  (released tracker) against `nl_v6 + meter_v6_ft` (`_btft`) and `nl_v6 + meter_v6_ftm` (`_btftm`); the
+  tracker alone: `nl_gq_mc + meter_v4_gq` on each one's beats; and `nl_v6_noaria + meter_v6_noaria` for Aria-MIDI.
+
 ## 4x. Rendered beats: Beat This! on renders of every training performance
 
 `pace/v2_render.sh` gives every meter-model training performance with no recording Beat This!'s
@@ -931,8 +958,8 @@ cd ~/scratch/dl-proj-2026 && tar czf v2_render.tgz outputs/render_check data/pro
 
 `pace/v2_data.sh` grows the classical half of the training data without overfitting by work or by
 performance, then retrains the labeller and meter model on it, base and large, two seeds for the
-meter model. Run it before 4z (`pace/v2_btft.sh`), whose export then takes the downloaded classical
-recordings as real classical audio. Once, on the login node: `pip install yt-dlp`.
+meter model. Steps 1, 2 and 3a of the run order above; `pace/v2_btft.sh` (4z) then exports this data, its
+downloaded recordings included, for Beat This!. Once, on the login node: `pip install yt-dlp`.
 
 ```bash
 bash pace/v2_data.sh                  # stage 1, fetch (7 jobs)
@@ -946,11 +973,15 @@ COOKIES=cookies.txt bash pace/v2_data.sh   # if YouTube asks PACE to confirm it 
   ~4,700, 390 h, 794 works), their recordings fetched from YouTube (`scripts/fetch_pianocore_audio.py`)
   and re-transcribed with Transkun V2 (`scripts/retranscribe_pianocore.py`: the original transcription
   keeps giving the score map, ours becomes the input; a recording that does not match is dropped).
+- **Aria-MIDI's new works** (`aria`, ~220 works no other source has, 10 performances each, ~63 h): its
+  own transcriptions as they are (no recordings are linked), source `aria_real`, never given the
+  Transkun-like noise. `nl_v6_noaria` / `meter_v6_noaria` train without them (`--exclude-sources aria_real`),
+  to see what they bring.
 - **Every Gangqinpu training recording** (17.6k; 3,000 before): real tracked beats, real pop audio.
 - **Against overfitting:** splits by work across every source, and the new sources never add to
   `test_periscope`; at most 30 performances per work over all sources, different pianists first;
   every work weighed as one performance in training (meter `--balance piece`, labeller `--piece-balance`).
-- **Models:** `nl_v6`, `nl_v6_large`; `meter_v6` (+ `_s1`), `meter_v6_large` (+ `_s1`), `meter_v6_ne`
+- **Models:** `nl_v6`, `nl_v6_large`, `nl_v6_noaria`; `meter_v6` (+ `_s1`), `meter_v6_large` (+ `_s1`), `meter_v6_ne`, `meter_v6_noaria`
   (note encoder). Not published (`PUBLISH=0`) until compared: whole pieces against `nl_gq_mc + meter_v4_gq`.
 - The current `data/processed` is kept as `data/processed_pre_v6`.
 
@@ -960,17 +991,32 @@ To bring the results back:
 cd ~/scratch/dl-proj-2026 && tar czf v2_data.tgz data/raw/pianocore/atepp/audio/fetch_report.json data/raw/pianocore/atepp_tk/retranscribe_report.json data/processed/report.json data/processed/meter/*report*.json outputs/runs/*_v6*/config.json outputs/runs/*_v6*/log.csv outputs/runs/*_v6*/eval_*.json outputs/system_eval/results.md outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/paired.md slurm-d*.out slurm-m*.out 2>/dev/null; ls -la v2_data.tgz
 ```
 
-## 4z. Our Beat This!: retrained without ASAP, fine-tuned on piano, cross-fitted
+## 4z. Our Beat This!: retrained without ASAP, fine-tuned on piano, plain and multi-task, cross-fitted
 
 `pace/v2_btft.sh` retrains Beat This! from scratch on its published data without ASAP, fine-tunes it on
-our piano data (classical and pop, recordings and renders, balanced), cross-fitted so the meter
-model's training beats come from a model that never heard the piece, then trains and scores a meter
-model on them. Once, on the login node: FluidSynth and the SoundFonts as for 4x, and
-`pip install pytorch-lightning`. Space: ~108 GB for Beat This!'s data without ASAP (`EXCLUDE="asap,harmonix"`: ~63 GB) plus ~25 GB.
+the v6 data (classical and modern, recordings and renders, the four cells balanced) in two versions,
+cross-fitted so the meter model's training beats come from a model that never heard the piece, then
+retrains the meter model on each version's beats. Run it as steps 3b, 4 and 5 of the run order above.
+
+- **Plain** (`bt_ft`) and **multi-task** (`bt_ftm`, `src/bt_multitask.py`: also learning each frame's
+  time signature from the score alignment, which fixes the notated beat level; the head is dropped
+  after training): the same base, data, folds and recipe otherwise.
+- Each: a model on every fold (`*_full`: tracks the test recordings, would serve the demo) and one
+  leaving each fold out (`*_fold0`-`3`: the training performances' beats, each piece by the model that
+  never heard it).
+- Fine-tuning data (`scripts/export_beat_this.py`): ASAP (renders, its MAESTRO recordings), PianoCoRe
+  (PERiScoPe and Aria-MIDI renders, ATEPP / GiantMIDI-Piano's downloaded recordings), Gangqinpu
+  (recordings, renders); never a test piece; folds by piece. Recordings count twice as much as
+  renders (`--shares`): renders add pieces with no recording, but the meter model's training beats of
+  those pieces (PERiScoPe, clean ASAP, Aria-MIDI: about 40% of its draws) come from renders, so the
+  tracker must not become better on renders than on recordings.
+- Once, on the login node: FluidSynth and the SoundFonts as for 4x, and `pip install pytorch-lightning`.
+  Space: ~108 GB for Beat This!'s data without ASAP (`EXCLUDE="asap,harmonix"`: ~63 GB) plus ~25 GB.
 
 ```bash
-bash pace/v2_btft.sh                  # stage 1, the trackers (7 jobs)
-STAGE=use bash pace/v2_btft.sh        # stage 2, after stage 1: using them (8 jobs)
+bash pace/v2_btft.sh                    # stage 1, train (4 jobs): refuses before pace/v2_data.sh's build
+STAGE=finetune bash pace/v2_btft.sh     # stage 2, the 10 fine-tunes (8 jobs)
+STAGE=use bash pace/v2_btft.sh          # stage 3, beats, meter models, whole pieces (8 jobs)
 # compute nodes without internet: fetch on the login node first (tmux), then FETCHED=1 bash pace/v2_btft.sh
 python scripts/fetch_beat_this_data.py --exclude asap
 ```
@@ -978,18 +1024,19 @@ python scripts/fetch_beat_this_data.py --exclude asap
 | job | what | waits for |
 |---|---|---|
 | `btfetch` | the tests; Beat This!'s published data without ASAP (`scripts/fetch_beat_this_data.py`) | - |
-| `btexport` | our piano data in its format, K = 4 folds by piece, the four cells balanced (`scripts/export_beat_this.py`, `export_report.json`: the mix and each fold model's hours per cell) | - |
+| `btexport` | the v6 data in its format, K = 4 folds by piece, recordings twice the weight of renders, each beat's time signature (`.meter`) for the multi-task version (`export_report.json`: the mix and each fold model's hours per cell) | - |
 | `btbase`, `btbase2` | Beat This! from scratch without ASAP, its recipe (`bt_noasap`) | `btfetch` |
-| `btft_a`, `btft_b`, `btft_c` | fine-tuned from it: every fold (`bt_ft_full`), and each fold left out (`bt_ft_fold0`-`3`) | `btbase2`, `btexport` |
-| `btprep` (stage 2) | the model set (`outputs/beat_this/bt_ft/models.json`); Gangqinpu's recordings and the evaluation's recordings tracked | - |
-| `bttrack0`-`2` | every training performance rendered and tracked by its fold's model | `btprep` |
-| `btmeter`, `btmeter2` | `meter_v4_gq_ft` on those beats | the shards |
-| `bteval`, `btfinal` | whole pieces with our tracker's beats of the test recordings (`_btft`), against `meter_v4_gq`; Beyer & Dai's metrics | `btmeter2` |
+| `ftfull`, `ft01`, `ft23`, `ftres` (stage 2) | `bt_ft_full`, `bt_ft_fold0`-`3`; any not finished resumed | stage 1 |
+| `ftmfull`, `ftm01`, `ftm23`, `ftmres` | the same for the multi-task `bt_ftm_*` | stage 1 |
+| `btprep` (stage 3) | both model sets (`outputs/beat_this/bt_ft*/models.json`); Gangqinpu's recordings tracked by both, the evaluation's by both full models (tags `ft`, `ftm`); renders against recordings for the released tracker and both new ones (`outputs/render_check_*/render_check.md`: read them before trusting `meter_v6_ft*`, whose rendered training beats should be no cleaner than real ones) | stage 2 |
+| `bttrack0`-`2` | every training performance rendered once and tracked by both sets, each piece by its fold's models | `btprep` |
+| `btmeter`, `btmeter2` | `meter_v6_ft`, `meter_v6_ftm` (the v6 recipe, each on its tracker's beats only) | the shards |
+| `bteval`, `btfinal` | whole pieces (ASAP real, Gangqinpu): `nl_v6 + meter_v6_ft` on `bt_ft`'s beats (`_btft`), `nl_v6 + meter_v6_ftm` on `bt_ftm`'s (`_btftm`); the release `nl_gq_mc + meter_v4_gq` on each one's beats (the tracker alone); Beyer & Dai's metrics | `btmeter2` |
 
 To bring the results back:
 
 ```bash
-cd ~/scratch/dl-proj-2026 && tar czf v2_btft.tgz data/beat_this_ft/export_report.json data/beat_this_ft/pieces.json outputs/beat_this/*/status.json outputs/beat_this/*/metrics.csv outputs/beat_this/bt_ft/models.json outputs/beat_this/bt_ft/eval_beats_ft.json data/processed/meter/tracked_report*ft*.json outputs/runs/meter_v4_gq_ft/config.json outputs/runs/meter_v4_gq_ft/log.csv outputs/runs/meter_v4_gq_ft/eval_meter.json outputs/system_eval/results.md outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/paired.md slurm-bt*.out 2>/dev/null; ls -la v2_btft.tgz
+cd ~/scratch/dl-proj-2026 && tar czf v2_btft.tgz data/beat_this_ft/export_report.json data/beat_this_ft/pieces.json outputs/beat_this/*/status.json outputs/beat_this/*/metrics.csv outputs/beat_this/bt_ft*/models.json outputs/beat_this/bt_ft*/eval_beats_*.json data/processed/meter/tracked_report*ft*.json outputs/runs/meter_v6_ft*/config.json outputs/runs/meter_v6_ft*/log.csv outputs/runs/meter_v6_ft*/eval_meter.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md slurm-bt*.out slurm-ft*.out 2>/dev/null; ls -la v2_btft.tgz
 ```
 
 ## 5. Compare the runs and bring results back
