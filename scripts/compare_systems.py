@@ -21,6 +21,8 @@ BASE = "v2_nl_base_gn_meter_v3"            # the round-3 system: each round-4 ch
 TP = BASE + "_tp"
 RELEASE = TP + "_d95_tidy"                 # the released configuration (src/release.py)
 SEQ = "sf_base_reg_cab_c128_meter_sb"      # the best seq2seq system
+GQ_NL = "v2_nl_gq"                         # the labeller trained with Gangqinpu's scores
+PMHS = GQ_NL + "_meter_v4_gq_pmhs_d95_tidy_pm_rpm_hos"   # v2 with PM2S retrained stably and its meter model
 PAIRS = [  # (A, B, what A changes)
     (TP, BASE, "tempo-prior decoder (meter_v3_tp)"),
     (BASE + "_tidy", BASE, "length tidying"),
@@ -39,6 +41,90 @@ PAIRS = [  # (A, B, what A changes)
     ("v2_nl_base_gn_meter_v3_ft_d95_tidy", RELEASE, "the release with meter_v3 fine-tuned with the tempo head"),
     (SEQ, RELEASE, "seq2seq (best) against the release"),
     ("beyer_dai", RELEASE, "Beyer & Dai against the release"),
+    # sixth round (pace/v2_gangqinpu.sh): each change against the release
+    ("v2_nl_base_gn_meter_v3_tp_rf_d95_tidy", RELEASE, "the release, beat times from the notes (snap + fill)"),
+    ("v2_nl_base_gn_meter_v3_tp_fill_d95_tidy", RELEASE, "the release, missed beats filled from the notes"),
+    (RELEASE + "_pm_rpm", RELEASE, "the release with PM2S's beats instead of Beat This!'s"),
+    ("v2_nl_base_gn_meter_v4_gq_d95_tidy", RELEASE, "meter model trained with Gangqinpu (Beat This!)"),
+    ("v2_nl_base_gn_meter_v4_gq_both_d95_tidy", RELEASE, "meter model trained with Gangqinpu (Beat This! + PM2S)"),
+    ("v2_nl_base_gn_meter_v4_gq_pm_d95_tidy_pm_rpm", RELEASE + "_pm_rpm", "meter model trained with Gangqinpu for PM2S, both on PM2S"),
+    ("v2_nl_base_gn_meter_v4_gq_both_d95_tidy", "v2_nl_base_gn_meter_v4_gq_d95_tidy", "PM2S as evidence on Beat This!'s beats"),
+    (SEQ, "v2_nl_base_gn_meter_v4_gq_d95_tidy", "seq2seq (best) against v2 with the Gangqinpu meter model"),
+    ("beyer_dai", "v2_nl_base_gn_meter_v4_gq_d95_tidy", "Beyer & Dai against v2 with the Gangqinpu meter model"),
+    # seventh round (pace/v2_pm2s.sh): PM2S retrained without our test pieces (tag ho)
+    (RELEASE + "_pm_rpm_ho", RELEASE, "the release with PM2S's beats, PM2S trained without our test pieces"),
+    (RELEASE + "_pm_rpm_ho", RELEASE + "_pm_rpm", "PM2S without our test pieces vs the released PM2S (the leak)"),
+    ("v2_nl_base_gn_meter_v4_gq_pm_d95_tidy_pm_rpm_ho", RELEASE, "meter_v4_gq_pm with the held-out PM2S's beats"),
+    ("v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", RELEASE, "meter model trained for the held-out PM2S, with it"),
+    ("v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", "v2_nl_base_gn_meter_v4_gq_pm_d95_tidy_pm_rpm_ho",
+     "meter model trained for the held-out PM2S vs for the released one"),
+    (SEQ, "v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", "seq2seq (best) against v2 with the held-out PM2S"),
+    ("beyer_dai", "v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", "Beyer & Dai against v2 with the held-out PM2S"),
+    # eighth round (pace/v2_gqlabel.sh): the labeller trained with Gangqinpu's scores (nl_gq), on ASAP
+    # and on Gangqinpu's test pieces (outputs/system_eval_gangqinpu)
+    (GQ_NL + "_meter_v3_tp_d95_tidy", RELEASE, "the release with the labeller trained with Gangqinpu"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy", "v2_nl_base_gn_meter_v4_gq_d95_tidy",
+     "labeller trained with Gangqinpu, both on the Gangqinpu meter model"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy", RELEASE, "both models trained with Gangqinpu"),
+    ("v2_nl_base_gn_meter_v4_gq_d95_tidy", RELEASE, "meter model trained with Gangqinpu (Beat This!)"),
+    ("v2_nl_base_gn_meter_v4_gq_pm_d95_tidy_pm_rpm", "v2_nl_base_gn_meter_v4_gq_d95_tidy",
+     "PM2S's beats against Beat This!'s (each with its Gangqinpu meter model)"),
+    ("v2_nl_base_gn_meter_v3_s1_tp_d95_tidy", RELEASE, "the release, the meter model's second seed (chance)"),
+    ("v2_nl_base_gn_meter_v4_gql_d95_tidy", "v2_nl_base_gn_meter_v4_gq_d95_tidy",
+     "the Gangqinpu meter model trained longer (100k steps)"),
+    (SEQ, GQ_NL + "_meter_v4_gq_d95_tidy", "seq2seq (best) against v2 with both models trained with Gangqinpu"),
+    ("beyer_dai", GQ_NL + "_meter_v4_gq_d95_tidy", "Beyer & Dai against v2 with both models trained with Gangqinpu"),
+    (SEQ, RELEASE, "seq2seq (best) against the release"),
+    ("beyer_dai", RELEASE, "Beyer & Dai against the release"),
+    # ninth round (pace/v2_pm2s2.sh): PM2S retrained with stable optimisation (tag hos), with nl_gq
+    (RELEASE + "_pm_rpm_hos", RELEASE + "_pm_rpm_ho", "PM2S retrained stably vs its first retraining"),
+    (RELEASE + "_pm_rpm_hos", RELEASE + "_pm_rpm", "PM2S retrained stably vs the released PM2S (what the leak was worth)"),
+    (RELEASE + "_pm_rpm_hos", RELEASE, "the release with the stably retrained PM2S"),
+    (PMHS, GQ_NL + "_meter_v4_gq_d95_tidy", "PM2S + its meter model vs the default (Beat This!; on clean MIDI: rendered)"),
+    (PMHS, "v2_nl_base_gn_meter_v4_gq_pmho_d95_tidy_pm_rpm_ho", "the stable PM2S path vs the first one"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_rsb", GQ_NL + "_meter_v4_gq_d95_tidy", "Beat This! on the rendered MIDI vs on the recording"),
+    (PMHS, GQ_NL + "_meter_v4_gq_d95_tidy_rsb", "MIDI input: PM2S + its meter model vs Beat This! on the rendered MIDI"),
+    (SEQ, PMHS, "seq2seq (best) against v2 with the stable PM2S"),
+    ("beyer_dai", PMHS, "Beyer & Dai against v2 with the stable PM2S"),
+    # the timing check (src/timing.py; pace/v2_pm2s2.sh p2sys, or pace/v2_timing.sh)
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc", GQ_NL + "_meter_v4_gq_d95_tidy",
+     "the timing check: triplets the timing contradicts written straight"),
+    # the beat-level timing check (src/timing.py check_beats), the readability rules and the short-bar
+    # fix (src/readable.py), each on the timing check (pace/v2_decode.sh)
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "the beat-level timing check: beats played straight written straight, not as the labeller's triplets"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_rd", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "the readability rules: 16th rests closed, small overlaps trimmed (stems, hidden rests)"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_jf", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "the short-bar fix: bars the meter decoder stretched with a jump shortened"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "all three (the demo's default) against the timing check alone"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf", GQ_NL + "_meter_v4_gq_d95_tidy",
+     "the rules against the plain system"),
+    # tenth round (pace/v2_decode.sh): the deep-learning side of the same problems
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_bd", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "beat-level decoding of the labeller (its probabilities + the timing, tuned on validation)"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_bd", GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb",
+     "beat-level decoding against the whole-beat rule"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_tc", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "the labeller retrained without the contradicted labels (written triplet, played straight)"),
+    (GQ_NL + "_meter_v4_gq_lt_d95_tidy_tc", GQ_NL + "_meter_v4_gq_d95_tidy_tc",
+     "the meter decoder with local tempo consistency"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd", GQ_NL + "_meter_v4_gq_d95_tidy",
+     "the demo's default against the plain system"),
+    # the follow-up (pace/v2_decode2.sh): each correction rule added to the models alone (scripts/rule_verdict.py)
+    (GQ_NL + "_meter_v4_gq_d95_tidy_bd", GQ_NL + "_meter_v4_gq_d95_tidy", "nl_gq: the beat decoding"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tc_bd", GQ_NL + "_meter_v4_gq_d95_tidy_bd", "nl_gq + decoding: the timing check"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_tb_bd", GQ_NL + "_meter_v4_gq_d95_tidy_bd", "nl_gq + decoding: the whole-beat check"),
+    (GQ_NL + "_meter_v4_gq_d95_tidy_jf_bd", GQ_NL + "_meter_v4_gq_d95_tidy_bd", "nl_gq + decoding: the short-bar fix"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy", GQ_NL + "_meter_v4_gq_d95_tidy",
+     "the retrained labeller (contradicted labels masked), models alone"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy", "nl_gq_mc: the beat decoding"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_tc_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd", "nl_gq_mc + decoding: the timing check"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_tb_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd", "nl_gq_mc + decoding: the whole-beat check"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_jf_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd", "nl_gq_mc + decoding: the short-bar fix"),
+    ("v2_nl_gq_mc_meter_v4_gq_d95_tidy_tc_tb_rd_jf_bd", "v2_nl_gq_mc_meter_v4_gq_d95_tidy_bd",
+     "nl_gq_mc + decoding: every rule"),
 ]
 
 
@@ -52,6 +138,16 @@ def load(path):
     return out
 
 
+def piece_of(performance):
+    """The piece a performance is of: ASAP's folder (``Bach/Prelude/bwv_875/Ahfat01M.mid`` ->
+    ``Bach/Prelude/bwv_875``), whose performances are not independent. A Gangqinpu performance
+    (``gangqinpu/<sample id>``, scripts/gangqinpu_inputs.py: one per score) is its own piece; the
+    first version grouped all of them into one ("gangqinpu"), which gave zero-width intervals."""
+    if performance.startswith("gangqinpu/"):
+        return performance
+    return performance.rsplit("/", 1)[0]
+
+
 def paired(a, b, n_boot=4000, seed=0):
     """A - B on the performances both scored: n, pieces, mean, 95% interval, how many A is better on."""
     common = sorted(set(a) & set(b))
@@ -59,7 +155,7 @@ def paired(a, b, n_boot=4000, seed=0):
         return None
     by_piece = defaultdict(list)
     for p in common:
-        by_piece[p.rsplit("/", 1)[0]].append(a[p] - b[p])
+        by_piece[piece_of(p)].append(a[p] - b[p])
     groups = list(by_piece.values())
     diffs = [x for g in groups for x in g]
     rng = random.Random(seed)
@@ -84,7 +180,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--results", default="outputs/system_eval/results.json")
     ap.add_argument("--ablation", default="outputs/system_eval_ablation/results.json",
-                    help="the beat ablation's results (its _ab system against the same system), if there")
+                    help="the beat ablation's results (its _ab system against the same system), if there; '' = none")
     ap.add_argument("--pair", nargs=2, action="append", metavar=("A", "B"), help="instead of the default pairs")
     ap.add_argument("--out", default="outputs/system_eval/paired.md")
     args = ap.parse_args(argv)
@@ -96,7 +192,7 @@ def main(argv=None):
              "MUSTER mean error, system A minus system B, per performance (negative: A is better). "
              "Interval: 95% bootstrap over pieces. Bold: the interval excludes 0. `better on`: "
              "performances where A's error is lower. From `{}` (`scripts/compare_systems.py`).".format(args.results), ""]
-    for cond in ("real", "clean"):
+    for cond in ("real", "clean", "gangqinpu_real", "gangqinpu"):
         rows = []
         for a, b, label in pairs:
             if (a, cond) in res and (b, cond) in res:
@@ -107,7 +203,7 @@ def main(argv=None):
             lines += ["## {}".format(cond), "",
                       "| what | A | B | A - B | 95% interval | A better on | pieces |", "|---|---|---|---|---|---|---|"]
             lines += rows + [""]
-    if Path(args.ablation).exists():
+    if args.ablation and Path(args.ablation).exists():
         ab = load(args.ablation)
         rows = []
         for (s, cond) in sorted(ab):

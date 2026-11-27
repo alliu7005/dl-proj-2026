@@ -450,6 +450,17 @@ release's name (`v2-round4`), so `download_models.py --revision v2-round4` alway
 version. `HF_REPO` in `src/release.py` names this repo, so anyone gets the models with
 `python scripts/download_models.py`.
 
+**Publishing as training finishes (since 2026-11-26).** The `hf auth login` above, once, is all
+it needs. Every run a job of `pace/v2_jobs.sh` finishes (meter models once evaluated, labellers,
+seq2seq) goes to the repo through `scripts/publish_model.py`: kept under `runs/<run>/`, and made
+the default of its folder when it scores at least as well as the one there on their shared test
+sets. The demo then pulls it. A failed upload never fails a job. `PUBLISH=0 bash pace/<batch>.sh`
+publishes nothing. By hand, for a run finished before:
+
+```bash
+cd ~/scratch/dl-proj-2026 && module load anaconda3 && conda activate dl-proj && python scripts/publish_model.py --run outputs/runs/meter_v4_gq
+```
+
 To bring the results back (PACE, then Windows):
 
 ```bash
@@ -589,6 +600,250 @@ scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_gq.tgz .
 
 ```powershell
 tar xzf v2_gq.tgz
+```
+
+## 4p. v2, seventh round: PM2S retrained without our test pieces
+
+After 4o (docs/experiments.md, "Seventh round"). With PM2S's beats, v2 gained the most of any change
+so far, but PM2S's released weights were trained on all of ASAP, our test pieces included.
+`scripts/train_pm2s.py` trains its model again from scratch, by its own recipe, on our training
+splits only: `pm2s_ho`. Every output made with it carries the tag `ho` (`PM2S_WEIGHTS` /
+`PM2S_TAG`, `src/pm2s_beats.py weights_tag`), so the released PM2S's results stay as they are.
+
+**Before you start:** `git pull`; the queue empty (8 jobs, PACE's limit); 4o's outputs there (the
+script stops with a message if one is missing).
+
+```bash
+bash pace/v2_pm2s.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `phtests` | the test suites (CPU) | - |
+| `phtrain` | `pm2s_ho` trained (`scripts/train_pm2s.py`: ASAP's training pieces, their transcriptions, PERiScoPe and Gangqinpu, validation on their val splits; up to 7.5 h, about 2 h expected); fails unless finished | `phtests` (cancelled if they fail) |
+| `phtrack` | its beats of Gangqinpu's and PERiScoPe's notes stored (`tracked_*_pm2s_ho.npz`, `tracked_report_ho.json`), its errors fitted (`configs/beat_noise_pm2s_ho.json`), its beats on the ASAP test inputs (`outputs/system_eval/beats_compare_ho.md`) | `phtrain` (cancelled if it fails) |
+| `phsys` | the release and `meter_v4_gq_pm` on whole pieces with its beats (`..._pm_rpm_ho`); `meter_v4_gq_pm` at the meter level with them (`<condition>_pm2s_ho`) | `phtrain` (cancelled if it fails) |
+| `phmeter`, `phmeter2` | `meter_v4_gq_pmho`: `meter_v4_gq_pm`'s recipe with `pm2s_ho`'s stored beats and fitted errors; tuned and evaluated; the second job resumes | `phtrack`; `phmeter` (finished or not) |
+| `pheval` | `meter_v4_gq_pmho` with `pm2s_ho`'s beats on every test set, `nl_base_gn` on its grids, whole pieces (`:tidy,d95,pm,rpm`) | `phmeter2` (finished or not) |
+| `phfinal` | `outputs/compare`, every system rated with Beyer & Dai's metrics, `outputs/system_eval/paired.md` | `phsys`, `pheval` (finished or not) |
+
+**What to check:** after `phtrain`, `outputs/runs/pm2s_ho/log.csv` (validation beat / downbeat F
+per source) and `status.json`; after `phtrack`, `outputs/system_eval/beats_compare_ho.md` next to
+`beats_compare.md` (the released PM2S, same inputs) and `data/processed/meter/tracked_report_ho.json`
+next to `tracked_report.json`.
+
+**If something goes wrong:**
+- *`phtrain` stopped before the end:* `bash pace/v2_pm2s.sh` again (it resumes from `last.pt`).
+- *`meter_v4_gq_pmho` not done after `phmeter2`* (`pheval`'s log says "not done yet"):
+  `STAGE=meter bash pace/v2_pm2s.sh`.
+- *Only the evaluation again:* `STAGE=eval bash pace/v2_pm2s.sh`.
+
+To bring the results back (PACE, then Windows, from the repo folder):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_pm2s.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/beats_compare_ho.* data/processed/meter/tracked_report_ho.json configs/beat_noise_pm2s_ho.json outputs/runs/pm2s_ho/*.json outputs/runs/pm2s_ho/log.csv outputs/runs/meter_v4_gq_pmho/*.json outputs/runs/meter_v4_gq_pmho/log.csv outputs/runs/meter_v4_gq_pm/eval_meter.json outputs/runs/nl_base_gn/eval_pieces_best.json slurm-ph*.out slurm-met_meter_v4_gq_pmho*.log 2>/dev/null; ls -la v2_pm2s.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_pm2s.tgz .
+```
+
+```powershell
+tar xzf v2_pm2s.tgz
+```
+
+## 4q. v2, eighth round: the labeller on Gangqinpu's scores, whole pieces outside classical piano
+
+After 4p (docs/experiments.md, "Eighth round"). The labeller has only seen classical scores, and
+"more general" has only been measured on the meter model. This round trains the labeller with
+Gangqinpu's written scores (`nl_gq`) and scores every system on 60 of Gangqinpu's test pieces as
+whole pieces, with the ASAP benchmark's metrics (`outputs/system_eval_gangqinpu`). It also trains
+`meter_v4_gq` longer (`meter_v4_gql`) and puts the release meter model's second seed through
+whole pieces (`meter_v3_s1_tp`).
+
+**Before you start:**
+- `git pull`;
+- the queue empty: 8 jobs, PACE's limit, so 4p's batch must have finished;
+- 4o's outputs there: the Gangqinpu release, its test recordings, `meter_v4_gq`, `meter_v4_gq_pm`.
+  The script stops with a message if one is missing.
+
+```bash
+bash pace/v2_gqlabel.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `lbtests` | the test suites (CPU) | - |
+| `lbdata` | Gangqinpu's scores as windows (`scripts/build_gangqinpu_windows.py` -> `data/processed/{train,val,test}_gangqinpu`, each with a `report.json`) and their labels (CPU); `meter_v3_s1` with the tempo-prior decoder (`meter_v3_s1_tp`) | `lbtests` |
+| `lbinputs` | 60 whole test pieces, one per score (`scripts/gangqinpu_inputs.py`): the written score as reference, the aligned notes (`gangqinpu`), Transkun on the recording (`gangqinpu_real`), Beat This!'s beats of the recording | `lbtests` |
+| `lbtrain` | `nl_base_gn` scored on Gangqinpu's windows first, so the gate that publishes `nl_gq` compares them on pop too; `nl_gq` trained (`nl_base_gn`'s recipe, Gangqinpu half of the windows) and evaluated on the true grid; `nl_gq` and `nl_base_gn` on `meter_v3_tp`'s and `meter_v4_gq`'s grids, Gangqinpu's windows included | `lbdata` (cancelled if it fails) |
+| `lbmeter` | `meter_v4_gql` (`meter_v4_gq` with 100k steps) trained, tuned and evaluated | `lbtests` |
+| `lbsys` | whole pieces: `nl_gq` with `meter_v3_tp` and `meter_v4_gq` (ASAP and Gangqinpu), `nl_base_gn` with `meter_v3_s1_tp` (ASAP) | `lbtrain`, `lbinputs` (finished or not) |
+| `lbsys2` | whole pieces on Gangqinpu: the release, `meter_v4_gq`, `meter_v4_gq_pm` with PM2S, seq2seq; Beyer & Dai's predictions there | `lbinputs` (cancelled if it fails) |
+| `lbfinal` | `meter_v4_gql` on whole pieces (if trained); `outputs/compare`; Beyer & Dai's metrics for every system on both test sets; `outputs/system_eval/paired.md`, `outputs/system_eval_gangqinpu/paired.md` | `lbsys`, `lbsys2`, `lbmeter` (finished or not) |
+
+**What to check:**
+- after `lbdata`: `data/processed/train_gangqinpu/report.json`. It should show about 98% of the
+  performances kept, no tokens outside the vocabulary, and few windows dropped.
+- after `lbinputs`: `outputs/system_eval_gangqinpu/inputs_report.json` (what was skipped). If
+  Transkun is not installed in the environment, there is no `gangqinpu_real` and its log says so.
+- after `lbtrain`: `outputs/runs/nl_gq/log.csv`. `val_gq_onset_f1` is the labeller on Gangqinpu's
+  validation windows; `val_onset_f1` and `val_real_onset_f1` should stay near `nl_base_gn`'s.
+
+**If something goes wrong:**
+- *`nl_gq` not done after `lbtrain`:* `bash pace/v2_jobs.sh labellers nl_gq` in a GPU job resumes
+  it, then `STAGE=eval bash pace/v2_gqlabel.sh`.
+- *Only the whole pieces and the scoring again:* `STAGE=eval bash pace/v2_gqlabel.sh`.
+
+To bring the results back (PACE, then Windows, from the repo folder):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_gqlabel.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/manifest.json outputs/system_eval_gangqinpu/inputs_report.json data/processed/*_gangqinpu/report.json outputs/runs/nl_gq/*.json outputs/runs/nl_gq/log.csv outputs/runs/nl_base_gn/eval_pieces_best.json outputs/runs/meter_v4_gql/*.json outputs/runs/meter_v4_gql/log.csv outputs/runs/meter_v3_s1_tp/*.json slurm-lb*.out slurm-labeller_nl_gq*.log slurm-met_meter_v4_gql*.log 2>/dev/null; ls -la v2_gqlabel.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_gqlabel.tgz .
+```
+
+```powershell
+tar xzf v2_gqlabel.tgz
+```
+
+## 4r. v2, ninth round: PM2S retrained with stable optimisation
+
+After 4q (docs/experiments.md, "Ninth round"). The seventh round's PM2S without our test pieces
+trained unstably and was best at step 10,000 of 60,000. Even so, it made v2 for MIDI input level
+with seq2seq and Beyer & Dai on clean MIDI. This round trains it twice with stable settings
+(learning rate 3e-4 and 1e-4) and picks the better one by its validation score, linked as
+`pm2s_hos` (tag `hos`). Then it trains the meter model for it (`meter_v4_gq_pmhs`) and scores v2
+with it and `nl_gq` on ASAP and Gangqinpu, against today's default and against Beat This! on the
+rendered MIDI (what a MIDI upload gets now).
+
+**Before you start:**
+- `git pull`. PACE has `configs/beat_noise_pm2s_ho.json` untracked, so move it aside first (the
+  command is below).
+- The queue empty: 8 jobs.
+- 4q's outputs there. The script stops with a message if one is missing.
+
+```bash
+cd ~/scratch/dl-proj-2026 && [ -f configs/beat_noise_pm2s_ho.json ] && mv configs/beat_noise_pm2s_ho.json configs/beat_noise_pm2s_ho.json.pace; git pull && squeue -u $USER
+```
+
+```bash
+bash pace/v2_pm2s2.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `p2tests` | the test suites (CPU) | - |
+| `p2train_a`, `p2train_b` | `pm2s_ho2` (lr 3e-4) and `pm2s_ho3` (lr 1e-4): AdamW betas 0.9 / 0.999, eps 1e-8, clipping 1.0, warmup 1000, cosine; up to 7.5 h each (about 3 h expected) | `p2tests` |
+| `p2track` | the better one picked (`scripts/pick_run.py` -> `outputs/runs/pm2s_hos`, `chosen.json`); its beats stored (`tracked_*_pm2s_hos.npz`), its errors fitted (`configs/beat_noise_pm2s_hos.json`), its beats on the ASAP test inputs (`beats_compare_hos.md`) | both trainings (finished or not) |
+| `p2sys` | the release with its beats (`_pm_rpm_hos`); `meter_v4_gq_pm` at the meter level with them; on Gangqinpu, `nl_gq` + `meter_v4_gq` with Beat This! on the rendered MIDI (`_rsb`); `nl_gq` + `meter_v4_gq` with the timing check (`_tc`, `src/timing.py`) on ASAP and Gangqinpu | `p2track` |
+| `p2meter` | `meter_v4_gq_pmhs` trained, tuned and evaluated | `p2track` |
+| `p2eval` | `meter_v4_gq_pmhs` with its beats on every test set, `nl_gq` on its grids, whole pieces (`nl_gq+meter_v4_gq_pmhs:tidy,d95,pm,rpm`) on ASAP and Gangqinpu | `p2meter` (finished or not) |
+| `p2final` | `outputs/compare`, Beyer & Dai's metrics for every system on both test sets, both `paired.md` | `p2sys`, `p2eval` (finished or not) |
+
+**What to check:**
+- after the trainings: `outputs/runs/pm2s_ho2/log.csv` and `pm2s_ho3/log.csv`. `loss_beat` should
+  fall and stay down (pm2s_ho's rose after step 8,000), with `grad_norm` steady.
+- after `p2track`: `outputs/runs/pm2s_hos/chosen.json` (which one won, both scores), then
+  `outputs/system_eval/beats_compare_hos.md` next to `beats_compare_ho.md` and `beats_compare.md`.
+
+**If something goes wrong:**
+- *A training stopped before the end:* `bash pace/v2_pm2s2.sh` again (it resumes from `last.pt`).
+- *`meter_v4_gq_pmhs` not done after `p2meter`:* `STAGE=meter bash pace/v2_pm2s2.sh`.
+- *Only the evaluation again:* `STAGE=eval bash pace/v2_pm2s2.sh`.
+
+To bring the results back (PACE, then Windows, from the repo folder):
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_pm2s2.tgz outputs/compare outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/beats_compare_hos.* outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json data/processed/meter/tracked_report_hos.json configs/beat_noise_pm2s_hos.json outputs/runs/pm2s_ho2/*.json outputs/runs/pm2s_ho2/log.csv outputs/runs/pm2s_ho3/*.json outputs/runs/pm2s_ho3/log.csv outputs/runs/pm2s_hos/chosen.json outputs/runs/meter_v4_gq_pmhs/*.json outputs/runs/meter_v4_gq_pmhs/log.csv outputs/runs/meter_v4_gq_pm/eval_meter.json outputs/runs/nl_gq/eval_pieces_best.json slurm-p2*.out slurm-met_meter_v4_gq_pmhs*.log 2>/dev/null; ls -la v2_pm2s2.tgz
+```
+
+```powershell
+scp <gtid>@login-ice.pace.gatech.edu:~/scratch/dl-proj-2026/v2_pm2s2.tgz .
+```
+
+```powershell
+tar xzf v2_pm2s2.tgz
+```
+
+## 4s. The timing check on whole pieces (if 4r was submitted before it)
+
+`pace/v2_pm2s2.sh` measures the timing check in its `p2sys` job. If that batch was submitted before
+the timing check existed, `pace/v2_timing.sh` does the same in 3 jobs. Submit it once the queue has
+room, since PACE allows about 8 jobs:
+
+```bash
+bash pace/v2_timing.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `tctests` | the test suites (CPU) | - |
+| `tcsys` | `nl_gq` + `meter_v4_gq:tidy,d95,tc` on ASAP and Gangqinpu's whole pieces | `tctests` |
+| `tcfinal` | Beyer & Dai's metrics for every system (ASAP, Gangqinpu), both `paired.md` | `tcsys` (finished or not) |
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_timing.tgz outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-tc*.out 2>/dev/null; ls -la v2_timing.tgz
+```
+
+## 4t. Tenth round: the model-side fixes, and every rule measured
+
+`pace/v2_decode.sh` tests the deep-learning side of the rhythm problems the demo's rules patch, and
+scores each rule on its own (whole pieces, ASAP and Gangqinpu). It needs the queue empty (8 jobs):
+
+```bash
+bash pace/v2_decode.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `dctests` | the test suites (CPU) | - |
+| `dcaudit` | the label audit (`scripts/audit_labels.py`): how often Gangqinpu's and ASAP's scores write a beat as triplets that was played straight | `dctests` |
+| `dctune` | `nl_gq`'s beat decoding tuned on validation (`beat_decode.json`), the labeller evaluated with it, published (the demo pulls it); `meter_v4_gq_lt`: the meter decoder's local tempo term tuned and evaluated | `dctests` |
+| `dctrain` | `nl_gq_mc`: `nl_gq` retrained with the contradicted labels left out of the loss (`--mask-contradicted`), evaluated, published if better | `dctests` |
+| `dceval` | `nl_gq_mc` on `meter_v4_gq`'s grids; its beat decoding tuned | `dctrain` |
+| `dcasap` | whole pieces on ASAP: `nl_gq` + `meter_v4_gq:tidy,d95,tc` alone and with `tb`, `rd`, `jf`, `bd`, the rules together, all of them; `nl_gq_mc`; `meter_v4_gq_lt` (systems already scored are kept) | `dctune`, `dceval` (finished or not) |
+| `dcgq` | the same on Gangqinpu's whole pieces | `dctune`, `dceval` (finished or not) |
+| `dcfinal` | Beyer & Dai's metrics for every system (ASAP, Gangqinpu), both `paired.md` | `dcasap`, `dcgq` (finished or not) |
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_decode.tgz outputs/label_audit.json outputs/runs/nl_gq/beat_decode.json outputs/runs/nl_gq/eval_pieces_best.json outputs/runs/nl_gq_mc/config.json outputs/runs/nl_gq_mc/status.json outputs/runs/nl_gq_mc/log.csv outputs/runs/nl_gq_mc/eval_pieces_best.json outputs/runs/nl_gq_mc/beat_decode.json outputs/runs/meter_v4_gq_lt/decode.json outputs/runs/meter_v4_gq_lt/eval_meter.json outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval/*/summary.json outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md outputs/system_eval_gangqinpu/*/summary.json slurm-dc*.out slurm-labeller_nl_gq_mc-*.log 2>/dev/null; ls -la v2_decode.tgz
+```
+
+## 4u. The rule verdict (after or alongside 4t)
+
+`pace/v2_decode2.sh` measures each correction rule added to the models alone (labeller + its
+tuned beat decoding), for `nl_gq` and the retrained `nl_gq_mc`, and lets the benchmark decide which
+rules the demo keeps (`scripts/rule_verdict.py`). It waits for 4t's jobs that are still queued
+(found by name), so it can be submitted while they run (4 jobs):
+
+```bash
+bash pace/v2_decode2.sh
+```
+
+| job | what | waits for |
+|---|---|---|
+| `d2tests` | the test suites (CPU) | - |
+| `d2asap` | whole pieces on ASAP: `nl_gq` + decoding (+ `tb` / `jf`); `nl_gq_mc` alone, + decoding, + `tc` / `tb` / `jf`, every rule | `d2tests`; `dctune`, `dceval` if queued |
+| `d2gq` | the same on Gangqinpu's whole pieces | the same |
+| `d2final` | Beyer & Dai's metrics, both `paired.md`, the rule verdict (`outputs/rule_verdict.md`), published to the release | `d2asap`, `d2gq`; `dcfinal` if queued |
+
+The verdict, for the labeller the release serves: the beat decoding stays on unless it makes the
+system significantly worse; a correction rule (`timing_check`, `timing_beats`, `fix_jumps`) stays
+on only if it makes it significantly better on real recordings (ASAP or Gangqinpu) and worse on
+neither. `publish_model.py --settings` puts the decisions in the release manifest; the demo reads
+them at its next check (`PUBLISH=0 bash pace/v2_decode2.sh`: decided, not published).
+
+To bring the results back:
+
+```bash
+cd ~/scratch/dl-proj-2026 && tar czf v2_decode2.tgz outputs/rule_verdict.json outputs/rule_verdict.md outputs/system_eval/results.md outputs/system_eval/results.json outputs/system_eval/paired.md outputs/system_eval_gangqinpu/results.md outputs/system_eval_gangqinpu/results.json outputs/system_eval_gangqinpu/paired.md slurm-d2*.out 2>/dev/null; ls -la v2_decode2.tgz
 ```
 
 ## 5. Compare the runs and bring results back

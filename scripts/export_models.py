@@ -2,7 +2,9 @@
 its optimizer state (a third of the size), with the files it needs beside it, a manifest with
 sha256 sums, and the model card. Then loads the release the way the demo does, to check it.
 
-    python scripts/export_models.py                     # the round-4 release (on PACE: every run is there)
+    python scripts/export_models.py                     # the release (on PACE: every run is there)
+    python scripts/export_models.py --meter outputs/runs/meter_v3 --release v2-round4 \\
+        --decode outputs/runs/meter_v3_tp/decode.json   # the round-4 release again
     python scripts/export_models.py --seq2seq outputs/runs/sf_base_reg_cab   # another run for one model
     python scripts/export_models.py --no-seq2seq        # v2 only
 
@@ -89,6 +91,8 @@ def export(name: str, run: Path, out: Path, kind: str, vocabs, decode: Path | No
         extra["config.json"] = run / "config.json"
     if kind in ("seq2seq", "labeller"):
         extra["vocab.json"] = pick_vocab(run, kind, vocabs)
+    if kind == "labeller" and (run / "beat_decode.json").exists():   # its tuned beat decoding (src/beat_decode.py)
+        extra["beat_decode.json"] = run / "beat_decode.json"
     if kind == "seq2seq":
         for p in [run / "feature_stats.json", Path("data/processed/feature_stats.json")]:
             if p.exists():
@@ -125,15 +129,16 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="models")
     ap.add_argument("--labeller", default="outputs/runs/nl_base_gn", help="the v2 note labeller's run")
-    ap.add_argument("--meter", default="outputs/runs/meter_v3", help="the v2 meter model's run")
-    ap.add_argument("--decode", default="outputs/runs/meter_v3_tp/decode.json",
-                    help="the meter's tuned decoder (default: meter_v3_tp's, the tempo prior; '' = the meter run's own)")
+    ap.add_argument("--meter", default="outputs/runs/meter_v4_gq", help="the v2 meter model's run")
+    ap.add_argument("--decode", default="",
+                    help="the meter's tuned decoder ('' = the meter run's own: meter_v4_gq's has the tempo prior; "
+                         "the round-4 release used outputs/runs/meter_v3_tp/decode.json with meter_v3)")
     ap.add_argument("--seq2seq", default="outputs/runs/sf_base_reg_cab_c128", help="the seq2seq model's run")
     ap.add_argument("--no-seq2seq", action="store_true")
     ap.add_argument("--vocab", action="append", default=None,
                     help=f"vocab.json candidates when a run has none (repeatable; default: {', '.join(VOCABS)})")
     ap.add_argument("--card", default="docs/model_card.md", help="the model card (models/README.md)")
-    ap.add_argument("--release", default="v2-round4", help="the release's name, in the manifest")
+    ap.add_argument("--release", default="v2-gangqinpu-meter", help="the release's name, in the manifest")
     ap.add_argument("--no-check", action="store_true", help="skip loading the release afterwards")
     args = ap.parse_args(argv)
     final = Path(args.out)

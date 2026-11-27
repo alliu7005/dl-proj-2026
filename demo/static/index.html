@@ -86,6 +86,7 @@
   .paper { background: var(--paper); border-radius: 10px; margin-top: 14px; padding: 8px; min-height: 120px; overflow-x: auto; color: #000; }
   .paper .placeholder { color: #777; padding: 40px; text-align: center; }
   #osmd { position: relative; }  /* OSMD's cursor coordinates start at this box's corner */
+  #osmd.seekable { cursor: pointer; }  /* a click plays from there (Follow.seek) */
   .playhead { position: absolute; left: 0; top: 0; width: 3px; margin-left: -1px; border-radius: 2px; pointer-events: none;
               background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
               opacity: 0; transition: opacity .2s; will-change: transform; z-index: 2; }
@@ -323,6 +324,11 @@ function showResult(id, job) {
       const how = s.delete_above >= 1 ? ' (keeping every note)' : s.delete_above != null ? ` (p > ${s.delete_above})` : '';
       items.push([n, `${word(n, 'note', 'notes')} left out as transcription errors${how}`]);
     }
+    if (s.glissando && (s.glissandi || []).length) {
+      const g = s.glissandi;
+      const bars = g.map((x) => x.bar).join(', ');
+      items.push([g.length, `${word(g.length, 'glissando', 'glissandos')} written as gliss. (${word(g.length, 'bar', 'bars')} ${bars})`]);
+    }
   } else {
     items.push([fmtTime(s.score_s || 0), 'score model']);
   }
@@ -365,6 +371,42 @@ function showResult(id, job) {
   renderScore(base + 'musicxml', has('musicxml'), s);
 }
 
+// OpenSheetMusicDisplay 1.9 draws no <glissando> (it draws a <slide>, and only within a staff): the
+// viewer's copy of the score gets a "gliss." label over each glissando's first note, which it always
+// shows, and the line as a <slide>. The MusicXML download keeps the <glissando> (MuseScore draws it).
+function forViewer(xml) {
+  if (!xml.includes('<glissando')) return xml;
+  try {
+    const doc = new DOMParser().parseFromString(xml, 'application/xml');
+    if (doc.getElementsByTagName('parsererror').length) return xml;
+    for (const g of Array.from(doc.getElementsByTagName('glissando'))) {
+      const slide = doc.createElement('slide');
+      for (const a of Array.from(g.attributes)) slide.setAttribute(a.name, a.value);
+      slide.textContent = g.textContent;
+      g.parentNode.replaceChild(slide, g);
+      if (g.getAttribute('type') !== 'start') continue;
+      let note = slide.parentNode;
+      while (note && note.nodeName !== 'note') note = note.parentNode;
+      if (!note) continue;
+      const dir = doc.createElement('direction');
+      dir.setAttribute('placement', 'above');
+      const type = doc.createElement('direction-type');
+      const words = doc.createElement('words');
+      words.setAttribute('font-style', 'italic');
+      words.textContent = 'gliss.';
+      type.appendChild(words);
+      dir.appendChild(type);
+      const staff = note.getElementsByTagName('staff')[0];   // a part with staves: the note's own
+      if (staff) { const s = doc.createElement('staff'); s.textContent = staff.textContent; dir.appendChild(s); }
+      note.parentNode.insertBefore(dir, note);
+    }
+    return new XMLSerializer().serializeToString(doc);
+  } catch (err) {
+    console.warn('glissando labels skipped', err);
+    return xml;
+  }
+}
+
 async function renderScore(url, ok, stats) {
   const box = $('#osmd');
   if (follow) follow.stop();
@@ -374,7 +416,7 @@ async function renderScore(url, ok, stats) {
   if (!window.opensheetmusicdisplay) { box.innerHTML = '<div class="placeholder">The score viewer could not load (offline?). Download the MusicXML instead.</div>'; return; }
   box.innerHTML = '';
   try {
-    const xml = await (await fetch(url)).text();
+    const xml = forViewer(await (await fetch(url)).text());
     osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay(box, {
       autoResize: false, backend: 'svg', drawTitle: false, drawPartNames: false,
       drawingParameters: 'compacttight',
@@ -419,9 +461,59 @@ class Follow {
     };
     window.addEventListener('resize', this.onResize);
     $('#follow').textContent = this.map
-      ? 'Press play on the recording, the transcription or the score: the bar follows the music.'
-      : 'Press play on the score: the bar follows it.';
+      ? 'Press play on the recording, the transcription or the score: the bar follows the music. Click anywhere on the score to play from there.'
+      : 'Press play on the score: the bar follows it. Click anywhere on the score to play from there.';
     $('#follow').classList.remove('hidden');
+    // click to jump: the player last used (the score's by default) goes to that moment and plays on
+    this.on(this.box, 'click', e => { const q = this.qAt(e.clientX, e.clientY); if (q !== null) this.seek(q); });
+    this.box.classList.add('seekable');
+  }
+
+  // The score position (quarters, the viewer's clock) at a point of the page: the line whose system
+  // holds it (else the nearest), then along that line between the cursor steps around it.
+  qAt(clientX, clientY) {
+    const host = this.bar.parentElement || this.box, r = host.getBoundingClientRect();
+    const x = clientX - r.left, y = clientY - r.top, st = this.steps;
+    let line = null, best = Infinity;
+    for (const s of st) {
+      const d = y < s.y ? s.y - y : (y > s.y + s.h ? y - s.y - s.h : 0);
+      if (d < best) { best = d; line = s.line; if (d === 0) break; }
+    }
+    const ls = st.filter(s => s.line === line);
+    if (!ls.length) return null;
+    if (x <= ls[0].x) return ls[0].q;
+    for (let i = 0; i + 1 < ls.length; i++) {
+      const a = ls[i], b = ls[i + 1];
+      if (x <= b.x) return a.q + (x - a.x) / ((b.x - a.x) || 1) * (b.q - a.q);
+    }
+    const last = ls[ls.length - 1], next = st[st.indexOf(last) + 1];   // past the line's last step
+    if (!next || last.end === undefined) return last.q;
+    return last.q + Math.min(1, (x - last.x) / ((last.end - last.x) || 1)) * (next.q - last.q);
+  }
+
+  // Send the player playing (else the one last used, else the score's) to score position q, playing.
+  seek(q) {
+    const src = this.source || this.last || 'score';
+    // a MIDI player takes a new time only when stopped (playing, it carries on from where it was):
+    // stop it, set the time, start it again
+    const jump = (p, t) => { if (p.playing) p.stop(); p.currentTime = Math.max(0, t); p.start(); };
+    if (src === 'score') {
+      if (this.position('score') === null) return;               // its notes not loaded yet
+      jump($('#mscore'), this.t0 + (q - this.first) * 60 / this.qpm);
+    } else {
+      if (!this.map) return;
+      const t = interp(q - this.first, this.map.q, this.map.t);
+      if (t === null) return;
+      if (src === 'trans') {
+        jump($('#mtrans'), t);
+      } else {
+        const a = $('#audio');
+        a.currentTime = Math.max(0, t);
+        if (a.paused) { const r = a.play(); if (r && r.catch) r.catch(() => {}); }
+      }
+    }
+    this.last = src;
+    this.draw(src);
   }
 
   // Every cursor step of the score: its time in quarters and where the cursor stands (x, top, height:
@@ -489,6 +581,7 @@ class Follow {
     cancelAnimationFrame(this.frame);
     this.handlers.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));
     this.handlers = [];
+    this.box.classList.remove('seekable');
     window.removeEventListener('resize', this.onResize);
     this.bar.remove();
     this.source = null;

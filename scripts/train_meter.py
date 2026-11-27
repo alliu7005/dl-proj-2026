@@ -92,6 +92,7 @@ from src.beats import BeatNoise, f_measure, load_beats  # noqa: E402
 from src.meter import (N_ALL_FEATURES, N_BAR_POS, N_BEAT_FEATURES, N_NOTE_FEATURES, Augment, DecodeConfig, MeterConfig,  # noqa: E402
                        build_meter_model, choose_level, collate, grid_from_logp, grid_scores, logp_of, meter_loss,
                        perf_key, sample)
+from src.pm2s_beats import weights_tag  # noqa: E402
 from src.preprocessing.noise import NoiseModel  # noqa: E402
 
 FIRST_FEATURES = 27  # the first meter model's beat features (--beat-features first)
@@ -432,7 +433,10 @@ def main(argv=None):
                "data": {"train": len(train), "train_by_source": counts, "pieces_by_source": pieces,
                         "val_by_source": {k: len(v) for k, v in groups.items()},
                         "tracked_by_source": tracked_counts, "tracked_aux_by_source": aux_counts,
-                        "real_transcriptions": counts["real"]}},
+                        "real_transcriptions": counts["real"]},
+               # which PM2S weights its stored PM2S beats came from (src/pm2s_beats.py weights_tag; '' = released)
+               "pm2s": ({"tag": weights_tag(), "weights": os.environ.get("PM2S_WEIGHTS") or "released"}
+                        if "pm2s" in (args.tracked, args.aux) else None)},
               open(run / "config.json", "w"), indent=1)
     print(f"meter model: {n_params / 1e6:.2f}M parameters ({n_train / 1e6:.2f}M trained) on {device} (note encoder: "
           f"{'yes' if cfg.get('n_note_features') else 'no'}, {cfg['n_features']} beat features) | training: "

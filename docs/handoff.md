@@ -1,6 +1,6 @@
-# Handoff: where the project stands (2026-11-24)
+# Handoff: where the project stands (2026-11-26)
 
-The course deadline is **2026-12-04** (10 days). This page is for deciding what to do with them:
+The course deadline is **2026-12-04** (9 days). This page is for deciding what to do with them:
 - what exists;
 - how good it is, and how sure we are of that;
 - what is still wrong;
@@ -41,6 +41,19 @@ The details behind every number are in [experiments.md](experiments.md).
 
   v2 kept 4/4 for the whole piece. The window-by-window model guesses the meter for every window
   (the reason v2 was built), and a long, dense, out-of-domain piece shows that most.
+- **Sixth round (2026-11-25):**
+  - Gangqinpu makes the meter model far better on pop (time signature 0.54 -> 0.79).
+  - PM2S's beats bring v2 within chance of seq2seq and Beyer & Dai (11.12 real / 12.08 clean).
+    PM2S trained on our test pieces, so that has to be re-checked first
+    ([Sixth round](#sixth-round-results-2026-11-25)).
+- **Seventh and eighth rounds (2026-11-26,
+  [below](#seventh-and-eighth-rounds-results-2026-11-26)):**
+  - **On pop and other non-classical piano, v2 is now far ahead.** On 58 Gangqinpu test pieces
+    from their recordings, MUSTER mean: v2 4.00, seq2seq 7.69, Beyer & Dai 8.07. That is with
+    the labeller trained with Gangqinpu (`nl_gq`), now the default on Hugging Face.
+  - **The PM2S gain was partly the leak.** Without it, v2 for MIDI input (`meter_v4_gq_pmho` + the
+    retrained PM2S) is still level with seq2seq and Beyer & Dai on clean MIDI (11.85 vs 11.74 /
+    11.05).
 - **Hands-on testing on downloaded songs:**
   - the playback sounds right;
   - the score is still hard to read: rhythm, extra voices;
@@ -166,7 +179,7 @@ Round by round, in [experiments.md](experiments.md):
   - **Conclusion:** the right level depends on the piece's own music. Neither what is typical nor
     a piece-level readout of the same model gets it. The release keeps `meter_v3` with the
     tempo-prior decoder. What is left is more, and more varied, meter training data (options
-    8 and 9).
+    7 and 10).
 - **The seq2seq retrain on the rebuilt data was skipped** (2026-11-24) to put GPU time into v2.
   Its test targets moved by at most 0.0004 onset F1, so its numbers stand, with that caveat.
 
@@ -187,6 +200,9 @@ Each option has the evidence for it, what it could gain, and a rough cost:
    - *Gain:* up to 2.8 on the clean benchmark and for MIDI uploads to the demo. Audio uploads
      already use the recording's beats.
    - *Cost:* 1-2 days, mostly CPU (Beat This! on the 59 renderings), plus one system evaluation.
+   - *Sixth round:* tracking from the notes (PM2S) gave -2.10 on clean and -0.74 on real (sure).
+     It is flattered by PM2S having trained on our test pieces. Retrain it without them (about
+     1-2 days with a GPU) before relying on it.
 2. **Decide which system to present as "the model."**
    - *For seq2seq:* it is better on the classical benchmark's headline metric, and on real audio
      it beats Beyer & Dai.
@@ -195,14 +211,15 @@ Each option has the evidence for it, what it could gain, and a rough cost:
      defaults to it.
    - *A fair framing:* both, with that split. seq2seq wins the classical benchmark; v2 is the
      robust system for what people actually upload.
-   - *To make it measurable:* option 7.
+   - *To make it measurable:* option 8.
    - *Cost:* none. A team decision.
 3. **Give the seq2seq model v2's grid.**
    - *What:* the seq2seq model is told the true time signature in one evaluation mode (`ts_true`).
      Give it the meter model's bars and time signatures instead.
    - *Why:* forcing the true time signature lifted its onset F1 from 0.350 to 0.424 on real
      audio.
-   - *Cost:* 2-3 days (a decoding mode in `src/decoding.py`, plus evaluation).
+   - *Cost:* about a day of code (a decoding mode in `src/decoding.py`), then one evaluation (about an
+     hour of GPU per condition).
    - *Risk:* the meter model's time signatures are right on only 44% of real bars, and round 5
      found no way to fix its level, so it may not help.
 4. **Retrain seq2seq on the rebuilt data.**
@@ -213,84 +230,219 @@ Each option has the evidence for it, what it could gain, and a rough cost:
 5. **Readability fixes in the export.**
    - *What:* detect glissandi (a fast run of adjacent notes in one hand) and write them as a
      glissando; group voices and beams more cleanly.
+   - *Glissandos: built (2026-11-26),* `src/glissando.py`, on in the demo and the CLI. The rule finds
+     both glissandos in the user's song (60-110 notes/s, white keys). On 300 ASAP performances it
+     fires almost only on real sweeps (Mephisto Waltz, Prokofiev's Toccata, Islamey). The score
+     writes each as its first and last note with a "gliss." line, and its MIDI plays the sweep. The
+     scoring script has it off (ASAP's scores mark no glissando); `--glissando` measures it as its
+     own system (`_gl`). The voices and beams are still to do.
    - *Why:* the hands-on testing; MUSTER barely sees these.
    - *Cost:* 1-3 days each, CPU only, in `src/preprocessing/detokenize.py` / `src/pipeline.py`.
 6. **Report the noise.**
    - *What:* a second seed of the meter model through whole pieces, so the report can give a
      spread for v2. The labeller's spread is measured already (±0.2).
-   - *Cost:* about 8 GPU hours plus one evaluation.
-7. **An out-of-domain test set.**
-   - *What:* a handful of non-classical piano pieces with scores, run through the same whole-piece
-     evaluation.
+   - *Cost:* no training: `meter_v3_s1` exists (round 3). Its decoder is tuned again with the tempo
+     prior (`meter_v3_s1_tp`, CPU), then one whole-piece evaluation. It is in the eighth round
+     (`pace/v2_gqlabel.sh`).
+7. **Gangqinpu: real pop piano performances aligned to scores** (found and inspected on
+   2026-11-24).
+   - *What:* [Wayne42/gangqinpu](https://huggingface.co/datasets/Wayne42/gangqinpu), 18,786
+     score-performance pairs (about 1,000 hours) from gangqinpu.com, a Chinese piano-score site.
+     It is made the way PERiScoPe was, which the meter model already trains on: the recordings
+     transcribed by Transkun V2 (our transcriber), then aligned note by note to the scores
+     (DualDTW + RAScoP). Splits: 17,773 / 499 / 514, with group ids that keep the versions of one
+     score together.
+   - *Repertoire:* 8,353 pop, 3,064 classical, 748 folk, 321 jazz, 1,651 other, 4,511 unlabelled
+     (automatic labels). Most titles are Chinese, and many songs come in several arrangements
+     (easy / beginner / advanced).
+   - *What a row has* (checked on the validation split, 499 pairs, 25 hours):
+     - **performance notes and pedal;**
+     - **every annotated beat** with its measure, position in the bar, score quarter, performance
+       time, downbeat flag, time signature and key. That is the meter model's ground truth as it
+       stands: 99.3% of beats are valid, and 74% of pieces have no invalid beat;
+     - **the score's notes** with staff, voice, measure, grace flag and a link to the performed
+       note (98.8% linked);
+     - **its bars** with time signature, key and pickup flag (time signatures: 4/4 74%, 3/4 11%,
+       2/4 9%, 6/8 3%).
+   - *Quality:* RAScoP recall 0.976 and precision 1.0 on validation; 2.4% of performance notes are
+     interpolated; 44 pieces have a zero-length note. Scores are user-made arrangements, and
+     composer fields are empty.
+   - *Fits:*
+     - **The meter model: built, in the sixth round** (below). `src/preprocessing/gangqinpu.py`
+       turns each row into meter-model performances as PERiScoPe's are, and
+       `build_meter_data.py --gangqinpu` builds them. That is 17,773 pieces against today's ~1,100
+       works: the data the meter model and its note-value level lack (round 5).
+     - **An out-of-domain test set** (option 8): its test split. The sixth round scores the meter
+       models on it; the labeller needs its targets first.
+     - **The labeller: built, in the eighth round.** Staff, measures, time signatures, keys,
+       graces and lengths (ties follow from lengths across bar lines) are there. Arpeggio and
+       ornament flags are not. The target tokens use MIDI pitch, so no spelling is needed.
+       `src/preprocessing/gangqinpu.py score_measures` and `scripts/build_gangqinpu_windows.py`
+       make the windows; `nl_gq` trains with half of its windows from them
+       (docs/experiments.md, "Eighth round").
+   - *Caveats:*
+     - **Leaks into our test set: handled by the dataset's split.** Its README says the split
+       was made jointly with ASAP, by score similarity (transpositions, arrangements and excerpts
+       included). Every group that holds one of Beyer & Dai's ASAP test pieces is in Gangqinpu's
+       test split, so its train split is safe for our benchmark. Its ASAP validation split
+       (50 performances) is not ours, so a training piece may resemble one of our validation
+       pieces. That affects only checkpoint choice.
+     - **Bad beats:** the builder keeps only runs of trustworthy bars. On validation it keeps 81%
+       of the beats, from 487 of 499 recordings (docs/experiments.md, "Sixth round").
+     - **License:** CC BY-NC-SA 4.0 and gated (each user accepts the terms on the page). A model
+       trained on it is non-commercial share-alike too, like MAESTRO in our data.
+   - *Cost:* both parts are built. The meter part ran as the sixth round; the labeller is the
+     eighth (`pace/v2_gqlabel.sh`: the data build and labels are CPU, under an hour; the labeller
+     trains in about 1-2 GPU hours, as the earlier ones did).
+8. **An out-of-domain test set.**
+   - *What:* non-classical piano pieces with scores, run through the same evaluation.
    - *Why:* without it, "more general" cannot be measured. Today the only evidence outside
      classical piano is one anime arrangement, judged by ear.
-   - *Sources:* a POP909 split (pop piano arrangements as MIDI with beat, downbeat, key and chord
-     annotations: approximate scores from the beat grid), or public-domain scores from PDMX.
-     Confirm what each contains, and its license, before building on it.
-   - *Cost:* 1-2 days.
-8. **More general training data: synthetic performances from public scores.**
+   - *Sources:* Gangqinpu's test split (option 7: 514 pairs, mostly pop) first. Otherwise a
+     POP909 split (pop piano arrangements as MIDI with beat, downbeat, key and chord annotations),
+     or public-domain scores from PDMX; confirm what each contains, and its license, first.
+   - *Built (eighth round):* `scripts/gangqinpu_inputs.py`, 60 of Gangqinpu's test pieces as
+     whole pieces. The written score is the reference. The input is the aligned notes, or Transkun
+     on the recording, with Beat This!'s beats of the recording. Every system is scored with the
+     benchmark's metrics in `outputs/system_eval_gangqinpu`.
+9. **More general training data: synthetic performances from public scores.**
    - *What:* take a large set of public piano scores, e.g. PDMX, a public-domain MusicXML set of
      about 250k MuseScore scores with license metadata that should include pop and anime
      arrangements. Render expressive performances from them:
      - tempo curves, timing jitter and velocities, fitted on ASAP's real performances;
      - our fitted Transkun noise;
      - the beat-tracker noise model, or Beat This! on a rendering.
-   - *Why:* the labeller needs performances aligned note by note to scores, which barely exist
-     outside classical music. Rendering gives exact labels, in any genre, at any amount. Round 5
-     points the same way for the meter model's note-value level.
+   - *Why:* any genre at any amount, with exact labels, including the written notation Gangqinpu
+     lacks (spelling, ornaments).
    - *Risk:* rendered timing is easier than a human's. Mix it with the real data, never replace
-     it.
+     it. Gangqinpu (option 7) gives real performances of the same kind of music, so it comes
+     first.
    - *Cost:* about a week of pipeline work, then retraining (about a day of GPU for both models).
-     The meter model is the cheapest to start with: it needs only beats, downbeats and time
-     signatures, so even sources without full scores (beat-annotated pop collections) can feed
-     it.
-9. **More data for the meter model specifically.** It looks data-limited:
-   - the larger model overfit;
-   - seeds differ by 0.07 in time-signature accuracy;
-   - the note encoder overfit;
-   - the note-value level could not be corrected from what the model has learned (round 5).
+10. **More data for the meter model specifically.** It looks data-limited:
+    - the larger model overfit;
+    - seeds differ by 0.07 in time-signature accuracy;
+    - the note encoder overfit;
+    - the note-value level could not be corrected from what the model has learned (round 5).
 
-   Option 8 feeds it first, and option 7 measures whether it generalises. Then revisit the note
-   encoder, since the notes say a lot about
-   where bars are.
-10. **Self-training on unlabelled piano covers.** The system's most confident outputs on
+    Option 7 feeds it first, and option 8 measures whether it generalises. Then revisit the note
+    encoder (and a larger model): with 16 times the pieces, overfitting may no longer limit them.
+11. **Self-training on unlabelled piano covers.** The system's most confident outputs on
     recordings become training data. Cheap data, but it reinforces the system's own mistakes,
     and the audio is copyrighted. A last resort.
 
-**A reasonable split for 10 days:**
+**A reasonable split for the 9 days left:**
 - **First:** option 2, a decision.
-- **Then, in parallel:** 1 and 7, one person each.
+- **Then, in parallel, one person each:**
+  - option 1, better beats for MIDI input;
+  - the sixth round (below) on PACE, about 2 days, and then reading its results: Gangqinpu for
+    the meter model (options 7, 8 and 10) and PM2S for MIDI input (option 1).
 - **Then, as time allows:** 5.
 - **Leave the last 3-4 days** for the report and the demo.
-- **After the deadline:** 8 and 9 are the work that would make the system more general.
+- **After the deadline:** the labeller on Gangqinpu (option 7), then 9 and 10: the work that would
+  make the system general.
 
-## Sixth round (ready to run on PACE)
+## Sixth round: results (2026-11-25)
 
-`bash pace/v2_gangqinpu.sh` (pace/README.md, 4o: what to do first, what to check, what can go wrong).
-It acts on options 2, 8, 9 and 10 above at once:
-- **Gangqinpu** (Oct 2026: ~18k web piano recordings, pop / classical / jazz / folk, Transkun
-  transcriptions aligned to scores) as half of the meter model's training data, and its test split
-  as the out-of-domain test set (option 8).
-- **Beat This! vs PM2S vs both** as the meter model's beat tracker (`meter_v4_gq`, `_pm`, `_both`),
-  every model trained on its trackers' real beats mixed with their simulated, measured errors.
-  PM2S (beats from the notes) is also tried for MIDI input (option 2): on Gangqinpu it is no clear
-  win over Beat This! (39% wrong tempo octave on 200 recordings; its ASAP numbers owe much to it
-  having trained on ASAP).
-- **Beat times from the notes** after decoding (snap / fill), on the release's meter model.
+`bash pace/v2_gangqinpu.sh` (pace/README.md, 4o) ran end to end. It acted on options 1, 7, 8 and
+10. The full tables are in docs/experiments.md, "Sixth round: results".
 
-docs/experiments.md, "Sixth round", has the design and the local checks.
+| system, MUSTER mean (lower is better) | real (24) | clean (59) |
+|---|---|---|
+| the release (`meter_v3_tp`, Beat This!) | 12.31 | 14.53 |
+| release + beat times from the notes (`_rf`) | 12.31 | 14.27 |
+| `meter_v4_gq` (Gangqinpu in training) | 12.70 | 15.18 |
+| the release with PM2S's beats | 11.56 | 12.43 |
+| **`meter_v4_gq_pm` with PM2S's beats** | **11.12** | **12.08** |
+| seq2seq / Beyer & Dai | 10.65 / 11.14 | 11.74 / 11.05 |
+
+- **Gangqinpu (options 7, 10): works for music outside classical piano.**
+  - On Gangqinpu's real recordings, `meter_v4_gq`'s time-signature accuracy is 0.79 against
+    the release's 0.54.
+  - On the classical meter scores it is equal.
+  - Its whole classical pieces are not better (+0.39 real, chance; +0.65 clean, sure).
+  - It trained to the step limit (best at 56,000 of 60,000), so it may want longer training.
+  - Its effect on whole pop scores is unmeasured until Gangqinpu's scores are references
+    (option 8).
+- **PM2S (option 1): the largest whole-piece gain so far, not yet quotable.**
+  - With a meter model trained for it, v2 is -1.19 (real) and -2.45 (clean) against the
+    release, both sure. That is within chance of seq2seq and Beyer & Dai on both conditions.
+  - But PM2S's released weights were trained on all of ASAP, our test pieces included.
+  - On unseen music (Gangqinpu) its beats are worse than Beat This!'s, while the meter model
+    trained for it ends level there.
+  - **Next:** retrain PM2S without our test and validation pieces, then score again. If the
+    gain holds, `meter_v4_gq_pm` + PM2S becomes the release. Built: `scripts/train_pm2s.py`
+    and `pace/v2_pm2s.sh` (the seventh round, pace/README.md 4p).
+- **After it, built:** the eighth round (`pace/v2_gqlabel.sh`, pace/README.md 4q).
+  - The labeller trained with Gangqinpu's scores (`nl_gq`).
+  - Whole pieces from Gangqinpu's test split for every system (options 7 and 8).
+  - `meter_v4_gq` trained longer.
+  - The meter model's second seed (option 6).
+- **Beat times from the notes:** -0.26 on clean (sure), nothing on real.
+- **Both trackers together** (`meter_v4_gq_both`): worse than either.
+
+## Seventh and eighth rounds: results (2026-11-26)
+
+Full tables in docs/experiments.md, "Seventh round: results" and "Eighth round: results".
+
+| system, MUSTER mean (lower is better) | ASAP real (24) | ASAP clean (59) | Gangqinpu real (58) |
+|---|---|---|---|
+| the release (`nl_base_gn` + `meter_v3_tp`) | 12.31 | 14.53 | 6.18 |
+| **v2 now (`nl_gq` + `meter_v4_gq`, the demo's)** | 12.71 | 14.86 | **4.00** |
+| v2, `nl_gq` + `meter_v3_tp` | **12.23** | 14.38 | 4.25 |
+| v2 for MIDI input (`meter_v4_gq_pmho` + retrained PM2S) | 11.59 | **11.85** | - |
+| seq2seq | **10.65** | 11.74 | 7.69 |
+| Beyer & Dai | 11.14 | 11.05 | 8.07 |
+
+- **Gangqinpu for the labeller (`nl_gq`) is the largest gain outside classical music:** -1.93
+  against the release on Gangqinpu (57 of 58 pieces better). On classical it is equal or slightly
+  better (-0.15 / -0.32 on clean, sure).
+- **The retrained PM2S (`pm2s_ho`) is under-trained.** Its training became unstable after step
+  8,000. Even so, v2 for MIDI input with it is level with both baselines on clean MIDI.
+  - Retrain it with stable optimisation: about 3 GPU hours. Built: the ninth round,
+    `pace/v2_pm2s2.sh` (pace/README.md 4r).
+  - Then the demo should use PM2S + `meter_v4_gq_pmho` for MIDI uploads. Today it renders the MIDI
+    for Beat This!, which costs about 3 points on clean MIDI.
+- **The meter model's training seed moves whole classical pieces by up to 0.9** (`meter_v3_s1_tp`).
+  The labeller's moves them by 0.2. Differences between meter models under about a point are
+  noise.
+- **Not worth it:** `meter_v4_gq` trained longer, and PM2S for recordings (worse on Gangqinpu).
+- **For the report:**
+  - v2 is the general system: best by far on non-classical piano, and on classical within the
+    meter model's noise of where it was.
+  - seq2seq wins classical real audio (10.65).
+  - For MIDI input, v2 with PM2S is level with both baselines.
 
 ## Decisions for the team
 
-- **The main system:** which one the report and demo present as "the model" (option 2).
-- **Next steps:** which of the options above fit the time left.
+- **The main system:** which one the report and demo present as "the model" (option 2). After the
+  eighth round: v2 (`nl_gq` + `meter_v4_gq`) as the general model, with seq2seq as the classical
+  benchmark result.
+- **Next steps:** which of the options above fit the time left. After the sixth round, the
+  first candidate is PM2S retrained without our test pieces (option 1). If its gain holds, the
+  release changes to `meter_v4_gq_pm` + PM2S.
+- **The demo's meter model for music outside classical piano:** `meter_v4_gq` is far better on
+  Gangqinpu's pop and slightly worse on whole classical pieces.
+- **Gangqinpu** (option 7): whether a model trained on it becomes the release. It is the best data
+  source found. Its CC BY-NC-SA 4.0 license carries into the weights, as MAESTRO's already does.
+  The sixth round also downloads 3,000+ of its recordings from the source site, which owns them
+  (`AUDIO_TRAIN=0` downloads only validation and test).
 - **A license** for the code and the weights. The repo has none, and neither does the model
   repo. MAESTRO, used in the training data, is CC BY-NC-SA 4.0.
 
 ## Models
 
-On Hugging Face: **[dat-dev/scoreformer](https://huggingface.co/dat-dev/scoreformer)**, tag
-`v2-round4` ([model_card.md](model_card.md) is its page):
+On Hugging Face: **[dat-dev/scoreformer](https://huggingface.co/dat-dev/scoreformer)**
+([model_card.md](model_card.md) is its page). Release `v2-round4` (tagged) is below. Since
+2026-11-26 the default meter model is `meter_v4_gq`, trained with Gangqinpu, which is more general
+(model card, "Evaluation"). The repo now updates itself:
+- **Every run a PACE job finishes is published** (`pace/v2_jobs.sh` calls
+  `scripts/publish_model.py`): kept under `runs/<run>/`, and made its folder's default when it scores
+  at least as well on the test sets both have. `PUBLISH=0` turns this off. It needs `hf auth login`
+  once on PACE; without it, a job says "not published" and goes on.
+- **The demo pulls the current default** when it starts and every hour (`--update-every`;
+  `--no-update` turns it off), and swaps the new models in between jobs.
+
+Release `v2-round4`:
 
 | folder | trained run | why this one |
 |---|---|---|
@@ -307,7 +459,9 @@ On Hugging Face: **[dat-dev/scoreformer](https://huggingface.co/dat-dev/scorefor
 ```bash
 python scripts/download_models.py                          # -> models/, from dat-dev/scoreformer
 python scripts/download_models.py --revision v2-round4     # exactly this release
-python demo/app.py                                         # the demo picks up models/ on its own
+python scripts/download_models.py --run meter_v4_gql       # one published run -> models/runs/meter_v4_gql/
+python scripts/publish_model.py --run outputs/runs/<run>   # publish a run by hand (--dry-run, --force)
+python demo/app.py                                         # pulls the current default, then models/
 ```
 Without `models/`, the demo and `scripts/audio_to_score.py` use the training runs in
 `outputs/runs/` (on PACE). A new release: run `pace/v2_release.sh` (it scores the configuration
@@ -352,7 +506,7 @@ and builds `models/`), then `python scripts/upload_models.py` with a new `--rele
 ## Where to start reading
 
 1. **[README](../README.md):** what it is, the results, how to run it.
-2. **[experiments.md](experiments.md), "Fourth round: results" and "Fifth round":** the current
+2. **[experiments.md](experiments.md), "Fourth round: results", "Fifth round" and "Sixth round":** the current
    numbers and what they mean.
 3. **[pace/README.md](../pace/README.md):** how every batch runs. Each round is one script.
 4. **`src/pipeline.py`:** the whole system in one file's worth of calls.

@@ -144,6 +144,8 @@ class Placed:
     grace: bool = False
     arp: bool = False
     orns: tuple = ()
+    src: int = -1       # the performed note it came from (src/labeller.py placed_notes: the item's
+                        # note; src/pipeline.py V2Pipeline.label: the performance's), -1 if none
 
 
 def render(win: Window, placed: list[Placed]) -> list[str]:
@@ -523,6 +525,72 @@ def targets(rows: np.ndarray, bar_est: np.ndarray, space: LabelSpace) -> tuple[n
         tg[i, 5] = r[6]
         fl[i] = [(int(r[7]) >> b) & 1 for b in range(N_FLAGS)]
     return tg, fl
+
+
+CONTRA_TOL = 0.06      # contradicted: every note of the beat within this much of a quarter of the other grid
+CONTRA_EDGE = 0.03     # ... which fits the beat's notes better by this much on average
+CONTRA_ANCHOR = 0.10   # the beat measured from where its on-the-quarter notes were played (at most this shift)
+TRIPLET_PLAYED_STRAIGHT, STRAIGHT_PLAYED_TRIPLET = 1, 2
+
+
+def contradicted(rows: np.ndarray, bar_true: np.ndarray, pos_true: np.ndarray, tol: float = CONTRA_TOL,
+                 edge: float = CONTRA_EDGE, anchor: float = CONTRA_ANCHOR) -> np.ndarray:
+    """Per note (int8): 1 where the score writes a beat on the triplet grid but the beat was played
+    straight, 2 where it writes sixteenths the beat played as triplets, 0 otherwise. ``rows``: the
+    window's label rows (LABEL_COLS); ``bar_true`` / ``pos_true``: grid_features' bar and position
+    estimates on the window's TRUE grid (the score's beats timed through the alignment), so the
+    played position is the performer's.
+
+    Judged a beat at a time (its notes in one bar and quarter, at least two off the quarter), as
+    src/timing.py check_beats judges the labeller's output: one note's timing is no evidence (in
+    ASAP's validation performances 22% of the notes written on the half beat are played more than
+    0.08 of a quarter from it). A beat whose written splits include a triplet one (a third, a sixth)
+    is contradicted when its notes' played positions (measured from where its on-the-quarter notes
+    were played) are every one within ``tol`` of a straight sixteenth and nearer the sixteenths than
+    the written grid (thirds; sixths if it writes a sixth) by ``edge`` on average; the reverse for a
+    beat written in sixteenths (a 1/4 or 3/4, no triplet split) and played on the thirds.
+
+    Such a pair teaches the labeller to write that timing the other way. Gangqinpu's user-made pop
+    scores may have many (scripts/audit_labels.py measures it): the labeller trained with them
+    wrote the user's straight 16th syncopation as triplets with a confidence of 67,000 to 1
+    (2026-11-26). The dataset can leave those notes' positions out of the loss
+    (ScoreSegmentDataset.mask_contradicted, scripts/train_labeller.py --mask-contradicted)."""
+    out = np.zeros(len(rows), np.int8)
+    straight, thirds, sixths = np.arange(5) / 4.0, np.arange(4) / 3.0, np.arange(7) / 6.0
+    beats = {}
+    for i in np.nonzero(rows[:, 0] == 1)[0]:
+        if int(rows[i, 1]) != int(bar_true[i]) or int(rows[i, 3]) <= 0:
+            continue
+        w = Fraction(int(rows[i, 2]), int(rows[i, 3]))
+        whole = w.numerator // w.denominator
+        x = float(pos_true[i]) - whole
+        if -0.5 < x < 1.5:
+            beats.setdefault((int(rows[i, 1]), whole), []).append((i, w - whole, x))
+    for notes in beats.values():
+        subs = [s for _, s, _ in notes]
+        off = [s for s in subs if s != 0]
+        if len(off) < 2:
+            continue
+        x = np.array([v for _, _, v in notes])
+        on = x[[s == 0 for s in subs]]
+        if len(on):
+            x = x - float(np.clip(np.median(on), -anchor, anchor))
+        d_s = np.abs(x[:, None] - straight[None]).min(1)
+        dens = {s.denominator for s in off}
+        if dens & {3, 6}:
+            grid = sixths if 6 in dens else thirds
+            d_t = np.abs(x[:, None] - grid[None]).min(1)
+            if d_s.max() <= tol and d_s.mean() + edge <= d_t.mean():
+                for (i, s, _) in notes:
+                    if s.denominator in (3, 6):
+                        out[i] = TRIPLET_PLAYED_STRAIGHT
+        elif 4 in dens and dens <= {2, 4}:
+            d_t = np.abs(x[:, None] - thirds[None]).min(1)
+            if d_t.max() <= tol and d_t.mean() + edge <= d_s.mean():
+                for (i, s, _) in notes:
+                    if s.denominator == 4:
+                        out[i] = STRAIGHT_PLAYED_TRIPLET
+    return out
 
 
 # ---------------------------------------------------------------------------------------------

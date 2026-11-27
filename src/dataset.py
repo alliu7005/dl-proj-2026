@@ -56,6 +56,9 @@ from .preprocessing.vocab import BOS, EOS, ORNAMENT_PREFIXES, SEP, Vocab
 N_FEATURES = 8           # without context notes
 N_FEATURES_CONTEXT = 10  # with context notes: + "context before", "context after" flags
 BEAT_SOURCES = ("gt", "tracked", "none")
+# transcriptions an alignment cleaned of the transcriber's extra notes (src/preprocessing/gangqinpu.py): the
+# noise model gives them extra notes only (NoiseModel.hallucinations_only)
+ALIGNED_SOURCES = ("transkun_aligned",)
 
 
 def n_features(context: bool, beats: bool) -> int:
@@ -352,6 +355,10 @@ class ScoreSegmentDataset(Dataset):
         # and its validation): set by scripts/train_labeller.py --grid-noise, drawn from its own
         # stream (seed, epoch, index, 13), so every other random draw is unchanged
         self.grid_noise = None
+        # the notes whose written split of the quarter the performance contradicts (src/notelabels.py
+        # contradicted, on the true grid) leave their position and length out of the targets, and the
+        # item says which ("contradicted"): scripts/train_labeller.py --mask-contradicted
+        self.mask_contradicted = False
         self.metrical = bool(metrical)
         self._mfile = None
         self._mcache: dict = {}
@@ -521,11 +528,19 @@ class ScoreSegmentDataset(Dataset):
         if self.with_context:
             before, notes, after = notes[:nb], notes[nb:nb + nw], notes[nb + nw:]
             pedal, cped = pedal[:npw], pedal[npw:]
-        # synthetic noise only on clean performances: real transcriptions are noisy already
-        clean = self.store.meta[i].get("source", "clean") == "clean"
-        if self.noise is not None and clean:
+        # synthetic noise only on clean performances: real transcriptions are noisy already. An
+        # aligned transcription (Gangqinpu's) lacks only the transcriber's extra notes: it gets those
+        source = self.store.meta[i].get("source", "clean")
+        noise = None
+        if self.noise is not None and source == "clean":
+            noise = self.noise
+        elif self.noise is not None and source in ALIGNED_SOURCES:
+            if getattr(self, "_extra_only", None) is None:
+                self._extra_only = self.noise.hallucinations_only()
+            noise = self._extra_only
+        if noise is not None:
             ref = notes
-            notes, pedal = self.noise(notes, pedal, rng)
+            notes, pedal = noise(notes, pedal, rng)
             if lab is not None:  # noise moved, dropped and added notes: carry the labels across
                 from .metrical import transfer
                 lab = np.stack(transfer((lab[:, 0], lab[:, 1]), ref, notes), axis=1)
@@ -534,8 +549,8 @@ class ScoreSegmentDataset(Dataset):
                 nl = transfer_rows(nl, ref, notes)
             if self.with_context:  # context notes come from the same transcriber: noise them too
                 nrng = np.random.default_rng((self.seed, self.epoch, i, 11))
-                before = self.noise(before, cped, nrng)[0] if len(before) else before
-                after = self.noise(after, cped, nrng)[0] if len(after) else after
+                before = noise(before, cped, nrng)[0] if len(before) else before
+                after = noise(after, cped, nrng)[0] if len(after) else after
         if training and rng.random() < self.prompt_dropout:
             prompt = prompt[:0]
         if training and self._ctx is not None and len(prompt):
@@ -577,7 +592,8 @@ class ScoreSegmentDataset(Dataset):
             feats = np.concatenate([feats, beat_features(notes[:, 1], bt, bd)], axis=1)
         extra = {}
         if nl is not None:
-            from .notelabels import grid_features, score_notes, targets
+            from .notelabels import IGNORE, contradicted, grid_features, score_notes, targets
+            contra = None
             if self.grid_override is not None and i in self.grid_override:
                 g_t, g_q, win = self.grid_override[i]
                 g_t = np.asarray(g_t) * tempo
@@ -585,14 +601,21 @@ class ScoreSegmentDataset(Dataset):
                 g0, g1 = self._nl["grid_index"][i]
                 win = score_notes(self.vocab.decode(tokens.tolist()))[1]
                 g_t, g_q = self._nl["grid_t"][g0:g1] * tempo, self._nl["grid_q"][g0:g1]
+                if self.mask_contradicted:   # on the true grid, before the tracker's errors move it
+                    _, bar_t, pos_t = grid_features(notes[:, 1], g_t, g_q, win)
+                    contra = contradicted(nl, bar_t, pos_t)
                 if self.grid_noise is not None:
                     g_t, g_q = self.grid_noise(g_t, g_q, np.random.default_rng((self.seed, self.epoch, i, 13)))
             gf, bar_est, pos_est = grid_features(notes[:, 1], g_t, g_q, win)
             feats = np.concatenate([feats, gf], axis=1)
             tg, fl = targets(nl, bar_est, self.label_space)
+            if contra is not None:          # the performance contradicts the written split: not learned
+                tg[contra > 0, 2:5] = IGNORE
             extra = {"labels": torch.from_numpy(tg), "flags": torch.from_numpy(fl),
                      "bar_est": torch.from_numpy(bar_est.astype(np.int64)),
                      "pos_est": torch.from_numpy(pos_est.astype(np.float32))}
+            if contra is not None:
+                extra["contradicted"] = torch.from_numpy(contra)
         item = {"notes": torch.from_numpy(feats), "roles": torch.from_numpy(roles),
                 "target": torch.from_numpy(target), "prompt_len": len(head), **extra}
         if self.keep_raw:  # rows follow "notes" / "roles"
@@ -686,3 +709,40 @@ class MixedTrainDataset(Dataset):
 
     def __getitem__(self, i):
         return self.synthetic[i] if i < self.n_syn else self.real[i - self.n_syn]
+
+
+class ShareMixDataset(Dataset):
+    """Several training datasets drawn in fixed shares: ``shares[k]`` of the samples come from
+    ``parts[k]`` (each part's own oversampling weights inside it). An epoch is ``epoch_samples``
+    draws (default: the first part's size, as MixedTrainDataset's). Index i runs over the parts in
+    order, so the samplers' indices and per-part note lengths concatenate.
+
+        train = ShareMixDataset([mixed.synthetic, mixed.real, gangqinpu], [0.35, 0.15, 0.5])
+    """
+
+    def __init__(self, parts: list, shares: list, epoch_samples: int | None = None):
+        if len(parts) != len(shares) or not parts:
+            raise ValueError("one share per part")
+        s = np.asarray(shares, np.float64)
+        if np.any(s < 0) or s.sum() <= 0:
+            raise ValueError(f"shares must be >= 0 and not all 0: {shares}")
+        self.parts, self.shares = list(parts), s / s.sum()
+        self.offsets = np.concatenate([[0], np.cumsum([len(p) for p in self.parts])]).astype(np.int64)
+        self.vocab = self.parts[0].vocab
+        self.epoch_samples = int(epoch_samples or len(self.parts[0]))
+
+    def set_epoch(self, epoch: int):
+        for p in self.parts:
+            p.set_epoch(epoch)
+
+    def sampler(self) -> WeightedRandomSampler:
+        w = np.concatenate([p.weights / p.weights.sum() * sh for p, sh in zip(self.parts, self.shares)])
+        return WeightedRandomSampler(torch.as_tensor(w, dtype=torch.double), num_samples=self.epoch_samples,
+                                     replacement=True)
+
+    def __len__(self):
+        return int(self.offsets[-1])
+
+    def __getitem__(self, i):
+        k = int(np.searchsorted(self.offsets, i, side="right") - 1)
+        return self.parts[k][i - int(self.offsets[k])]

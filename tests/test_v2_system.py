@@ -234,10 +234,10 @@ def test_export_last_resort():
                                                    for b in range(3) for k in range(4)])
     real_write = dt.write_musicxml
 
-    def picky(score, path):  # an exporter that cannot write pitch 61 (bar 1)
+    def picky(score, path, decorate=None):  # an exporter that cannot write pitch 61 (bar 1)
         if any(getattr(n, "pitch", None) is not None and n.pitch.midi == 61 for n in score.recurse().notes):
             raise ValueError("cannot export pitch 61")
-        return real_write(score, path)
+        return real_write(score, path, decorate)
     with tempfile.TemporaryDirectory() as t:
         rep = {}
         dt.tokens_to_musicxml(good, str(Path(t) / "a.musicxml"), report=rep)
@@ -785,7 +785,8 @@ exit 0
         assert code == 0, out
         assert calls == ["scripts/train_meter.py --name meter_v3_large --steps 60000 --patience 8 --d-model 384 --layers 8 "
                          "--workers 6 --normal-priority --max-hours 7.5 --resume",
-                         "scripts/eval_meter.py --run meter_v3_large --tune"], calls   # meter_v3: done and evaluated
+                         "scripts/eval_meter.py --run meter_v3_large --tune",   # meter_v3: done and evaluated
+                         "scripts/publish_model.py --run outputs/runs/meter_v3_large"], calls   # evaluated now: published
         code, calls, out = run("evals nl_base nl_large")
         for nl in ("nl_base", "nl_large"):
             mine = [c for c in calls if f"--run {nl} " in c + " "]
@@ -795,7 +796,8 @@ exit 0
         code, calls, out = run("evals nl_base_gn", done="nl_base_gn")
         assert calls[0].startswith("scripts/train_labeller.py --name nl_base_gn --size base --grid-noise 0.8")
         assert calls[1] == "scripts/eval_labeller.py --run nl_base_gn --normal-priority"
-        assert [c.split("--grid meter:")[1].split()[0] for c in calls[2:]][:2] == ["meter_oracle", "meter_v2_nonote"]
+        assert calls[2] == "scripts/publish_model.py --run outputs/runs/nl_base_gn"   # trained here: published
+        assert [c.split("--grid meter:")[1].split()[0] for c in calls[3:]][:2] == ["meter_oracle", "meter_v2_nonote"]
         for r in ("sf_base_reg_cab", "s2s_m_cab"):   # seq2seq runs from before status.json: finished
             (tmp / "outputs" / "runs" / r).mkdir(parents=True)
             (tmp / "outputs" / "runs" / r / "best.pt").write_text("x")

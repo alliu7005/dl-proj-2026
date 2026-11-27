@@ -32,6 +32,10 @@ CONDITIONS = [  # (key in the results, description)
     ("periscope", "PERiScoPe test, real piano transcriptions"),
     ("real", "ASAP test performances transcribed from audio by Transkun V2"),
     ("real_unseen_audio", "the subset of `real` whose audio Transkun never trained on"),
+    ("gangqinpu", "labellers only: Gangqinpu test (pop, classical, folk, jazz piano scores), the recordings' "
+                  "Transkun notes aligned to them; a meter model's grid from the simulated tracker"),
+    ("gangqinpu_real", "labellers only: the same windows, a meter model's grid from Beat This!'s beats of the "
+                       "recordings (only windows inside its reliably timed bars)"),
     ("clean_gt_beats", "beat models only: clean MIDI with the annotated beats (what the beat-snap baselines get)"),
     ("real_gt_beats", "beat models only: the real transcriptions with the annotated beats (upper bound)"),
     ("real_no_beats", "beat models only: the real transcriptions without any beats (MIDI input, no tracker)"),

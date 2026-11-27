@@ -26,6 +26,12 @@ real transcriptions instead of Beat This!'s of the recordings (_rpm): PM2S again
 the same pieces and metrics. PM2S's released weights were trained on all of ASAP, these test
 performances included: optimistic until it is retrained without them.
 
+Gangqinpu's test pieces (scripts/gangqinpu_inputs.py: --manifest
+outputs/system_eval_gangqinpu/manifest.json --out outputs/system_eval_gangqinpu --conditions
+gangqinpu,gangqinpu_real): every system gets Beat This!'s beats of the recording on both
+(beats_gangqinpu.npz next to that manifest), as on the real ASAP transcriptions; --real-beats pm2s
+gives v2 PM2S's beats of the input's notes there too.
+
 A piece whose score cannot be written keeps its tokens and the error (<slug>.tokens.txt,
 <slug>.error.txt next to where its score would be), so it can be reproduced; --only-missing runs
 only the pieces a system has no score for yet (kept in its summary.json with the others).
@@ -56,19 +62,33 @@ def parse_v2(spec: str) -> tuple[str, str]:
 
 
 BEAT_SUFFIX = {"synth": "", "audio": "_ab", "pm2s": "_pm"}       # v2 on clean MIDI
-REAL_SUFFIX = {"audio": "", "pm2s": "_rpm"}                      # v2 on the real transcriptions
+GANGQINPU = ("gangqinpu", "gangqinpu_real")   # scripts/gangqinpu_inputs.py: the recording's beats, as real
+REAL_SUFFIX = {"audio": "", "pm2s": "_rpm", "synth": "_rsb"}     # v2 on the real transcriptions (and Gangqinpu's)
 
 
 def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, clean_beats: str = "synth",
-                delete_above: float = DELETE_ABOVE, tidy: bool = False, real_beats: str = "audio") -> str:
+                delete_above: float = DELETE_ABOVE, tidy: bool = False, real_beats: str = "audio",
+                glissando: bool = False, timing_check: bool = False, readable: bool = False,
+                fix_jumps: bool = False, timing_beats: bool = False, beat_decode: bool = False) -> str:
     """The folder (and table row) of a system under outputs/system_eval (v2 with another deletion
-    threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy; with other beats:
-    _ab / _pm on clean MIDI, _rpm on the real transcriptions)."""
+    threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy; glissandos written
+    as glissandos: _gl; triplets the timing contradicts made straight: _tc; beats the timing says are straight: _tb;
+    the readability rules: _rd; the labeller's splits decoded a beat at a time: _bd;
+    stretched bars shortened: _jf; with other beats:
+    _ab / _pm on clean MIDI, _rpm on the real transcriptions; with PM2S's beats from other weights
+    than the released ones, their tag last: src/pm2s_beats.py weights_tag)."""
     if v2:
         lab, met = parse_v2(v2)
         d = "" if delete_above == DELETE_ABOVE else "_keepall" if delete_above >= 1 else f"_d{round(delete_above * 100)}"
-        return (f"v2_{lab}_{met}" + d + ("_tidy" if tidy else "") + BEAT_SUFFIX[clean_beats]
+        name = (f"v2_{lab}_{met}" + d + ("_tidy" if tidy else "") + ("_gl" if glissando else "")
+                + ("_tc" if timing_check else "") + ("_tb" if timing_beats else "") + ("_rd" if readable else "") + ("_jf" if fix_jumps else "")
+                + ("_bd" if beat_decode else "")
+                + BEAT_SUFFIX[clean_beats]
                 + REAL_SUFFIX[real_beats])
+        if "pm2s" in (clean_beats, real_beats):   # other PM2S weights ($PM2S_WEIGHTS): their tag, _pm_rpm_<tag>
+            from src.pm2s_beats import tagged
+            name = tagged(name)
+        return name
     return f"{run}_{mode}" + ("_sb" if midi_beats == "synth" else "")
 
 
@@ -86,10 +106,30 @@ def main(argv=None):
                     help="v2 on clean MIDI: Beat This! on the MIDI rendered to audio, on the performance's real "
                          "recording (only the performances that have one), or PM2S on the MIDI's notes")
     ap.add_argument("--real-beats", default="audio", choices=list(REAL_SUFFIX),
-                    help="v2 on the real transcriptions: Beat This! on the recording, or PM2S on the transcription")
+                    help="v2 on the real transcriptions (and Gangqinpu's conditions): Beat This! on the recording, "
+                         "PM2S on the notes, or Beat This! on the input MIDI rendered to audio (synth: what a MIDI "
+                         "upload to the demo gets; system _rsb)")
     ap.add_argument("--delete-above", type=float, default=DELETE_ABOVE,
                     help="v2: leave a note out only above this p(delete) (1 = keep every note); "
                          "a setting other than the default is its own system (_d<percent>, _keepall)")
+    ap.add_argument("--glissando", action="store_true",
+                    help="v2: glissandos written as their first and last note joined by a gliss. line "
+                         "(src/glissando.py, the demo's default); its own system (_gl)")
+    ap.add_argument("--timing-check", action="store_true",
+                    help="v2: a note written on a triplet position but played on a straight eighth / sixteenth "
+                         "moved there (src/timing.py, the demo's default); its own system (_tc)")
+    ap.add_argument("--beat-decode", action="store_true",
+                    help="v2: the labeller's splits of the quarter decoded a beat at a time, fused with the timing, "
+                         "with its tuned beat_decode.json (src/beat_decode.py, the demo's default); its own system (_bd)")
+    ap.add_argument("--timing-beats", action="store_true",
+                    help="v2: a beat whose timing fits straight sixteenths better than the labeller's triplets "
+                         "written straight (src/timing.py check_beats, the demo's default); its own system (_tb)")
+    ap.add_argument("--readable", action="store_true",
+                    help="v2: rests and overlaps of a 16th or less closed / trimmed, stems by voice (src/readable.py, "
+                         "the demo's default); its own system (_rd)")
+    ap.add_argument("--fix-jumps", action="store_true",
+                    help="v2: a bar the meter decoder stretched with a jump shortened instead (src/readable.py, the "
+                         "demo's default); its own system (_jf)")
     ap.add_argument("--tidy", action="store_true",
                     help="v2: written lengths stop at the next onset of their staff when they run just past it "
                          "(src/pipeline.py tidy_lengths); its own system (_tidy)")
@@ -113,7 +153,9 @@ def main(argv=None):
     if args.v2:
         lab, met = parse_v2(args.v2)
         pipe = V2Pipeline(runs / lab / args.ckpt, runs / met / args.ckpt, vocab=args.vocab, device=args.device,
-                          delete_above=args.delete_above, tidy=args.tidy)
+                          delete_above=args.delete_above, tidy=args.tidy, glissando=args.glissando,
+                          timing_check=args.timing_check, readable=args.readable, fix_jumps=args.fix_jumps,
+                          timing_beats=args.timing_beats, beat_decode=args.beat_decode)
         wants_beats, midi_beats = True, "synth"
     else:
         pipe = ScorePipeline(runs / args.run / args.ckpt, vocab=args.vocab, device=args.device)
@@ -122,6 +164,8 @@ def main(argv=None):
     bp = beats_path(Path(args.tracked), "tracked")
     if wants_beats and bp.exists():
         tracked = load_beats(bp)
+    if wants_beats and any(e["condition"] in GANGQINPU for e in entries):   # the recordings' beats
+        tracked.update(load_beats(Path(args.manifest).parent / "beats_gangqinpu.npz"))
     if wants_beats and midi_beats == "synth":
         synth = load_beats(args.synth_beats)
         if not synth:
@@ -131,10 +175,13 @@ def main(argv=None):
         n = len(entries)
         entries = [e for e in entries if e["condition"] != "clean" or e["performance"] in tracked]
         print(f"--clean-beats audio: {len(entries)} of {n} inputs (clean ones need a recording)", flush=True)
-    if not args.v2 and (args.delete_above != DELETE_ABOVE or args.tidy):
-        ap.error("--delete-above and --tidy are for v2 (--v2)")
+    if not args.v2 and (args.delete_above != DELETE_ABOVE or args.tidy or args.glissando or args.timing_check
+                        or args.readable or args.fix_jumps or args.timing_beats or args.beat_decode):
+        ap.error("--delete-above, --tidy, --glissando, --timing-check, --timing-beats, --readable, --fix-jumps and "
+                 "--beat-decode are for v2 (--v2)")
     system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above,
-                         args.tidy, args.real_beats)
+                         args.tidy, args.real_beats, args.glissando, args.timing_check, args.readable, args.fix_jumps,
+                         args.timing_beats, args.beat_decode)
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before
@@ -147,10 +194,13 @@ def main(argv=None):
     for k, e in enumerate(entries):
         dst = out / e["condition"] / f"{e['slug']}.musicxml"
         beats, kw = None, {}
-        pm2s = (args.real_beats if e["condition"] == "real" else args.clean_beats) == "pm2s"
+        real_like = e["condition"] == "real" or e["condition"] in GANGQINPU
+        pm2s = (args.real_beats if real_like else args.clean_beats) == "pm2s"
         if pm2s:  # tracked from the notes by the pipeline
             kw = {"beat_source": "pm2s"}
-        elif e["condition"] == "real" or args.clean_beats == "audio":
+        elif real_like and args.real_beats == "synth":   # the MIDI rendered and tracked by the pipeline itself
+            kw = {"beat_checkpoint": "final0"}
+        elif real_like or args.clean_beats == "audio":
             beats = tracked.get(e["performance"])
         elif wants_beats and midi_beats == "synth":
             beats = synth.get(e["performance"])

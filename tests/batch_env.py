@@ -22,6 +22,12 @@ BATCH_VARS = (
     "LEVELEXP",
     # pace/v2_gangqinpu.sh
     "BASE", "SNAP", "FILL", "GQ", "PM_PAIR", "AUDIO_TRAIN", "PM2S_RUNS",
+    # pace/v2_pm2s.sh, and which PM2S weights the jobs run (src/pm2s_beats.py weights_tag)
+    "PM_RUN", "PM_TAG", "METER", "PM2S_WEIGHTS", "PM2S_TAG",
+    # pace/v2_gqlabel.sh, and pace/v2_jobs.sh options it sets
+    "NL", "BASE_NL", "LONG", "N_PIECES", "SYS_ARGS", "EVAL_CONDITIONS",
+    # pace/v2_jobs.sh: publish finished runs to Hugging Face (scripts/publish_model.py)
+    "PUBLISH",
     # the tests' own stand-ins
     "SUBMITS", "CALLS", "DONE",
 )

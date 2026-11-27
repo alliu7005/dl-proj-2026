@@ -1,6 +1,11 @@
 #!/bin/bash
 # The work of pace/v2.sh's jobs (each job: source pace/common.sh; bash pace/v2_jobs.sh <task> ...).
-# Several models share one GPU job, so the batch stays under PACE's per-user job limit:
+# Several models share one GPU job, so the batch stays under PACE's per-user job limit.
+# Every run a task finishes training (or, for a meter model, evaluates) in that job is published to
+# the Hugging Face model repo (a run finished before: python scripts/publish_model.py --run <it>)
+# (scripts/publish_model.py: archived under runs/<run>/, made the demo's default when it is at least
+# as good as the one there): meters, labellers, evals (a labeller it trained) and seq2seq. A failed
+# upload (not logged in: `hf auth login` once on PACE) never fails the job. PUBLISH=0: none.
 #
 #   meters <run>...        train these meter models side by side (each its own log), up to
 #                          --max-hours, resuming from last.pt; then tune + evaluate every finished
@@ -15,14 +20,21 @@
 #   evals <labeller>...    for each: finish its training if it is not done (a labeller trained
 #                          here), else evaluate it on the true grid (an earlier labeller: its
 #                          results predate the current evaluation); then on every grid: the oracle,
-#                          GRIDS_OLD, METERS (a grid not there is skipped with the reason)
+#                          GRIDS_OLD, METERS (a grid not there is skipped with the reason), on
+#                          EVAL_CONDITIONS
 #   systems <spec>...      whole pieces (scripts/system_scores.py): <labeller>+<meter> = v2 (only
 #                          with both models finished and the meter model evaluated), with options
-#                          after a colon, comma-separated: tidy (--tidy), d<percent> (--delete-above,
+#                          after a colon, comma-separated: tidy (--tidy), gl (--glissando), tc
+#                          (--timing-check), tb (--timing-beats), bd (--beat-decode), rd (--readable),
+#                          jf (--fix-jumps),
+#                          d<percent> (--delete-above,
 #                          e.g. d95), keepall (--delete-above 1), missing (--only-missing: what an
 #                          earlier job wrote is kept), pm (PM2S's beats on clean MIDI: --clean-beats
-#                          pm2s), rpm (PM2S's beats on the real transcriptions: --real-beats pm2s); <run>:<mode> = seq2seq, <run>:<mode>:sb =
-#                          seq2seq with the rendered-MIDI beats on clean MIDI (a finished seq2seq run)
+#                          pm2s), rpm (PM2S's beats on the real transcriptions: --real-beats pm2s), rsb (Beat This! on
+#                          the input MIDI rendered: --real-beats synth); <run>:<mode> = seq2seq, <run>:<mode>:sb =
+#                          seq2seq with the rendered-MIDI beats on clean MIDI (a finished seq2seq run).
+#                          SYS_ARGS: more system_scores.py options for every spec (another manifest:
+#                          Gangqinpu's test pieces, --manifest/--out/--conditions)
 #   tempo <meter> <new>    <new>: <meter>'s checkpoint with its decoder tuned again, the written-tempo
 #                          prior included (eval_meter.py --tune --tempo-prior), then evaluated and its
 #                          grids saved; <meter>'s own results stay as they are
@@ -45,6 +57,11 @@
 #                          --tracker pm2s: <condition>_pm2s), the others with Beat This!'s real beats
 #                          of Gangqinpu's test recordings (--real-tracked: gangqinpu_real; a model
 #                          that reads PM2S as well gets its beats there too)
+#   beatdecode <nl>...     the labeller's beat decoding (src/beat_decode.py) tuned on validation
+#                          (scripts/tune_beat_decode.py: <nl>/beat_decode.json), the labeller
+#                          evaluated with it (true grid, meter_v4_gq's grids: modes *_bd), published
+#   localtempo <meter>     <meter>_lt: the same checkpoint with the decoder's local tempo term
+#                          (src/meter.py local_tempo_logprior) tuned on validation and evaluated
 #   gqbase <meter>...      these finished meter models evaluated on the Gangqinpu test set too
 #                          (eval_meter.py --conditions gangqinpu, their own decoders), so the new
 #                          models trained with it have something to beat
@@ -56,9 +73,11 @@ NEW_NLS=${NEW_NLS-"nl_base_gn nl_base_gn_s1"}
 GRIDS_OLD=${GRIDS_OLD-"meter_v2_nonote"}
 GRIDS_REEVAL=${GRIDS_REEVAL-"meter_v2_nonote meter_v2 meter_v2_s1 meter_v2_asap meter_base"}
 MAX_HOURS=${MAX_HOURS:-7.5}
-PM2S_RUNS=${PM2S_RUNS-"meter_v4_gq_pm"}   # meter runs trained for PM2S's beats (the trackers task tests them with PM2S)
+PM2S_RUNS=${PM2S_RUNS-"meter_v4_gq_pm meter_v4_gq_pmho meter_v4_gq_pmhs"}   # meter runs trained for PM2S's beats (the trackers task tests them with PM2S)
 SEQ_MODES=${SEQ_MODES:-"oracle,none,guarded,meter"}
 SEQ_CONDITIONS=${SEQ_CONDITIONS:-"clean,synthetic,real,periscope"}
+EVAL_CONDITIONS=${EVAL_CONDITIONS:-"clean,synthetic,real,periscope,gangqinpu,gangqinpu_real"}   # labellers on meter grids
+SYS_ARGS=${SYS_ARGS:-}
 JOB=${SLURM_JOB_ID:-local}
 
 meter_flags() {
@@ -88,6 +107,13 @@ meter_flags() {
     #   meter_v4_gq_posh  meter_v4_gq + a position-in-bar head (which eighth of the bar each beat is on),
     #                     scored by the decoder; opt in: RUNS="... meter_v4_gq_posh" bash pace/v2_gangqinpu.sh
     meter_v4_gq_posh) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --pos-head" ;;
+    # meter_v4_gq_pm for PM2S retrained without our test pieces (pace/v2_pm2s.sh: run with
+    # PM2S_WEIGHTS / PM2S_TAG=ho set, so --tracked pm2s reads that PM2S's stored beats)
+    meter_v4_gq_pmho) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_ho.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
+    # and for PM2S retrained with stable optimisation (pace/v2_pm2s2.sh: PM2S_WEIGHTS / PM2S_TAG=hos)
+    meter_v4_gq_pmhs) echo "--gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_hos.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
+    # meter_v4_gq trained longer (its best checkpoint was at 56,000 of its 60,000 steps)
+    meter_v4_gql) echo "--gangqinpu --gangqinpu-share 0.5 --steps 100000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     # (earlier: meter_v3 fine-tuned on the Gangqinpu mix)
     meter_v3_gqft) echo "--init outputs/runs/meter_v3/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 16000 --lr 1e-4 --warmup 500 --eval-every 2000 --patience 4 --tracked beat_this --tracked-share 0.5" ;;
     *) echo "unknown meter run $1 (add it to meter_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
@@ -98,9 +124,11 @@ meter_eval_flags() {  # how a finished meter run is tuned before its evaluation
     # its bar / step / time-signature heads are meter_v3's: meter_v3_tp's decoder, the level tuned on top
     meter_v3_th) echo "--level --decode-from outputs/runs/meter_v3_tp/decode.json" ;;
     meter_v3_ft) echo "--tune --tempo-prior --level" ;;
-    meter_v4_gq|meter_v4_gq_both|meter_v4_gq_posh|meter_v3_gqft) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
+    meter_v4_gq|meter_v4_gq_both|meter_v4_gq_posh|meter_v3_gqft|meter_v4_gql) echo "--tune --tempo-prior" ;;   # as the release's meter_v3_tp
     # its decoder tuned for the tracker it was trained for (tested with it by the trackers task)
     meter_v4_gq_pm|meter_v4_gq_pm_s1|meter_v4_gq_pm_g30) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s.json" ;;
+    meter_v4_gq_pmho) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_ho.json" ;;
+    meter_v4_gq_pmhs) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_hos.json" ;;
     *) echo "--tune" ;;
   esac
 }
@@ -113,10 +141,20 @@ nl_flags() {
     # round 7: nl_base_gn with PM2S's timing errors instead of Beat This!'s (the best v2 system reads
     # PM2S's beats; matching the labeller's grid noise to the tracker was round 3's largest gain)
     nl_base_gn_pm) echo "--size base --grid-noise 0.8 --beat-noise configs/beat_noise_pm2s.json" ;;
+    # nl_base_gn's recipe with Gangqinpu's scores as half of the training windows (scripts/build_gangqinpu_windows.py)
+    nl_gq) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5" ;;
+    # nl_gq's recipe, the training notes whose written split the performance contradicts left out of
+    # the loss (src/notelabels.py contradicted; scripts/audit_labels.py)
+    nl_gq_mc) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5 --mask-contradicted" ;;
     *) echo "unknown labeller run $1 (add it to nl_flags() in pace/v2_jobs.sh)" >&2; return 1 ;;
   esac
 }
 done_run() { grep -q '"phase": "done"' "outputs/runs/$1/status.json" 2>/dev/null; }
+PUBLISH=${PUBLISH:-1}
+publish() {  # a finished, evaluated run -> the Hugging Face repo (never fails the job)
+  [ "$PUBLISH" = 0 ] && return 0
+  python scripts/publish_model.py --run "outputs/runs/$1" || echo "$1: not published (see above; the job goes on)"
+}
 resume() { [ -f "outputs/runs/$1/last.pt" ] && echo --resume; }
 in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
@@ -140,18 +178,25 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
   for o in ${1//,/ }; do
     case "$o" in
       tidy) out="$out --tidy" ;;
+      gl) out="$out --glissando" ;;
+      tc) out="$out --timing-check" ;;
+      tb) out="$out --timing-beats" ;;
+      bd) out="$out --beat-decode" ;;
+      rd) out="$out --readable" ;;
+      jf) out="$out --fix-jumps" ;;
       keepall) out="$out --delete-above 1" ;;
       missing) out="$out --only-missing" ;;
       pm) out="$out --clean-beats pm2s" ;;
       rpm) out="$out --real-beats pm2s" ;;
+      rsb) out="$out --real-beats synth" ;;
       d[0-9]*) out="$out --delete-above 0.${o#d}" ;;
-      *) echo "unknown v2 option $o (tidy, d<percent>, keepall, missing, pm, rpm)" >&2; return 1 ;;
+      *) echo "unknown v2 option $o (tidy, gl, tc, tb, bd, rd, jf, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
     esac
   done
   echo "$out"
 }
 
-task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo, levelexp, refine, gqbase, trackers}
+task=${1:?task: meters, labellers, grids, evals, systems, seq2seq, ablation, tempo, levelexp, refine, gqbase, trackers, beatdecode, localtempo}
 shift
 case "$task" in
   meters)
@@ -171,26 +216,49 @@ case "$task" in
       if ! done_run "$m"; then echo "$m: not done yet (the next job resumes it)"; ok=1; continue; fi
       if [ ! "outputs/runs/$m/eval_meter.json" -nt "outputs/runs/$m/best.pt" ]; then
         # shellcheck disable=SC2046
-        python scripts/eval_meter.py --run "$m" $(meter_eval_flags "$m") || ok=1
+        python scripts/eval_meter.py --run "$m" $(meter_eval_flags "$m") && publish "$m" || ok=1
       fi
       [ -f "outputs/runs/$m/eval_meter.json" ] || ok=1
     done
     exit $ok ;;
   labellers)
     pids=()
+    fresh=""
     for nl in "$@"; do
       if done_run "$nl"; then echo "$nl: trained already"; continue; fi
       echo "$nl: training ($(nl_flags "$nl")), log slurm-labeller_$nl-$JOB.log"
       train_labeller "$nl" &
       pids+=("$!")
+      fresh="$fresh $nl"
     done
     for p in ${pids[@]+"${pids[@]}"}; do wait "$p"; done
     ok=0
     for nl in "$@"; do
       if ! done_run "$nl"; then echo "$nl: not done (its evals job resumes it)"; ok=1; continue; fi
-      python scripts/eval_labeller.py --run "$nl" --normal-priority || ok=1
+      python scripts/eval_labeller.py --run "$nl" --normal-priority || { ok=1; continue; }
+      in_list "$nl" "$fresh" && publish "$nl"   # finished in this job: published
     done
     exit $ok ;;
+  beatdecode)   # <labeller>...: its beat decoding tuned on validation, the labeller evaluated with it, published
+    ok=0
+    for nl in "$@"; do
+      if ! done_run "$nl"; then echo "$nl: skipped, not finished"; ok=1; continue; fi
+      python scripts/tune_beat_decode.py --run "$nl" --normal-priority || { ok=1; continue; }
+      python scripts/eval_labeller.py --run "$nl" --beat-decode --normal-priority || ok=1
+      python scripts/eval_labeller.py --run "$nl" --beat-decode --grid meter:meter_v4_gq --conditions "$EVAL_CONDITIONS" \
+        --normal-priority || ok=1
+      publish "$nl"   # the default's files changed (beat_decode.json): the demo pulls it
+    done
+    exit $ok ;;
+  localtempo)   # <meter>: a copy <meter>_lt (the same checkpoint) with the local tempo term tuned, evaluated
+    m=${1:?localtempo <meter>}
+    lt="${m}_lt"
+    if ! done_run "$m" || [ ! -f "outputs/runs/$m/decode.json" ]; then echo "$m: not finished or not tuned"; exit 1; fi
+    mkdir -p "outputs/runs/$lt"
+    ln -sf "../$m/best.pt" "outputs/runs/$lt/best.pt"
+    for f in config.json status.json decode.json; do cp "outputs/runs/$m/$f" "outputs/runs/$lt/$f"; done
+    python scripts/eval_meter.py --run "$lt" --local-tempo || exit 1
+    exit 0 ;;
   grids)
     ok=0
     for m in $GRIDS_REEVAL; do  # their tuned decoder (decode.json) kept
@@ -206,14 +274,14 @@ case "$task" in
       if in_list "$nl" "$NEW_NLS" && ! done_run "$nl"; then
         echo "$nl: not trained yet, resuming"
         train_labeller "$nl" || { echo "$nl: training failed"; ok=1; continue; }
-        python scripts/eval_labeller.py --run "$nl" --normal-priority || ok=1
+        python scripts/eval_labeller.py --run "$nl" --normal-priority && publish "$nl" || ok=1
       elif ! in_list "$nl" "$NEW_NLS"; then
         echo "== $nl on the true grid"
         python scripts/eval_labeller.py --run "$nl" --normal-priority || ok=1
       fi
       for m in meter_oracle $GRIDS_OLD $METERS; do
         echo "== $nl on $m's grids"
-        python scripts/eval_labeller.py --run "$nl" --grid "meter:$m" --conditions clean,synthetic,real,periscope \
+        python scripts/eval_labeller.py --run "$nl" --grid "meter:$m" --conditions "$EVAL_CONDITIONS" \
           --normal-priority || ok=1
       done
     done
@@ -231,12 +299,12 @@ case "$task" in
              fi
              f=$(v2_flags "$opts") || { ok=1; continue; }
              # shellcheck disable=SC2086
-             python scripts/system_scores.py --v2 "$base" $f || ok=1 ;;
+             python scripts/system_scores.py --v2 "$base" $f $SYS_ARGS || ok=1 ;;
         *:*:sb) r=${spec%%:*}; rest=${spec#*:}
                 seq_ready "$r" || { ok=1; continue; }
-                python scripts/system_scores.py --run "$r" --mode "${rest%%:*}" --midi-beats synth || ok=1 ;;
+                python scripts/system_scores.py --run "$r" --mode "${rest%%:*}" --midi-beats synth $SYS_ARGS || ok=1 ;;
         *:*) seq_ready "${spec%%:*}" || { ok=1; continue; }
-             python scripts/system_scores.py --run "${spec%%:*}" --mode "${spec##*:}" || ok=1 ;;
+             python scripts/system_scores.py --run "${spec%%:*}" --mode "${spec##*:}" $SYS_ARGS || ok=1 ;;
         *) echo "unknown system $spec"; ok=1 ;;
       esac
     done
@@ -244,14 +312,17 @@ case "$task" in
   seq2seq)
     r=${1:?seq2seq <run> <train_model.py args>}
     shift
+    trained=0
     if ! done_run "$r"; then
       # shellcheck disable=SC2046
       python scripts/train_model.py --name "$r" --normal-priority --workers 7 $(resume "$r") "$@"
+      trained=1
     fi
     done_run "$r" || { echo "$r: not done yet (the next job resumes it)"; exit 1; }
     python scripts/evaluate_pieces.py --run "$r" --normal-priority --musicxml 5 --only-missing \
-      --modes "$SEQ_MODES" --conditions "$SEQ_CONDITIONS"
-    exit $? ;;
+      --modes "$SEQ_MODES" --conditions "$SEQ_CONDITIONS" || exit 1
+    [ "$trained" = 1 ] && publish "$r"   # finished in this job: published
+    exit 0 ;;
   ablation)
     spec=${1:?ablation <labeller>+<meter>}
     sys="v2_${spec%%+*}_${spec##*+}"

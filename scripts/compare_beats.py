@@ -114,16 +114,19 @@ def main(argv=None):
                                        for k, s in res["common"].items() if s.get("n")), flush=True)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    save_beats(out / "beats_pm2s.npz", pm2s["clean"])
-    save_beats(out / "beats_pm2s_real.npz", pm2s["real"])
-    (out / "beats_compare.json").write_text(json.dumps({"weights": tracker.weights, "device": device,
+    from src.pm2s_beats import tagged   # other weights ($PM2S_WEIGHTS): beats_pm2s_<tag>.npz, beats_compare_<tag>.*
+    save_beats(out / f"{tagged('beats_pm2s')}.npz", pm2s["clean"])
+    save_beats(out / f"{tagged('beats_pm2s_real')}.npz", pm2s["real"])
+    (out / f"{tagged('beats_compare')}.json").write_text(json.dumps({"weights": tracker.weights, "device": device,
                                                         "seconds": round(time.perf_counter() - t0, 1),
                                                         "results": results}, indent=1))
+    which = (f"PM2S's weights here: `{tracker.weights}` (tag {tagged('')[1:]}: not the released ones; "
+             "scripts/train_pm2s.py trains them without our test and validation pieces)"
+             if tagged("") else "PM2S's released weights were trained on all of ASAP (these performances included)")
     md = ("PM2S (beats from the notes) against Beat This!, ASAP test inputs, scored against the annotations "
-          "on the performances every source has. PM2S's released weights were trained on all of ASAP "
-          "(these performances included); Beat This!'s fold models never heard their piece.\n\n"
+          f"on the performances every source has. {which}; Beat This!'s fold models never heard their piece.\n\n"
           + table(results) + "\n")
-    (out / "beats_compare.md").write_text(md)
+    (out / f"{tagged('beats_compare')}.md").write_text(md)
     print(md)
 
 

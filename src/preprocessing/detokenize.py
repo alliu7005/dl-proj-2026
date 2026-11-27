@@ -128,12 +128,16 @@ def spell(midi: int, key: int = 0) -> m21.pitch.Pitch:
     return p
 
 
-def _make_element(group: list[_Note], key: int = 0):
+def _make_element(group: list[_Note], key: int = 0, run: int = 0):
+    """``run``: how many grace notes come before this position, each written as its own note (a run
+    of them as unslashed sixteenths, the way engravers write one; a single one as a slashed eighth)."""
     pitches = sorted({n.pitch for n in group})
     el = (m21.note.Note(spell(pitches[0], key)) if len(pitches) == 1
           else m21.chord.Chord([spell(x, key) for x in pitches]))
     if group[0].grace:
-        el.duration = m21.duration.Duration(0.5).getGraceDuration()
+        el.duration = m21.duration.Duration(0.25 if run > 1 else 0.5).getGraceDuration()
+        if run > 1:
+            el.duration.slash = False
     else:
         el.duration = m21.duration.Duration(group[0].dur)
     if any(n.arp for n in group):
@@ -315,15 +319,20 @@ def bars_to_score(bars: list[_Bar], min_staves: int = 2, grid: int | None = None
             if bi == 0:
                 meas.clef = m21.clef.TrebleClef() if s == 0 else m21.clef.BassClef()
             groups = defaultdict(list)
+            run = defaultdict(int)  # grace notes before one position: a run, each its own note, in order
             for n in bar.notes:
                 if n.staff == s:
+                    if n.grace:
+                        groups[(n.pos, True, n.dur, run[n.pos])].append(n)
+                        run[n.pos] += 1
+                        continue
                     k = 0  # a doubled unison (same pitch twice) goes into a separate element/voice
                     while any(x.pitch == n.pitch for x in groups[(n.pos, n.grace, n.dur, k)]):
                         k += 1
                     groups[(n.pos, n.grace, n.dur, k)].append(n)
             voices: list[list] = []  # each: list of (pos, end, element)
             for (pos, grace, dur, _), group in sorted(groups.items(), key=lambda kv: (kv[0][0], not kv[0][1], kv[0][3])):
-                el, tied = _make_element(group, bar.key)
+                el, tied = _make_element(group, bar.key, run=run[pos] if grace else 0)
                 for p in tied:  # continuation of a tie from an earlier note
                     prev = last_el[s].get(p)
                     if prev is not None:
@@ -401,8 +410,12 @@ def _fix_measure(meas: m21.stream.Measure):
                 v.remove(r)
 
 
-def write_musicxml(score: m21.stream.Score, path: str) -> str:
-    """Write MusicXML; repair measures with durations MusicXML can't express and retry once."""
+def write_musicxml(score: m21.stream.Score, path: str, decorate=None) -> str:
+    """Write MusicXML; repair measures with durations MusicXML can't express and retry once.
+    ``decorate(score)``: called on the score first (e.g. src/glissando.py decorate: lines the
+    tokens cannot say)."""
+    if decorate is not None:
+        decorate(score)
     try:
         return score.write("musicxml", fp=str(path))
     except m21.musicxml.xmlObjects.MusicXMLExportException:
@@ -452,7 +465,8 @@ def _fix_bars(bars: list[_Bar], fallback_grid: int) -> tuple[list[_Bar], dict]:
     return out, fixed
 
 
-def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, report: dict | None = None) -> str:
+def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, report: dict | None = None,
+                       decorate=None) -> str:
     """Tokens -> MusicXML file, as exact as the notation allows. Exact rendering first. If that
     fails (mixed tuplet grids making some duration inexpressible, a zero-length note, overfull
     model output), only the bars that fail on their own are snapped to 1/``fallback_grid``
@@ -462,18 +476,21 @@ def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, re
     exported even on their own (clipped and snapped) are emptied, so the rest of the score is
     still written. ``report`` (a dict) gets "attempt" (0: exact; 1: per bar, "fixed_bars" saying
     which bars and how; 2-4: the whole score snapped / clipped / both; 5: bars emptied) and
-    "emptied_bars" (their indices)."""
+    "emptied_bars" (their indices). ``decorate``: see write_musicxml (applied to every attempt's score)."""
     report = {} if report is None else report
     report["emptied_bars"] = []
+
+    def write(score):   # write_musicxml looked up at call time (tests stand in for it); decorate only if given
+        return write_musicxml(score, path) if decorate is None else write_musicxml(score, path, decorate)
     try:
-        out = write_musicxml(tokens_to_score(tokens), path)
+        out = write(tokens_to_score(tokens))
         report["attempt"] = 0
         return out
     except Exception as e:  # noqa: BLE001
         last = e
     fixed_bars, fixed = _fix_bars(parse_tokens(tokens), fallback_grid)
     try:
-        out = write_musicxml(bars_to_score(fixed_bars), path)
+        out = write(bars_to_score(fixed_bars))
         report.update(attempt=1, fixed_bars={int(k): v for k, v in fixed.items()},
                       emptied_bars=sorted(k for k, v in fixed.items() if v == "empty"))
         return out
@@ -482,7 +499,7 @@ def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, re
     attempts = [{"grid": fallback_grid}, {"clip": True}, {"clip": True, "grid": fallback_grid}]
     for k, kw in enumerate(attempts, start=2):
         try:
-            out = write_musicxml(tokens_to_score(tokens, **kw), path)
+            out = write(tokens_to_score(tokens, **kw))
             report["attempt"] = k
             return out
         except Exception as e:  # noqa: BLE001
@@ -508,7 +525,7 @@ def tokens_to_musicxml(tokens: list[str], path: str, fallback_grid: int = 48, re
         bars[j].notes, bars[j].pedal = [], []
         bad.append(j)
     try:
-        out = write_musicxml(bars_to_score(bars, **kw), path)
+        out = write(bars_to_score(bars, **kw))
     except Exception:  # noqa: BLE001
         raise last
     report.update(attempt=5, emptied_bars=sorted(bad))

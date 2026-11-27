@@ -10,6 +10,9 @@ else the training run it came from (outputs/runs/, what a training machine has).
       seq2seq/      model.pt  config.json  vocab.json  feature_stats.json
 
 scripts/export_models.py makes it from the training runs; scripts/download_models.py fetches it.
+scripts/publish_model.py puts one finished run in its slot on the Hugging Face repo when it beats the
+model there (pace/v2_jobs.sh calls it after every training run), and keeps every run under runs/;
+the demo pulls the repo's current default when it starts and every hour (download_models.update).
 """
 from __future__ import annotations
 
@@ -23,21 +26,58 @@ HF_REPO = "dat-dev/scoreformer"
 
 # name -> its file in models/, and the training run's checkpoint used when models/ does not have it.
 # The release's sources (export_models.py defaults) are the round-4 winners (docs/experiments.md,
-# "Fourth round: results"); the local fallbacks are what a training machine has.
+# "Fourth round: results"), with the meter model trained with Gangqinpu since 2026-11-26 (sixth
+# round: Gangqinpu's real recordings' time signatures right 0.79 of the time against 0.54, classical
+# meter scores equal); the local fallbacks are what a training machine has.
 RELEASE = {
     "v2_labeller": {"file": "v2_labeller/model.pt", "run": "outputs/runs/nl_base_gn/best.pt",
                     "what": "v2 note labeller (nl_base_gn)"},
-    "v2_meter": {"file": "v2_meter/model.pt", "run": "outputs/runs/meter_v3/best.pt",
-                 "what": "v2 meter model (meter_v3, the tempo-prior decoder of meter_v3_tp)"},
+    "v2_meter": {"file": "v2_meter/model.pt", "run": "outputs/runs/meter_v4_gq/best.pt",
+                 "what": "v2 meter model (meter_v4_gq: trained with Gangqinpu, its tempo-prior decoder)"},
     "seq2seq": {"file": "seq2seq/model.pt", "run": "outputs/runs/sf_base_reg_cab/best.pt",
                 "what": "seq2seq score model (sf_base_reg_cab_c128)"},
 }
 
 # The settings the release is meant to run with (the demo's and audio_to_score.py's defaults): keep a
-# note unless the labeller is at least this sure it is not in the score, and trim written lengths
-# that run just past the next onset (src/pipeline.py tidy_lengths).
+# note unless the labeller is at least this sure it is not in the score, trim written lengths
+# that run just past the next onset (src/pipeline.py tidy_lengths), write glissandos as glissandos.
 DELETE_ABOVE = 0.95
 TIDY = True
+# glissandos written as a "gliss." line between their first and last note (src/glissando.py)
+GLISSANDO = True
+# a triplet the timing contradicts written as the straight eighth / sixteenth it was played on (src/timing.py)
+TIMING_CHECK = True
+# readability: short rests closed, small overlaps trimmed, stems by voice; bars the decoder stretched
+# with a jump shortened (src/readable.py)
+READABLE = True
+# whole beats written straight where the timing fits straight sixteenths better than the labeller's
+# triplets (src/timing.py check_beats)
+TIMING_BEATS = True
+# the labeller's splits of the quarter decoded a beat at a time, fused with the timing (src/beat_decode.py;
+# the parameters tuned on validation windows, beat_decode.json next to the labeller)
+BEAT_DECODE = True
+FIX_JUMPS = True
+
+# The rules that correct a model's output (as opposed to how a rhythm is engraved) are decided by the
+# benchmark (scripts/rule_verdict.py: on only when they make the whole system significantly better;
+# the beat decoding, the model side, on unless it makes it worse), published in the release
+# manifest's settings (publish_model.py --settings). These are the defaults above, overridden by it.
+DECIDED_RULES = {"timing_check": TIMING_CHECK, "timing_beats": TIMING_BEATS, "fix_jumps": FIX_JUMPS,
+                 "beat_decode": BEAT_DECODE}
+
+
+def rule_settings(models: Path | None = None) -> dict:
+    """{rule: on?} for DECIDED_RULES: the defaults, overridden by models/manifest.json's
+    settings["rules"] (the benchmark's verdict, pulled with the models)."""
+    import json
+    out = dict(DECIDED_RULES)
+    mf = Path(models or ROOT / MODELS) / "manifest.json"
+    try:
+        rules = json.loads(mf.read_text()).get("settings", {}).get("rules", {})
+    except (OSError, ValueError):
+        rules = {}
+    out.update({k: bool(v) for k, v in rules.items() if k in out})
+    return out
 
 
 def default_path(name: str) -> str:

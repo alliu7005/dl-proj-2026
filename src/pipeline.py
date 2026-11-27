@@ -69,7 +69,8 @@ def _noop(stage: str, frac: float, msg: str):
 
 def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
                         search: float | None = None, context_before: int = 0,
-                        context_after: int = 0, beats: tuple | None = None) -> list[dict]:
+                        context_after: int = 0, beats: tuple | None = None,
+                        drop: np.ndarray | None = None) -> list[dict]:
     """Cut a performance (no score) into model inputs, mirroring segment.segment_windows at eval
     time: cut points at the midpoint of the largest onset gap near every ``size`` notes, onsets
     relative to the cut, notes struck before the cut but still held past it carried over with a
@@ -78,35 +79,42 @@ def performance_windows(notes: np.ndarray, pedal: np.ndarray, size: int = 128,
     notes just before / after it ("before" / "after", same time frame; the carried-over notes are
     not repeated), as src/dataset.py gives the model during training. ``beats`` = (times, down)
     in the performance's seconds: each window gets the beats around it ("beat_t" / "beat_d", in its
-    own time frame), as src/dataset.py does."""
+    own time frame), as src/dataset.py does. ``drop`` (bool [N]): notes left out of every window's
+    input, after the cuts were made on all the notes. "idx", "idx_before", "idx_after": the
+    performance's indices of "notes", "before", "after"."""
     if search is None:
         search = SegmentConfig().cut_search
     on = notes[:, ONSET].astype(np.float64)
     off = notes[:, OFFSET].astype(np.float64)
     cuts = cut_windows(on, lambda: size, 0.0, search)
+    keep = np.ones(len(notes), bool) if drop is None else ~np.asarray(drop, bool)
     out = []
     for a, b in cuts:
         t0 = float(on[a]) if a == 0 else float(on[a - 1] + on[a]) / 2
         t1 = float(off[a:b].max()) if b == len(on) else float(on[b - 1] + on[b]) / 2
-        carried = np.nonzero((on[:a] < t0) & (off[:a] >= t0 + CARRY_MIN_SEC))[0] if a else np.zeros(0, int)
-        sel = np.concatenate([notes[carried], notes[a:b]])
+        carried = np.nonzero((on[:a] < t0) & (off[:a] >= t0 + CARRY_MIN_SEC) & keep[:a])[0] if a else np.zeros(0, int)
+        own = np.arange(a, b)[keep[a:b]]
+        sel = np.concatenate([notes[carried], notes[own]])
         w = np.stack([sel[:, 0], sel[:, ONSET] - t0, sel[:, OFFSET] - sel[:, ONSET], sel[:, 3]], axis=1)
         w[: len(carried), 1] = np.minimum(w[: len(carried), 1], -1e-3)
         lo, hi = t0, t1
         before = after = np.zeros((0, 4), np.float32)
         if context_before and a:
-            prev = np.setdiff1d(np.arange(a), carried)[-context_before:]
+            prev = np.setdiff1d(np.arange(a)[keep[:a]], carried)[-context_before:]
             before = np.stack([notes[prev, 0], on[prev] - t0, off[prev] - on[prev], notes[prev, 3]], axis=1)
             lo = float(on[prev].min()) if len(prev) else t0
         if context_after and b < len(on):
-            nxt = np.arange(b, min(len(on), b + context_after))
+            nxt = np.arange(b, len(on))[keep[b:]][:context_after]
             after = np.stack([notes[nxt, 0], on[nxt] - t0, off[nxt] - on[nxt], notes[nxt, 3]], axis=1)
             hi = max(t1, float(off[nxt].max()))
         ped = pedal[(pedal[:, 1] > lo) & (pedal[:, 0] < hi)] - t0 if len(pedal) else pedal.reshape(-1, 2)
         bt, bd = window_beats(beats[0], beats[1], t0, lo, hi) if beats is not None else (np.zeros(0), np.zeros(0, bool))
         out.append({"notes": w.astype(np.float32), "pedal": np.asarray(ped, np.float32).reshape(-1, 2),
                     "before": np.asarray(before, np.float32), "after": np.asarray(after, np.float32),
-                    "t0": t0, "t1": t1, "n": int(b - a), "carried": int(len(carried)),
+                    "idx": np.concatenate([carried, own]).astype(np.int64),
+                    "idx_before": np.asarray(prev if context_before and a else [], np.int64),
+                    "idx_after": np.asarray(nxt if context_after and b < len(on) else [], np.int64),
+                    "t0": t0, "t1": t1, "n": int(len(own)), "carried": int(len(carried)),
                     "beat_t": bt, "beat_d": bd})
     return out
 
@@ -128,21 +136,42 @@ def playback_qpm(score, seconds: float | None) -> float | None:
     return float(np.clip(60.0 * (last - first) / seconds, 20.0, 300.0))
 
 
-def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None = None) -> dict:
+def engrave(tokens: list[str], out: Path, res: "Result", seconds: float | None = None,
+            glissandi: list | None = None, stems: bool = False) -> dict:
     """Tokens -> ``out``/score.musicxml and score.mid (``res.files``; failures in ``res.errors``).
     ``seconds``: the performance's length, which sets the score MIDI's tempo (``playback_qpm``; the
     MusicXML carries no tempo, as the scores the comparison rates). Returns how the export went
     (src/preprocessing/detokenize.py tokens_to_musicxml: the fallback that worked, the bars it had
-    to empty) and "playback_qpm"."""
+    to empty) and "playback_qpm". ``glissandi`` (src/glissando.py attach): a "gliss." line each in
+    the MusicXML, the swept notes in the score MIDI ("glissandi_drawn": how many lines). The score
+    MIDI plays grace notes and rolled chords as written (src/playback.py: "graces_played",
+    "rolled_chords_played"), which music21's MIDI export alone does not. ``stems``: the higher
+    voice's stems up, the others' down where a staff has two voices (src/readable.py stem_voices;
+    "stems_set": how many measures)."""
     import music21 as m21
     from .preprocessing.detokenize import tokens_to_musicxml, tokens_to_score
     report = {}
+    deco = None
+    if glissandi or stems:
+        def deco(score):
+            if glissandi:
+                from .glissando import decorate
+                report["glissandi_drawn"] = decorate(score, glissandi)
+            if stems:
+                from .readable import stem_voices
+                report["stems_set"] = stem_voices(score)
     try:
-        res.files["musicxml"] = Path(tokens_to_musicxml(tokens, str(out / "score.musicxml"), report=report))
+        res.files["musicxml"] = Path(tokens_to_musicxml(tokens, str(out / "score.musicxml"), report=report,
+                                                        decorate=deco))
         for clip in (False, True):  # clip notes to their bars if the plain export fails
             try:
                 score = tokens_to_score(tokens, clip=clip)
                 qpm = playback_qpm(score, seconds)
+                from .playback import realize   # grace notes and rolled chords as written (src/playback.py)
+                report.update(realize(score, qpm))
+                if glissandi:
+                    from .glissando import decorate
+                    decorate(score, glissandi, playback=True)
                 report["playback_qpm"] = None if qpm is None else round(qpm, 1)
                 if qpm:
                     first = score.parts[0].getElementsByClass(m21.stream.Measure).first()
@@ -560,7 +589,21 @@ class V2Pipeline(_FrontEnd):
 
     def __init__(self, labeller_ckpt: str | Path, meter_ckpt: str | Path, vocab: str | Path | None = None,
                  device: str = "auto", window_notes: int = 128, delete_above: float = DELETE_ABOVE,
-                 tidy: bool = False):
+                 tidy: bool = False, glissando: bool = False, timing_check: bool = False,
+                 readable: bool = False, fix_jumps: bool = False, timing_beats: bool = False,
+                 beat_decode: bool = False):
+        """``glissando``: find glissandos in the notes (src/glissando.py) and write each as its first
+        and last note joined by a "gliss." line, not as the run of notes. ``timing_check``: a note
+        written on a triplet position but played on a straight eighth or sixteenth is moved there
+        (src/timing.py). ``readable``: rests of a 16th or less closed, overlaps of a 16th or less
+        trimmed, stems by voice (src/readable.py). ``fix_jumps``: a bar the meter model's decoder
+        stretched with a jump is shortened instead (src/readable.py fix_jumps). ``timing_beats``: a
+        beat whose timing fits straight sixteenths better than the labeller's triplets is written
+        straight (src/timing.py check_beats). ``beat_decode``: the labeller's splits of the quarter
+        decoded a beat at a time, fused with the timing (src/beat_decode.py), with the parameters
+        tuned for the checkpoint (beat_decode.json next to it; without one, each note's likeliest
+        split as before, and the stats say so). All off by default:
+        the scoring script measures each as its own system."""
         from .labeller import load_labeller
         from .meter import DecodeConfig, build_meter_model
         from .notelabels import LabelSpace
@@ -592,13 +635,22 @@ class V2Pipeline(_FrontEnd):
         n_met = sum(p.numel() for p in self.meter.parameters())
         self.delete_above = float(delete_above)
         self.tidy = bool(tidy)
+        self.glissando = bool(glissando)
+        self.timing_check = bool(timing_check)
+        self.readable = bool(readable)
+        self.timing_beats = bool(timing_beats)
+        self.fix_jumps = bool(fix_jumps)
+        from .beat_decode import BeatDecode
+        self.beat_params = BeatDecode.load(labeller_ckpt.parent)   # None: not tuned for this labeller
+        self.beat_decode = bool(beat_decode)
         self.info = {"system": "v2", "labeller": str(labeller_ckpt), "meter": str(meter_ckpt),
                      "params_M": round((n_lab + n_met) / 1e6, 1), "device": str(self.device),
                      "decode": self.decode_cfg.to_dict()}
 
     # ------------------------------------------------------------------ steps
-    def grid(self, notes: np.ndarray, beats: tuple) -> dict:
-        """The meter model's grid of the whole performance on these beats, with its key signature."""
+    def grid(self, notes: np.ndarray, beats: tuple, fix_jumps: bool | None = None) -> dict:
+        """The meter model's grid of the whole performance on these beats, with its key signature
+        (``fix_jumps``: the pipeline's setting if None; the count in "jumps_fixed")."""
         from .meter import cover_notes, predict_grid, refine_grid, uses_aux
         from .notelabels import estimate_key
         # a meter model trained with a second tracker (train_meter.py --aux pm2s) reads PM2S's beats of the notes too
@@ -607,6 +659,10 @@ class V2Pipeline(_FrontEnd):
                          self.device, self.decode_cfg, aux=aux)
         g = refine_grid(g, notes[:, ONSET], self.decode_cfg)  # beat times onto the notes (off unless decode.json says)
         g = cover_notes(g, float(notes[:, ONSET].min()))  # a pickup before the first tracked beat's bar
+        g["jumps_fixed"] = 0
+        if self.fix_jumps if fix_jumps is None else fix_jumps:
+            from .readable import fix_jumps as fix
+            g["jumps_fixed"] = fix(g)
         g["key"] = estimate_key(notes)
         return g
 
@@ -621,12 +677,16 @@ class V2Pipeline(_FrontEnd):
         context = bool(int(self.cfg.context_before) or int(self.cfg.context_after))
         for w in windows:
             if context:  # the layout of src/dataset.py with context notes (role columns)
-                notes, roles, _ = assembly(w["notes"], w["before"], w["after"])
+                notes, roles, order = assembly(w["notes"], w["before"], w["after"])
                 f = note_features(notes, w["pedal"], roles)
+                if "idx" in w:
+                    w["src"] = np.concatenate([w["idx"], w["idx_before"], w["idx_after"]])[order]
             else:  # and without
                 notes = w["notes"]
                 roles = np.where(notes[:, 1] < 0, ROLE_CARRIED, ROLE_WINDOW).astype(np.int8)
                 f = note_features(notes, w["pedal"])
+                if "idx" in w:
+                    w["src"] = w["idx"]
             f[:, cols] = (f[:, cols] - mean) / std
             g_t, g_q, win = window_frame(grid, w["t0"], w["notes"][:, 1], int(grid.get("key", 0)))
             gf, bar_est, pos_est = grid_features(notes[:, 1], g_t, g_q, win)
@@ -641,11 +701,18 @@ class V2Pipeline(_FrontEnd):
 
     def label(self, notes: np.ndarray, pedal: np.ndarray, grid: dict,
               progress: Progress = _noop, delete_above: float | None = None,
-              tidy: bool | None = None) -> tuple[list[str], dict]:
+              tidy: bool | None = None, glissandi: list | None = None,
+              drop: np.ndarray | None = None, timing_check: bool | None = None,
+              readable: bool | None = None, timing_beats: bool | None = None,
+              beat_decode: bool | None = None) -> tuple[list[str], dict]:
         """Every note labelled in its window, all rendered in the grid's bars as one score.
         ``delete_above``: leave a note out only above this p(delete); ``tidy``: written lengths stop
         at the next onset of their staff when they run just past it (tidy_lengths). Defaults: the
-        pipeline's."""
+        pipeline's. ``glissandi`` (src/glissando.py find_glissandi): those two found among the
+        labelled notes (by the performed note each came from), the first written to reach the last
+        ("glissandi" in the result, for the export's line). ``drop``: notes not to write (the
+        glissandos' middles): the labeller still gets every note, exactly as without them, so the rest
+        of the piece is written exactly as it would be, and their labels are left out."""
         delete_above = self.delete_above if delete_above is None else float(delete_above)
         tidy = self.tidy if tidy is None else bool(tidy)
         import sys
@@ -659,20 +726,42 @@ class V2Pipeline(_FrontEnd):
         progress("score", 0.0, f"labelling {len(windows)} windows")
         items, frames = self.items(windows, grid)
         coll = TruncatingCollate(self.cfg.max_notes, 10 ** 9)
+        bd = self.beat_decode if beat_decode is None else bool(beat_decode)
+        bparams = self.beat_params if bd else None   # None also when not tuned
         placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
-                                delete_above=delete_above)
+                                delete_above=delete_above, beat_decode=bparams)
         staves = piece_staves([p.staff for pl in placed for p in pl])
         folded = sum(p.staff >= staves for pl in placed for p in pl)
         if folded:  # a stray third / fourth staff: those notes on their likeliest of the staves kept
             placed = predict_placed(self.labeller, items, coll, self.device, self.amp, self.space, carried=False,
-                                    staves=staves, delete_above=delete_above)
+                                    staves=staves, delete_above=delete_above, beat_decode=bparams)
         notes_out = []
-        for win, pl in zip(frames, placed):
+        skip = np.asarray(drop, bool) if drop is not None else np.zeros(len(notes), bool)
+        for w, win, pl in zip(windows, frames, placed):
             for p in pl:
                 p.bar += win.first_bar
+                p.src = int(w["src"][p.src]) if p.src >= 0 and "src" in w else -1   # the performance's note
+                if p.src >= 0 and skip[p.src]:
+
+                    continue
                 notes_out.append(p)
+        timing = self.timing_check if timing_check is None else bool(timing_check)
+        fixed = 0
+        if timing:   # triplets the timing contradicts, before graces join their notes and lengths are tidied
+            from .timing import check_timing
+            fixed = check_timing(notes_out, notes[:, ONSET], grid, list(grid["bars"]))
+        tb = self.timing_beats if timing_beats is None else bool(timing_beats)
+        beat_fixed = 0
+        if tb:       # whole beats the timing says are straight sixteenths, not the labeller's triplets
+            from .timing import check_beats
+            beat_fixed = check_beats(notes_out, notes[:, ONSET], grid, list(grid["bars"]))
         graces = attach_graces(notes_out, list(grid["bars"]))
         tidied = tidy_lengths(notes_out, list(grid["bars"])) if tidy else 0
+        rd = self.readable if readable is None else bool(readable)
+        closed = trimmed = 0
+        if rd:   # short rests closed, small overlaps trimmed (before a glissando's start is set to reach its end)
+            from .readable import readable_lengths
+            closed, trimmed = readable_lengths(notes_out, list(grid["bars"]))
         key = int(grid.get("key", 0))
         bars = [(ts, key) for ts in grid["bars"]] or [("4/4", key)]
         opens = True
@@ -685,24 +774,37 @@ class V2Pipeline(_FrontEnd):
             last = int(np.searchsorted(np.asarray(grid["bar_q"], np.float64), q1 - 1e-6, side="right")) - 1
             last = max([last] + [p.bar for p in notes_out])
             bars = bars[: max(last, 0) + 1]
+        gl = []
+        if glissandi:
+            from .glissando import attach
+            gl = attach(glissandi, notes_out, grid, [ts for ts, _ in bars])
         piece = Window(bars=bars, opens_with_bar=opens, start_pos=Fraction(0) if opens else None)
         tokens = render(piece, notes_out)
-        own = int(sum(int((it["roles"] == 0).sum()) for it in items))
-        return tokens, {"windows": len(windows), "notes_kept": len(notes_out), "notes_deleted": own - len(notes_out),
+        own = int(sum(int((it["roles"] == 0).sum()) for it in items)) - int(skip.sum())
+        kept = len(notes_out) - sum(g.get("written", 0) for g in gl)
+        return tokens, {"windows": len(windows), "notes_kept": kept, "notes_deleted": own - kept,
                         "bar_ts": [ts for ts, _ in bars], "staves": max([2] + [p.staff + 1 for p in notes_out]),
                         "staff_folded": int(folded), "graces_attached": graces, "delete_above": delete_above,
-                        "tidy": tidy, "lengths_tidied": tidied,
+                        "tidy": tidy, "lengths_tidied": tidied, "glissandi": gl,
+                        "timing_check": timing, "timing_fixed": fixed,
+                        "timing_beats": tb, "timing_beats_fixed": beat_fixed,
+                        "beat_decode": ((self.beat_params.to_dict() if self.beat_params else "not tuned") if bd
+                                        else False),
+                        "readable": rd, "rests_closed": closed, "overlaps_trimmed": trimmed,
                         "follow": follow_map(grid, notes_out)}
 
     # ------------------------------------------------------------------ all of it
     def run(self, src: str | Path, out_dir: str | Path, progress: Progress = _noop, beats: tuple | None = None,
             beat_checkpoint: str = "final0", delete_above: float | None = None, tidy: bool | None = None,
-            beat_source: str = "beat_this", **_) -> Result:
+            beat_source: str = "beat_this", glissando: bool | None = None, timing_check: bool | None = None,
+            readable: bool | None = None, fix_jumps: bool | None = None, timing_beats: bool | None = None,
+            beat_decode: bool | None = None, **_) -> Result:
         """``beats``: (times, down) in the input's seconds, given instead of tracking them.
         ``beat_checkpoint``: the Beat This! model that tracks them (scripts/system_scores.py gives
         each ASAP test piece the cross-validation model that never heard it). ``beat_source``:
         beat_this (the recording; a MIDI input rendered to audio first) or pm2s (PM2S on the notes:
-        the MIDI, or the transcription of a recording)."""
+        the MIDI, or the transcription of a recording). ``glissando``, ``timing_check``, ``timing_beats``, ``beat_decode``, ``readable``,
+        ``fix_jumps``: the pipeline's settings if None."""
         if beat_source not in BEAT_SOURCES:
             raise ValueError(f"beat_source must be one of {BEAT_SOURCES}, not {beat_source!r}")
         from collections import Counter
@@ -756,16 +858,25 @@ class V2Pipeline(_FrontEnd):
             return res
         progress("grid", 0.0, "the metrical grid of the piece")
         t = time.perf_counter()
-        grid = self.grid(notes, beats)
+        grid = self.grid(notes, beats, fix_jumps=fix_jumps)
         timing["grid_s"] = round(time.perf_counter() - t, 1)
         t = time.perf_counter()
-        tokens, counts = self.label(notes, pedal, grid, progress, delete_above=delete_above, tidy=tidy)
+        found = []
+        if self.glissando if glissando is None else glissando:
+            from .glissando import find_glissandi, inner_mask
+            found = find_glissandi(notes)
+        drop = ~inner_mask(len(notes), found) if found else None
+        tokens, counts = self.label(notes, pedal, grid, progress, delete_above=delete_above, tidy=tidy,
+                                    glissandi=found, drop=drop, timing_check=timing_check, readable=readable,
+                                    timing_beats=timing_beats, beat_decode=beat_decode)
+        gl = counts.pop("glissandi")
         timing["score_s"] = round(time.perf_counter() - t, 1)
         res.tokens = tokens
         (out / "tokens.txt").write_text(" ".join(tokens))
         files["tokens"] = out / "tokens.txt"
         progress("engrave", 0.0, "writing MusicXML")
-        export = engrave(tokens, out, res, float(notes[:, OFFSET].max() - notes[:, ONSET].min()))
+        export = engrave(tokens, out, res, float(notes[:, OFFSET].max() - notes[:, ONSET].min()), glissandi=gl,
+                         stems=counts["readable"])
         written = counts.pop("bar_ts")  # the score's bars (the grid's, up to the bar the music ends in)
         ts = Counter(written)
         dur = float(notes[:, OFFSET].max() - notes[:, ONSET].min())
@@ -776,6 +887,11 @@ class V2Pipeline(_FrontEnd):
                      "time_signature": ts.most_common(1)[0][0] if ts else None,
                      "time_signatures": dict(ts.most_common()), "key_signature": int(grid.get("key", 0)),
                      **counts, "tokens": len(tokens), "export": export,
+                     "glissando": bool(self.glissando if glissando is None else glissando),
+                     "jumps_fixed": int(grid.get("jumps_fixed", 0)),
+                     "glissandi_found": len(found),
+                     "glissandi": [{k: v for k, v in g.items() if k not in ("start", "end", "inner")}
+                                   | {"bar": int(g["start"][0]) + 1} for g in gl],
                      "playback_qpm": export.get("playback_qpm"), **timing}
         (out / "result.json").write_text(json.dumps({"stats": res.stats, "errors": res.errors,
                                                      "files": {k: str(v) for k, v in files.items()}}, indent=1))

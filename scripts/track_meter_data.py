@@ -39,7 +39,12 @@ TRACKERS = ("beat_this", "pm2s")
 
 
 def tracked_path(meter: Path, split: str, tracker: str) -> Path:
-    """data/processed/meter/tracked_<split>_<tracker>.npz (split: e.g. train_gangqinpu)."""
+    """data/processed/meter/tracked_<split>_<tracker>.npz (split: e.g. train_gangqinpu); PM2S with
+    other weights than the released ones: tracked_<split>_pm2s_<tag>.npz (src/pm2s_beats.py
+    weights_tag), so training (--tracked pm2s) and testing read the beats of the weights in use."""
+    if tracker == "pm2s":
+        from src.pm2s_beats import tagged
+        tracker = tagged(tracker)
     return Path(meter) / f"tracked_{split}_{tracker}.npz"
 
 
@@ -142,7 +147,10 @@ def main(argv=None, beat_this=None, pm2s=None):
             report[name] = {"segments": len(perfs), "pm2s": summarize(perfs, beats)}
             print(f"{name}: " + json.dumps(report[name]), flush=True)
     meter.mkdir(parents=True, exist_ok=True)
-    (meter / "tracked_report.json").write_text(json.dumps({"trackers": trackers, "device": device,
+    from src.pm2s_beats import tagged, weights_tag   # other PM2S weights: tracked_report_<tag>.json
+    report_name = (tagged("tracked_report") if "pm2s" in trackers else "tracked_report") + ".json"
+    (meter / report_name).write_text(json.dumps({"trackers": trackers, "device": device,
+                                                           "pm2s_tag": weights_tag() if "pm2s" in trackers else None,
                                                            "seconds": round(time.perf_counter() - t0, 1),
                                                            "splits": report}, indent=1))
 

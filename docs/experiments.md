@@ -1103,7 +1103,7 @@ piece-level readout of the meter model picks the note-value level better than th
 The right level depends on the piece's own music, which the model has not learned from 1,100
 works. The release keeps `meter_v3` with the tempo-prior decoder, without the level choice.
 `choose_level`, the tempo head and `--level` stay in the code (off by default) for a meter model
-trained on more, and more varied, data (docs/handoff.md, options 8 and 9).
+trained on more, and more varied, data (docs/handoff.md, options 7 and 10: Gangqinpu first).
 
 ### Sixth round: more varied meter data, beat times from the notes, beats for MIDI input
 
@@ -1229,6 +1229,438 @@ The fit found a bug in the tracker simulation (`src/beats.py BeatNoise`): spurio
 as binomial(n, extra / (1 - extra)), which fails above extra = 0.5; 6 of PM2S's 120 profiles are
 there (up to 0.73), so its training would have stopped within a few steps. Above 0.5 the count is
 now Poisson with the same mean; up to 0.5 the draws are unchanged (Beat This!'s profiles reach 0.37).
+
+### Sixth round: results (2026-11-25)
+
+`pace/v2_gangqinpu.sh` ran end to end (job ids 7295929-36).
+- **Data:** Gangqinpu gave 17,347 / 487 / 501 performances (train / val / test) with grids: 3.83M
+  training beats, against about 1,100 ASAP + PERiScoPe works before.
+- **Recordings:** 4,007 of 4,008 downloaded (all validation and test, 3,000 training). A few MP3s
+  were cut short and Beat This! skipped them.
+- **Training:**
+  - `meter_v4_gq` used all 60,000 steps, best at step 56,000, so it may not have finished
+    improving;
+  - `meter_v4_gq_both` stopped at 44,000 (best 28,000);
+  - `meter_v4_gq_pm` stopped at 30,000 (best 14,000).
+- **`meter_v3_gqft`** (above) was not in the batch's runs and was not trained.
+
+**The two trackers on the same unseen music** (Gangqinpu validation, 1,641 performances,
+`tracked_report.json`):
+
+| tracker | beat F | downbeat F | wrong tempo octave |
+|---|---|---|---|
+| Beat This! on the recordings | 0.713 | 0.661 | 34% |
+| PM2S on the transcriptions | 0.694 | 0.509 | 42% |
+
+**Meter models** (grid time-signature accuracy per bar / downbeat F; each with the tracker it was
+trained for; `clean`, `periscope` and `gangqinpu` with the simulated tracker, `real` and
+`gangqinpu_real` with Beat This!'s real beats of the recordings, `_pm2s` with PM2S's real beats):
+
+| meter model | clean | real (24) | PERiScoPe | Gangqinpu | Gangqinpu, real recordings |
+|---|---|---|---|---|---|
+| `meter_v3_tp` (the release) | 0.552 / 0.786 | 0.440 / 0.650 | 0.645 / 0.757 | 0.633 / 0.781 | 0.542 / 0.672 |
+| **`meter_v4_gq`** (Beat This!) | 0.572 / 0.797 | 0.450 / 0.657 | 0.644 / 0.756 | **0.834 / 0.852** | **0.794 / 0.714** |
+| `meter_v4_gq_both` (+ PM2S as evidence) | 0.554 / 0.780 | 0.375 / 0.694 | 0.609 / 0.753 | 0.810 / 0.826 | 0.761 / 0.705 |
+| `meter_v4_gq_pm`, PM2S's real beats | 0.502 / 0.592 | 0.500 / 0.658 | 0.478 / 0.558 | 0.804 / 0.719 | |
+| `meter_v3_tp_rf` (beat times from the notes) | 0.552 / 0.792 | 0.440 / 0.637 | 0.645 / 0.761 | 0.633 / 0.785 | |
+
+**Whole pieces** (MUSTER mean error, %, lower is better; paired differences against the release
+with a 95% bootstrap interval over pieces, bold where it excludes 0; `outputs/system_eval/paired.md`):
+
+| system | real (24) | clean (59) | vs the release, real | vs the release, clean |
+|---|---|---|---|---|
+| the release (`meter_v3_tp`, Beat This!) | 12.31 | 14.53 | | |
+| + beat times from the notes (`_rf`: snap + fill) | 12.31 | 14.27 | -0.00 [-0.21, +0.13] | **-0.26** [-0.37, -0.11] |
+| + missed beats filled only (`_fill`) | 12.28 | 14.35 | -0.03 [-0.14, +0.04] | **-0.18** [-0.26, -0.08] |
+| `meter_v4_gq` (Gangqinpu, Beat This!) | 12.70 | 15.18 | +0.39 [-0.09, +1.09] | **+0.65** [+0.16, +1.15] |
+| `meter_v4_gq_both` | 12.10 | 15.84 | -0.21 [-1.11, +0.61] | **+1.31** [+0.83, +1.89] |
+| the release with PM2S's beats (`_pm_rpm`) | 11.56 | 12.43 | **-0.74** [-1.49, -0.05] | **-2.10** [-3.08, -1.17] |
+| **`meter_v4_gq_pm` with PM2S's beats** | **11.12** | **12.08** | **-1.19** [-2.07, -0.40] | **-2.45** [-3.74, -1.18] |
+| seq2seq (`sf_base_reg_cab_c128`) | 10.65 | 11.74 | | |
+| Beyer & Dai | 11.14 | 11.05 | | |
+
+- **`meter_v4_gq_pm` + PM2S against the others:**
+  - against `meter_v3_tp` + PM2S: -0.45 [-0.83, -0.02] real, -0.35 [-0.91, +0.35] clean;
+  - seq2seq minus it: -0.47 [-1.33, +0.63] real, -0.33 [-1.30, +1.07] clean;
+  - Beyer & Dai minus it: +0.02 [-1.69, +2.24] real, -1.02 [-2.57, +1.69] clean.
+
+  For the first time, v2 is within chance of both on both conditions.
+- **What PM2S changes on whole pieces:** onsets and offsets, missing and extra notes all drop
+  (real: onset 13.82 -> 12.93, missing 8.90 -> 7.29, extra 11.80 -> 10.17).
+
+**What it means:**
+- **Gangqinpu teaches the meter model music outside classical piano, without unlearning the
+  classical.**
+  - On Gangqinpu's real recordings, time-signature accuracy goes from 0.54 to 0.79, and the
+    right note-value level from 0.65 to 0.75.
+  - On the classical sets, the meter scores are equal.
+  - On the classical benchmark's whole pieces it is not better: +0.39 real (chance), +0.65 clean
+    (sure).
+
+  How much it helps whole scores of pop is not measured: that needs Gangqinpu's scores as
+  references (option 7's labeller targets).
+- **Beat times from the notes:** a small, sure gain on clean MIDI (-0.26), none on real
+  recordings. The settings were a first guess.
+- **PM2S gives the largest whole-piece gain of any change so far, but not one we can quote yet.**
+  Its released weights were trained on all of ASAP, our 14 test pieces included. That flatters
+  it most on clean MIDI, which it saw as is, and also on real recordings: their transcriptions
+  are of performances whose MIDI it trained on.
+  - On music it never saw (Gangqinpu), its beats are worse than Beat This!'s on the recordings
+    (downbeat F 0.51 vs 0.66).
+  - Yet a meter model trained for it ends level there (0.804 vs 0.794 time signature).
+  - For MIDI input the alternative is Beat This! on a rendering, which costs 2.8 points (fourth
+    round), so part of the gain is likely real.
+  - Before it is quoted or released, retrain PM2S without our test and validation pieces (its
+    training code is public, MIT) and score again.
+- **The release stays `meter_v3_tp` + Beat This!** until that retraining. The next candidate is
+  `meter_v4_gq_pm` with PM2S's beats, and `meter_v4_gq` for music outside classical piano.
+
+### Seventh round: PM2S retrained without our test pieces
+
+`pace/v2_pm2s.sh` (pace/README.md, 4p). The sixth round's largest gain came with PM2S's released
+weights, which were trained on all of ASAP, our 14 test pieces included. That gain can only be
+quoted from a PM2S that never saw them.
+
+- **The model:** `scripts/train_pm2s.py` trains PM2S's `RNNJointBeatModel` (27.5M parameters)
+  from scratch: `pm2s_ho`.
+  - Recipe: PM2S's own, read from its `dev/` code. Every note within 70 ms of a beat is a beat
+    target, and downbeats alike. The tempo head learns the inter-beat interval in 10 ms classes.
+    Training uses 500-note segments, 32 per batch, and AdamW (1e-3, betas 0.8 / 0.8) with the rate
+    x0.1 after 40k steps.
+  - Augmentation: tempo x U(0.8, 1.2), up to 12 semitones of transposition, and either octave
+    copies or dropped chord notes.
+- **The data, ours:** ASAP's training pieces (clean MIDI and Transkun transcriptions), PERiScoPe
+  and Gangqinpu, Gangqinpu half of every batch. That is more varied than PM2S's original A-MAPS,
+  CPM and ASAP.
+- **The selection:** on the post-processed beats (mean of beat F and downbeat F over the
+  validation splits). PM2S selects on per-note F.
+- **What is measured, all tagged `ho`:**
+  - its beats on the ASAP test inputs and on Gangqinpu, against the released PM2S and Beat This!;
+  - the release and `meter_v4_gq_pm` on whole pieces with its beats: the sixth round's gain
+    without the leak;
+  - `meter_v4_gq_pmho`, the meter model trained again for its beats.
+
+### Seventh round: results (2026-11-26)
+
+`pace/v2_pm2s.sh` ran end to end: 8 jobs, the retraining 2 h 51 min.
+
+**The retrained PM2S is under-trained.**
+- Its training loss rose from 0.48 at step 8,000 to 0.61 at step 38,000, and validation fell with
+  it (mean beat / downbeat F 0.62 at 10k, 0.50 at 38k, 0.54 at 60k).
+- A training loss that rises is unstable optimisation, not overfitting. PM2S's recipe (AdamW 1e-3,
+  betas 0.8 / 0.8, no clipping) does not train stably on our data, so best.pt is from step 10,000.
+- What follows understates a properly trained PM2S without our test pieces.
+
+**Its beats (`beats_compare_ho.md`, `tracked_report_ho.json`):**
+
+| beats | ASAP test clean (beat / downbeat F, wrong tempo octave) | Gangqinpu test (beat / downbeat F) |
+|---|---|---|
+| PM2S, released (trained on ASAP incl. our test pieces) | 0.786 / 0.618, 0% | 0.710 / 0.513 |
+| PM2S, held out (`pm2s_ho`) | 0.655 / 0.514, 50% | **0.780** / 0.636 |
+| Beat This!, on the recording | 0.711 / 0.596, 33% | 0.709 / **0.668** |
+| Beat This!, on the MIDI rendered to audio | 0.576 / 0.422, 29% | - |
+
+- On ASAP the released weights were far ahead: partly the leak, partly this under-trained retrain.
+  Half of its pieces come out at double or half the tempo.
+- On Gangqinpu, which it trained on and the released one did not, it beats both.
+
+**Whole pieces (MUSTER mean, real recordings / clean MIDI):**
+
+| system | real (24) | clean (59) |
+|---|---|---|
+| the release (`meter_v3_tp`, Beat This!) | 12.31 | 14.53 |
+| the release + released PM2S | 11.56 | 12.43 |
+| the release + `pm2s_ho` | 12.96 | 13.13 |
+| `meter_v4_gq_pm` + `pm2s_ho` | 11.80 | 12.35 |
+| **`meter_v4_gq_pmho` + `pm2s_ho`** | **11.59** | **11.85** |
+| seq2seq / Beyer & Dai | 10.65 / 11.14 | 11.74 / 11.05 |
+
+Paired (`outputs/system_eval/paired.md`):
+- **The leak was real.** With the release, `pm2s_ho` against the released PM2S: +1.40 on real
+  ([+0.54, +2.78], worse), +0.70 on clean (chance).
+- **The PM2S path still helps MIDI input without it.** `meter_v4_gq_pmho` + `pm2s_ho` against the
+  release:
+  - **-2.68 on clean** ([-3.70, -1.52], 51 of 59);
+  - -0.71 on real (chance).
+- **That is level with the baselines.**
+  - Against seq2seq: -0.10 on clean, -0.94 on real, both within chance.
+  - Against Beyer & Dai: -0.79 on clean and -0.45 on real, both within chance.
+- **Training the meter model for this PM2S helped:** `meter_v4_gq_pmho` against `meter_v4_gq_pm`,
+  both on `pm2s_ho`: -0.50 on clean (sure), -0.21 on real.
+
+**Conclusion.**
+- **For MIDI input, with no recording to track,** `meter_v4_gq_pmho` + PM2S is the best honest v2
+  and level with seq2seq and Beyer & Dai. Beat This! on a rendered MIDI is far worse.
+- **For recordings, Beat This! on the audio stays.** On Gangqinpu's real recordings, PM2S was worse
+  (eighth round below).
+- **Next:** retrain `pm2s_ho` with stable optimisation: a lower rate, the usual betas, gradient
+  clipping. It is about 3 GPU hours.
+
+### Eighth round: the labeller on Gangqinpu's scores, whole pieces outside classical piano
+
+`pace/v2_gqlabel.sh` (pace/README.md, 4q). The sixth round made the meter model general:
+Gangqinpu's time signatures right on 0.79 of its real recordings, against 0.54. The labeller has
+only seen classical scores, and "more general" had no whole-piece measure.
+
+- **The data:** Gangqinpu's written scores as labeller windows
+  (`src/preprocessing/gangqinpu.py score_measures` / `labeller_performance`,
+  `scripts/build_gangqinpu_windows.py` -> `{train,val,test}_gangqinpu`, Gangqinpu's own splits).
+  - The release's `notation` gives every written note's measure, onset, length, staff and grace
+    flag, and the performance note aligned to it. It becomes the measures every MusicXML score
+    becomes, and is cut into windows like PERiScoPe.
+  - How the release writes a score:
+    - a note held across a bar line is one long note: cut at the bar line and tied;
+    - a written note the score MIDI does not strike is a tie continuation;
+    - duplicates and zero-length notes are dropped, with their performance notes.
+  - The inputs are the recording's Transkun notes the alignment kept. They have real timing,
+    lengths and missed notes, but not the transcriber's extra notes. So they are stored as
+    `source: transkun_aligned`, and the Dataset adds only the noise model's extra notes
+    (`NoiseModel.hallucinations_only`).
+  - Checked on 40-60 validation pieces:
+    - 98% of the performed notes pair with a written note;
+    - every window has a grid;
+    - no token is outside the vocabulary;
+    - rendering the true labels gives onset F1 0.966, duration 1.000, staff 1.000. The 3% missing
+      are the notes the alignment interpolated.
+    - The references' MusicXML reads back with 25 of 31,841 notes different.
+- **The labeller `nl_gq`:** `nl_base_gn`'s recipe (`--grid-noise 0.8`) with
+  `--gangqinpu-share 0.5`.
+  - The usual data keeps its proportions in the other half. An epoch stays a pass over the usual
+    data, so patience covers the same.
+  - Validation adds `val_gangqinpu` (`val_gq`), and the selection averages over it too.
+- **Window tests** (`scripts/eval_labeller.py`):
+  - `gangqinpu`: Gangqinpu's test windows, with the true grid or a meter model's grid from the
+    simulated tracker;
+  - `gangqinpu_real`: the same windows, with the grid from Beat This!'s beats of the recordings.
+    The meter model's Gangqinpu grids cover only the reliably timed bars: windows outside them
+    are left out and counted.
+- **Whole pieces** (`scripts/gangqinpu_inputs.py` -> `outputs/system_eval_gangqinpu`): 60 test
+  performances, one per score, with genres in proportion.
+  - The reference is the written score as MusicXML.
+  - `gangqinpu` gives the aligned notes as MIDI (like ASAP's clean MIDI). `gangqinpu_real` gives
+    Transkun run on the recording here, cut to the aligned span: what the demo gets from an upload.
+  - Every system gets Beat This!'s beats of the recording (PM2S's with `rpm`).
+  - The systems: the release, `nl_gq` and `meter_v4_gq` each alone and together,
+    `meter_v4_gq_pm` with PM2S, seq2seq and Beyer & Dai. They are scored with Beyer & Dai's
+    metrics and paired by performance (`compare_systems.py --results
+    outputs/system_eval_gangqinpu/results.json`).
+- **Also:**
+  - `meter_v4_gql`: `meter_v4_gq` with 100k steps. Its best checkpoint was at 56k of 60k.
+  - `meter_v3_s1_tp`: the release's meter model's second seed with the tempo-prior decoder, on
+    whole pieces. This is v2's run-to-run spread for the report (the labeller's is ±0.2).
+
+### Eighth round: results (2026-11-26)
+
+`pace/v2_gqlabel.sh` ran end to end: 8 jobs, the longest 2 h 07 min.
+
+**The data.**
+- 17,392 of Gangqinpu's 17,589 training performances became 322,541 training windows (42.6M input
+  notes, 9 minutes on 16 CPUs). 196 had too few aligned notes; 0.5% of windows were dropped.
+- Validation: 492 performances, 4,628 windows. Test: 506 performances, 4,762 windows.
+- 505 training tokens of 1.3M+ are outside the vocabulary (`<unk>`).
+- 324,711 notes were held across a bar line (written tied). Duplicates (72k) and zero-length notes
+  (48k) were dropped.
+
+**`nl_gq`** (`nl_base_gn`'s recipe, half of the windows from Gangqinpu) stopped early at step 43,110
+(best 40,000) in 1 h 48 min, with the evaluation. Onset F1 with the true grid:
+
+| | ASAP clean | ASAP real | PERiScoPe | Gangqinpu |
+|---|---|---|---|---|
+| `nl_base_gn` | 0.782 | 0.800 | 0.857 | 0.882 |
+| `nl_gq` | **0.785** | **0.806** | **0.866** | **0.921** |
+
+- It is better everywhere, classical included.
+- On the meter models' grids, window onset F1 barely moves: on Gangqinpu with `meter_v4_gq`'s grid
+  from Beat This!'s beats of the recordings, 0.498 for both. Where the grid is wrong, it is wrong
+  for either labeller.
+
+**Whole pieces, ASAP (paired, against the same meter model with `nl_base_gn`):**
+
+| | real | clean |
+|---|---|---|
+| `nl_gq` + `meter_v3_tp` (12.23 / 14.38) | -0.07 (chance) | **-0.15** [-0.31, -0.04] |
+| `nl_gq` + `meter_v4_gq` (12.71 / 14.86) | +0.01 (chance) | **-0.32** [-0.56, -0.14] |
+
+**Whole pieces, Gangqinpu.**
+- 59 test pieces, one per score: 25 pop, 15 unlabelled, 10 classical, 5 other, 3 folk, 1 jazz.
+- 58 were scored by every system. MUSTER mean:
+
+| system | from the recording (`gangqinpu_real`) | aligned notes (`gangqinpu`) |
+|---|---|---|
+| Beyer & Dai | 8.07 | 7.65 |
+| seq2seq (`sf_base_reg_cab_c128`) | 7.69 | 7.64 |
+| v2, the release (`nl_base_gn` + `meter_v3_tp`) | 6.18 | 6.46 |
+| v2, `nl_base_gn` + `meter_v4_gq` | 5.84 | 6.37 |
+| v2, `nl_base_gn` + `meter_v4_gq_pm` + PM2S (released) | 6.55 | 6.35 |
+| v2, `nl_gq` + `meter_v3_tp` | 4.25 | 4.49 |
+| **v2, `nl_gq` + `meter_v4_gq`** | **4.00** | **4.40** |
+
+Paired, from the recordings (`outputs/system_eval_gangqinpu/paired.md`; each piece its own, see
+the note below):
+- **On pop, v2 is far ahead of both baselines.** Even the release beats seq2seq by 1.51
+  ([+0.88, +2.10]) and Beyer & Dai by 1.88. With both Gangqinpu models, seq2seq is +3.69 behind
+  ([+3.06, +4.37], 1 of 58 better) and Beyer & Dai +4.07.
+- **`nl_gq` makes the biggest difference:** -1.93 against the release ([-2.34, -1.54], 57 of 58).
+  - MUSTER offsets (written lengths) go from 17.4 to 10.7, onsets from 5.5 to 3.6.
+- **`meter_v4_gq` helps too:** -0.35 against `meter_v3_tp` ([-0.72, +0.01]).
+  - Score similarity's duration error halves: 48% to 24-28%.
+- **PM2S is worse on recordings:** +0.71 ([+0.38, +1.05]). On the aligned notes it is equal.
+
+**Also:**
+- **`meter_v4_gql` (100k steps).** It stopped at 66,000 (best 50,000). Its meter scores are a little
+  lower than `meter_v4_gq`'s. On whole pieces it is within chance everywhere: -0.58 real, -0.29
+  clean, 0.00 on Gangqinpu. Not promoted; the 60k model stays.
+- **The meter model's second seed (`meter_v3_s1_tp`)** against the release's `meter_v3_tp`: +0.59
+  on real (chance), **+0.93 on clean** ([+0.44, +1.33]). v2's spread from the meter model's
+  training seed is up to about 0.9 on whole classical pieces, against 0.2 for the labeller's. So
+  differences between meter models smaller than about a point are within training noise,
+  `meter_v4_gq`'s +0.65 on clean included.
+- **Publishing.**
+  - `nl_gq` was made the default on Hugging Face by the batch itself. The job order of that batch
+    compared it on the three classical sets only; it won there too.
+  - `meter_v4_gql` was archived.
+  - The release on the repo is now `nl_gq` + `meter_v4_gq`.
+- **The paired comparison's first output grouped all of Gangqinpu's performances as one piece**
+  (zero-width intervals). Fixed in `scripts/compare_systems.py` (`piece_of`), and the intervals
+  above are from the fixed version.
+
+**Conclusion.** v2 with both Gangqinpu models is the general system:
+- best by far on music outside classical piano (4.00 against 7.69 and 8.07);
+- on the classical benchmark within chance of the release on real audio, and within the meter
+  model's seed spread on clean MIDI.
+
+seq2seq stays best on classical real audio (10.65).
+
+### Ninth round: PM2S retrained with stable optimisation
+
+`pace/v2_pm2s2.sh` (pace/README.md, 4r).
+- **Why.** `pm2s_ho` trained unstably with PM2S's own optimiser settings: its training loss rose
+  from step 8,000 to 38,000. Even so, v2 for MIDI input with it was level with seq2seq and Beyer &
+  Dai on clean MIDI. The demo renders a MIDI upload for Beat This!, about 3 points worse there.
+- **Two trainings, same data and recipe otherwise:** AdamW betas 0.9 / 0.999, eps 1e-8, gradient
+  clipping 1.0, 1,000 warmup steps, cosine decay to 5% over 60k steps. Learning rate 3e-4
+  (`pm2s_ho2`) and 1e-4 (`pm2s_ho3`). The gradient norm is logged.
+- **The pick.** The better by its own validation score (mean post-processed beat / downbeat F over
+  the validation splits) becomes `pm2s_hos` (`scripts/pick_run.py`). Everything made with it is
+  tagged `hos`.
+- **What is measured:**
+  - its beats against the released PM2S, `pm2s_ho` and Beat This!;
+  - the release with it (how much of the leak's gain a properly trained PM2S keeps);
+  - `meter_v4_gq_pmhs`, the meter model trained for it;
+  - v2 with it and `nl_gq` on whole pieces, on ASAP and on Gangqinpu.
+- **The comparisons that decide the demo's MIDI path:**
+  - against today's default (Beat This!, which on clean MIDI means the rendered MIDI);
+  - on Gangqinpu, against the default with Beat This! on the rendered MIDI (`_rsb`, new in
+    `scripts/system_scores.py --real-beats synth`), which is what a MIDI upload gets today.
+- **The timing check** (`src/timing.py`, `_tc`), in the same batch: `nl_gq` + `meter_v4_gq` with
+  and without it, on ASAP and Gangqinpu.
+  - It writes a triplet-written note that was played on a straight eighth or sixteenth straight.
+  - It came from the user's song, where one window of the new labeller wrote 40% of bars 64-71 as
+    triplets against straight playing (the old labeller wrote 17% there).
+  - On that song it moved 89 notes, all on clear evidence: played at 0.44-0.55 of the beat and
+    written at 1/3 or 2/3, or played on a sixteenth at least 0.1 of a beat from the triplet spot.
+- **The beat-level timing check** (`src/timing.py` check_beats, `_tb`, in `pace/v2_decode.sh`):
+  - The per-note check left the song's bars 64-71 at 20% triplets: a syncopation played straight
+    (1.5, 1.71, 2.24, 2.73) passed no single note's test.
+  - Judging each beat as a whole fixed it: the straight 16ths against the eighth triplets (sixths
+    where the labeller wrote sixths), measured from where the beat was played. Bars 64-71 now have
+    no triplets, and the whole song went from 4.5% to 2.2%.
+  - Expected: positive on Gangqinpu (pop: syncopation), about neutral on ASAP, where played
+    triplets are nearer their own grid.
+- **The readability rules** (`src/readable.py`, `pace/v2_decode.sh`), each on the timing check
+  (`_tc`), on ASAP and Gangqinpu:
+  - `_jf` is the short-bar fix. The meter decoder's ts-change penalty makes it stretch a short bar
+    rather than change the time signature. In the user's song, bars 47 and 51 (0.46 s and 0.66 s)
+    were each written over a whole 4/4 bar. A step below half its neighbours' seconds per quarter
+    gets the beats its time holds, and its bar becomes 2/4 (two beats at least).
+  - `_rd` closes 16th rests, trims overlaps up to a 16th (only into a length one note can write,
+    never across the triplet and straight grids), and sets stems by voice and hides the lesser
+    voice's rests.
+  - `_tb_rd_jf` is the demo's default, against `_tc` and against the plain system.
+  - Expected: `_jf` small but positive where the decoder stretched bars. `_rd` may cost on duration
+    against ASAP's scores, which do write 16th rests (closing every rest under an eighth cost about
+    2 points before), and is kept for the demo whatever it scores, if it costs under a point.
+
+### Tenth round design: the deep-learning side of the rules (2026-11-26)
+
+The rules above (`src/timing.py`, `src/readable.py`) patch model errors after the fact. This round
+asks whether the models can be made not to make them, and keeps every rule as its own system so the
+models' scores stay separate. `pace/v2_decode.sh`, 8 jobs.
+
+**1. Beat-level decoding of the labeller** (`src/beat_decode.py`, `_bd`). The labeller picks each
+note's split of the quarter on its own (argmax of its `sub` head). The decoding scores each split as
+log p_model + a timing term (the played position against the split, weight tuned) and can keep one
+family of splits (straight or triplet; 1/2 in both) per beat, per staff or for both hands, measured
+from where the beat's on-the-quarter notes were played. `scripts/tune_beat_decode.py` picks the
+setting on validation windows with the tracker's timing errors on the grid (as in training).
+
+- ASAP validation, 600 windows (local, CPU; the released `nl_gq`):
+
+  | setting | position accuracy | length accuracy |
+  |---|---|---|
+  | the labeller's own (argmax) | 91.58% | 84.30% |
+  | timing term, weight 2, per note | **91.69%** | 84.30% |
+  | weight 4, one family per beat and staff, anchored | 91.60% | 84.00% |
+  | weight 4, one family per beat (both hands) | 91.33% | 83.82% |
+  | weight 64, per note | 90.39% | 84.30% |
+
+  Classical scores do mix straight and triplet splits within a beat, so the one-family constraint
+  costs a little there, and the timing term helps only at a small weight (the grid is noisy).
+- On the user's song it changed almost nothing (bars 64-71: 39.8% triplets -> 38.9% at the
+  strongest setting). The reason: the labeller writes 526 of the song's notes as triplets that were
+  played on a straight sixteenth (median 0.008 of a quarter from it, 0.109 from the written spot),
+  with a median confidence of **67,000 to 1**. Overturning that needs a timing weight of about 900;
+  above about 4, validation accuracy falls. A confident model error is not a decoding problem.
+- The tenth round tunes it on ASAP + Gangqinpu validation and measures it on test windows
+  (`eval_labeller.py --beat-decode`, modes `*_bd`) and whole pieces.
+
+**2. The labels the labeller learns from** (`scripts/audit_labels.py`, `nl_gq_mc`). The old
+labeller (no Gangqinpu) wrote 17% of bars 64-71 as triplets, `nl_gq` 40%: the Gangqinpu training
+pairs are the suspect. Their scores are user-made arrangements; where one writes a beat as triplets
+the pianist played straight, the pair teaches exactly the song's error.
+
+- `src/notelabels.py contradicted` judges a beat at a time on the window's true grid (the score's
+  beats timed through the alignment): written with a triplet split, every note within 0.06 of a
+  quarter of a straight sixteenth and nearer the sixteenths than the written grid by 0.03 on
+  average (and the reverse). One note's timing is no evidence: in ASAP's validation performances
+  22% of the notes written on the half beat are played more than 0.08 from it, and a per-note test
+  flagged 22-25% of ASAP's written triplets (and 10-14% of its sixteenths, the other way).
+- ASAP, 1,500 windows each, beat-level: **5.6% (train) / 7.9% (val)** of written triplets played
+  straight; 0.7% / 1.2% of written sixteenths played as triplets. That is the baseline; the audit
+  measures Gangqinpu against it.
+- `nl_gq_mc` retrains `nl_gq` (same recipe) with those notes' position and length left out of the
+  loss (`--mask-contradicted`; keep, bar and staff still learned): if the pop labels are the cause,
+  it should write fewer triplets where the timing is straight, without losing accuracy elsewhere.
+
+**3. The meter decoder's short bars** (`src/meter.py local_tempo_logprior`, `meter_v4_gq_lt`). The
+decoder pays 11.5 for a time-signature change and only about 1.8 (its written-tempo prior) for a
+step of three quarters in one beat's time, so it stretches a short bar. A second decoding pass
+weighs each step against the median written tempo of the steps around it.
+
+- On the song it removed both jumps but did not write 2/4 bars: it moved the meter by two beats
+  instead, and four bar lines (89.8-95.5 s) left the tracked downbeats (the short-bar rule keeps
+  all 18 there). Writing a single inserted short bar needs the decoder to price "one bar of another
+  meter, then back" below two time-signature changes, which is a larger change.
+- It is tuned on validation (ASAP, real, PERiScoPe and Gangqinpu: `eval_meter.py --local-tempo`)
+  and measured as its own system; `_jf` stays until something beats it.
+
+**4. Which rules stay: decided by the benchmark** (`pace/v2_decode2.sh`, `scripts/rule_verdict.py`).
+The project keeps as much of the decision with the models as it can, so a correction rule has to
+earn its place. The deep-learning configuration is the labeller + its tuned beat decoding on
+`meter_v4_gq`; each correction rule is measured added to it, for both labellers, on whole pieces
+from real recordings (ASAP `real`, Gangqinpu `gangqinpu_real`), MUSTER mean error paired by
+performance with a 95% bootstrap over pieces.
+
+| what | decision |
+|---|---|
+| beat decoding (`_bd`, model side) | on unless significantly worse on a condition |
+| timing check (`_tc`), whole-beat check (`_tb`), short-bar fix (`_jf`) | on only if significantly better on a condition and worse on none |
+| engraving (tidy, `_rd`, glissandos, grace notes and rolls) | not decided: how a rhythm is written, not what it is |
+
+The verdict is for the labeller the release serves (`nl_gq_mc` if its training publish promoted it,
+else `nl_gq`), written to `outputs/rule_verdict.md`, and published in the release manifest, which
+the demo follows. A rule whose systems are missing keeps its setting. The report's numbers are
+the models alone (`_bd`) and, separately, the demo's configuration with the rules the verdict kept.
 
 ### Repo sweep, 2026-11-22: what was wrong, and what it touched
 
