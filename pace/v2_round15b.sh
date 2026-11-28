@@ -27,7 +27,8 @@ for f in "outputs/runs/$PM_RUN/best.pt" outputs/runs/meter_v4_gq_pmhs/eval_meter
   [ -e "$f" ] || { echo "no $f: an earlier round makes it"; exit 1; }
 done
 if [ "${FETCHED:-0}" != 1 ]; then   # the release's files, here on the login node
-  source pace/common.sh
+  # pace/common.sh is for jobs (it cds to $SLURM_SUBMIT_DIR, and conda's hooks trip set -u): a subshell
+  (set +eu; export SLURM_SUBMIT_DIR="$PWD"; source pace/common.sh; set -e
   python - "$HF" "$TEAM" <<'EOF'
 import shutil, sys
 from pathlib import Path
@@ -43,6 +44,7 @@ if not nl.exists():
     print(f"{nl}: the release's (tuned for nl_gq by model's round 10)")
 print(f"{team}: the release's labeller and its beat decoding")
 EOF
+  )
 fi
 for f in "$TEAM/best.pt" "$TEAM/beat_decode.json" outputs/runs/nl_gq/beat_decode.json; do
   [ -s "$f" ] || { echo "no $f: the fetch failed (FETCHED=1 skips it once the files are there)"; exit 1; }
