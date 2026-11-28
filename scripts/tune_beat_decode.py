@@ -11,6 +11,11 @@ and of those whose written length is right. The setting with the best position a
 over the splits (each split counts once), is written to <run>/beat_decode.json (V2Pipeline reads
 it); the whole table goes with it. Setting "weight 0, consistent off" is the labeller's own
 choice, so the table shows what the decoding gains or costs against it on held-out data.
+
+--prior-file (scripts/fit_rhythm_prior.py's prior.json) adds the rhythm prior's weight to the
+settings tried (--priors, with one family per beat only), the beats' families then decoded as a
+sequence; the table goes into beat_decode.json with the best setting. Each row also gives the share
+of beats decoded triplet against the labels' share.
 """
 from __future__ import annotations
 
@@ -34,10 +39,13 @@ from src.release import DELETE_ABOVE  # noqa: E402
 WEIGHTS = (0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
 
 
-def settings(weights) -> list[BeatDecode]:
+def settings(weights, priors=(0.0,), table=None) -> list[BeatDecode]:
     out = [BeatDecode(weight=w, consistent=False, anchor=0.0) for w in weights]
     for w, staff, anchor in itertools.product(weights, (False, True), (0.0, 0.1)):
         out.append(BeatDecode(weight=w, consistent=True, by_staff=staff, anchor=anchor))
+        if table is not None:
+            out += [BeatDecode(weight=w, consistent=True, by_staff=staff, anchor=anchor, prior=pr, table=table)
+                    for pr in priors if pr > 0]
     return out
 
 
@@ -70,7 +78,7 @@ def predictions(model, ds, idx, coll, device, amp, batch_size: int, delete_above
 def score(preds: list[dict], p: BeatDecode | None, fams: Families) -> dict:
     """Position and length accuracy over the labelled own notes; the share of beats mixing a
     straight-only and a triplet-only split."""
-    ok_pos = ok_dur = n_pos = n_dur = mixed = beats = 0
+    ok_pos = ok_dur = n_pos = n_dur = mixed = beats = trip = trip_true = beats_true = 0
     for w in preds:
         pk = w["pick"]
         if p is not None and p.active:
@@ -90,8 +98,15 @@ def score(preds: list[dict], p: BeatDecode | None, fams: Families) -> dict:
             keys.setdefault((int(w["bar_est"][i]) + int(pk["delta"][i]), int(pk["pos"][i])), set()).add(int(fam[i]))
         beats += len(keys)
         mixed += sum(1 for v in keys.values() if 0 in v and 1 in v)
+        trip += sum(1 for v in keys.values() if 1 in v)
+        tk = {}
+        for i in np.flatnonzero(m):
+            tk.setdefault((int(w["bar_est"][i]) + int(lab[i, 1]), int(lab[i, 2])), set()).add(int(fams.fam[lab[i, 3]]))
+        beats_true += len(tk)
+        trip_true += sum(1 for v in tk.values() if 1 in v)
     return {"pos_acc": ok_pos / max(n_pos, 1), "dur_acc": ok_dur / max(n_dur, 1),
-            "mixed_beats": mixed / max(beats, 1), "notes": n_pos}
+            "mixed_beats": mixed / max(beats, 1), "triplet_beats": trip / max(beats, 1),
+            "triplet_beats_true": trip_true / max(beats_true, 1), "notes": n_pos}
 
 
 def main(argv=None):
@@ -104,6 +119,8 @@ def main(argv=None):
                     help="share of windows whose true grid gets the tracker's timing errors (0: the true grid)")
     ap.add_argument("--beat-noise", default="configs/beat_noise.json")
     ap.add_argument("--weights", default=",".join(str(w) for w in WEIGHTS))
+    ap.add_argument("--prior-file", default=None, help="the rhythm prior (scripts/fit_rhythm_prior.py); none: not tried")
+    ap.add_argument("--priors", default="0.5,1,2,4", help="its weights tried (with --prior-file)")
     ap.add_argument("--delete-above", type=float, default=DELETE_ABOVE)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", default="auto")
@@ -154,7 +171,11 @@ def main(argv=None):
         raise SystemExit("no validation split with note labels")
     weights = [float(w) for w in args.weights.split(",")]
     table = []
-    for p in [None] + settings(weights):
+    table_p = None
+    if args.prior_file:
+        pj = json.loads(Path(args.prior_file).read_text())
+        table_p = {"log_init": pj["log_init"], "log_trans": pj["log_trans"]}
+    for p in [None] + settings(weights, [float(x) for x in args.priors.split(",")], table_p):
         row = {"setting": p.to_dict() if p else "argmax"}
         for split, pr in preds.items():
             row[split] = score(pr, p, fams)
@@ -163,9 +184,10 @@ def main(argv=None):
         table.append(row)
         name = "argmax (the labeller's own)" if p is None else (
             f"w={p.weight:<4g} {'beat' if p.consistent else 'note'}{'/staff' if p.by_staff else ''}"
-            f"{' anchor' if p.anchor else ''}")
+            f"{' anchor' if p.anchor else ''}{f' prior {p.prior:g}' if p.prior else ''}")
         print(f"  {name:36s} pos {row['pos_acc']:.4f}  dur {row['dur_acc']:.4f}  " + "  ".join(
-            f"{s}: pos {row[s]['pos_acc']:.4f} mixed {row[s]['mixed_beats']:.3f}" for s in preds), flush=True)
+            f"{s}: pos {row[s]['pos_acc']:.4f} mixed {row[s]['mixed_beats']:.3f} triplet {row[s]['triplet_beats']:.3f}"
+            f" (true {row[s]['triplet_beats_true']:.3f})" for s in preds), flush=True)
     base = table[0]
     best = max(table[1:], key=lambda r: (round(r["pos_acc"], 5), round(r["dur_acc"], 5)))
     print(f"best: {best['setting']} pos {best['pos_acc']:.4f} (argmax {base['pos_acc']:.4f}), "

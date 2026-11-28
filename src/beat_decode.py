@@ -29,6 +29,16 @@ together:
 Each note then takes its best split within its beat's family; a note's length that is a triplet
 length in a beat decoded straight takes the model's likeliest straight length instead.
 
+With ``prior`` > 0 (and ``consistent``) the beats' families are not chosen one by one but as a
+sequence (Viterbi over each window's beats in time order, a chain per staff with ``by_staff``):
+
+  total(k_1..k_T) = sum_t [ beat_t's score in family k_t + prior * log P(k_t | k_{t-1}) ]
+
+with P the rhythm prior (``table``: log_init [3], log_trans [3][3]), learned from the written
+scores alone (scripts/fit_rhythm_prior.py): how often a beat is straight, triplet or other, and
+which follows which. A lone triplet beat among straight ones then costs what the scores say it
+should; runs the labeller and the timing agree on still come through.
+
 ``weight`` 0 with ``consistent`` off is exactly the labeller's own choice. The parameters are not
 hand-set: scripts/tune_beat_decode.py picks them on the validation windows (ASAP and Gangqinpu,
 the tracker's timing errors on the grid, as the labeller was validated in training) and writes
@@ -56,10 +66,16 @@ class BeatDecode:
     consistent: bool = True    # one family of splits per beat
     by_staff: bool = False     # a beat per staff (else both hands share it)
     anchor: float = 0.1        # the most a beat's on-the-quarter notes may shift its timing
+    prior: float = 0.0         # the rhythm prior's weight (0: each beat's family on its own)
+    table: dict | None = None  # the rhythm prior: {"log_init": [3], "log_trans": [[3] x 3]}
 
     @property
     def active(self) -> bool:
         return self.weight > 0 or self.consistent
+
+    @property
+    def sequential(self) -> bool:
+        return self.consistent and self.prior > 0 and self.table is not None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -73,7 +89,7 @@ class BeatDecode:
             return None
         d = json.loads(p.read_text())
         d = d.get("best", d)
-        return cls(**{k: d[k] for k in ("weight", "consistent", "by_staff", "anchor") if k in d})
+        return cls(**{k: d[k] for k in ("weight", "consistent", "by_staff", "anchor", "prior", "table") if k in d})
 
 
 def family_of(f: Fraction) -> int:
@@ -102,12 +118,29 @@ class Families:
         self.triplet_dur = np.array([Fraction(d).denominator % 3 == 0 for d in space.durs])
 
 
+def viterbi(emit: np.ndarray, log_init: np.ndarray, log_trans: np.ndarray, w: float) -> np.ndarray:
+    """The best family sequence: ``emit`` [T, K] each beat's score per family, the prior weighted by ``w``."""
+    T, K = emit.shape
+    v = emit[0] + w * log_init
+    back = np.zeros((T, K), np.int64)
+    for t in range(1, T):
+        cand = v[:, None] + w * log_trans          # [from, to]
+        back[t] = cand.argmax(0)
+        v = cand.max(0) + emit[t]
+    out = np.zeros(T, np.int64)
+    out[-1] = int(v.argmax())
+    for t in range(T - 1, 0, -1):
+        out[t - 1] = back[t, out[t]]
+    return out
+
+
 def decode_subs(sub_logp: np.ndarray, x: np.ndarray, groups: np.ndarray, fams: Families,
-                p: BeatDecode) -> tuple[np.ndarray, np.ndarray]:
+                p: BeatDecode, order: dict | None = None) -> tuple[np.ndarray, np.ndarray]:
     """The split each note takes (module docstring). ``sub_logp`` [n, n_sub] log-probabilities;
     ``x`` [n] where in its quarter each note was played (NaN: unknown, no timing term); ``groups``
-    [n] its beat (an id; -1: decoded alone). Returns (split class per note, family of its beat:
-    -1 where decoded alone or nothing was constrained)."""
+    [n] its beat (an id; -1: decoded alone); ``order`` {beat id: (chain, time)} for the sequential
+    decoding (``p.prior``; without it the ids' order is the time order, one chain). Returns (split
+    class per note, family of its beat: -1 where decoded alone or nothing was constrained)."""
     n = len(sub_logp)
     score = np.array(sub_logp, np.float64, copy=True)
     x = np.asarray(x, np.float64).copy()
@@ -127,12 +160,27 @@ def decode_subs(sub_logp: np.ndarray, x: np.ndarray, groups: np.ndarray, fams: F
     beat_fam = np.full(n, -1)
     if not p.consistent:
         return pick, beat_fam
-    for g in np.unique(groups[groups >= 0]):
+    ids = np.unique(groups[groups >= 0])
+    tots = {}
+    for g in ids:
+        sc = score[groups == g]
+        tots[int(g)] = np.array([np.where(fams.masks[k][None], sc, -np.inf).max(1).sum() for k in range(3)])
+    choice = {g: int(np.argmax(t)) for g, t in tots.items()}
+    if p.sequential and len(ids) > 1:
+        li = np.asarray(p.table["log_init"], np.float64)
+        lt = np.asarray(p.table["log_trans"], np.float64)
+        chains = {}
+        for g in tots:
+            c, t = (order or {}).get(g, (0, g))
+            chains.setdefault(c, []).append((t, g))
+        for beats in chains.values():
+            seq = [g for _, g in sorted(beats)]
+            emit = np.stack([np.where(np.isfinite(tots[g]), tots[g], -1e9) for g in seq])
+            for g, k in zip(seq, viterbi(emit, li, lt, p.prior)):
+                choice[g] = int(k)
+    for g, k in choice.items():
         idx = np.flatnonzero(groups == g)
-        sc = score[idx]
-        tot = [np.where(fams.masks[k][None], sc, -np.inf).max(1).sum() for k in range(3)]
-        k = int(np.argmax(tot))
-        pick[idx] = np.where(fams.masks[k][None], sc, -np.inf).argmax(1)
+        pick[idx] = np.where(fams.masks[k][None], score[idx], -np.inf).argmax(1)
         beat_fam[idx] = k
     return pick, beat_fam
 
@@ -175,6 +223,10 @@ def decode_item(sub_logits: np.ndarray, dur_logits: np.ndarray, pick: dict, bar_
     x = np.asarray(pos_est[:n], np.float64) - pick["pos"][:n]
     x = np.where((pick["delta"][:n] == 1) & (np.abs(x) < 1.5), x, np.nan)
     groups = beat_groups(bars, pick["pos"][:n], pick["staff"][:n], np.asarray(use[:n], bool), p.by_staff)
-    sub, fam = decode_subs(log_softmax(sub_logits), x, groups, fams, p)
+    order = {}
+    for i in np.flatnonzero(groups >= 0):   # a chain per staff with by_staff, in time order
+        order.setdefault(int(groups[i]), (int(pick["staff"][i]) if p.by_staff else 0,
+                                          (int(bars[i]), int(pick["pos"][i]))))
+    sub, fam = decode_subs(log_softmax(sub_logits), x, groups, fams, p, order)
     sub = np.where(groups >= 0, sub, pick["sub"][:n])
     return sub, straight_lengths(dur_logits, pick["dur"][:n], fam, fams)

@@ -1077,6 +1077,23 @@ after `r5final` and adds both, and every system's share of rare rhythms, to the 
 bash pace/v2_round15b.sh
 ```
 
+## 4ag. The rhythm prior pilot: fewer stray triplets (any time; 6 jobs)
+
+v2 writes triplets the playing does not support (Lemon: 62% of bars with a rare rhythm), because
+the labeller places each note on its own; a global penalty on rare rhythms cost 0.3-0.7 MUSTER on
+classical. `pace/v2_rhythm.sh`: the beat decoding (`src/beat_decode.py`) decodes the beats' families
+(straight / triplet / other) as a sequence with a prior learned from the written scores
+(`scripts/fit_rhythm_prior.py`: how rare a triplet beat is, that triplets come in runs); its weight
+tuned on the validation windows with the rest (`tune_beat_decode.py --prior-file`), against the same
+tuning without it, then round 15's candidate with each on whole pieces. Go: rare rhythms down on
+Gangqinpu, MUSTER not worse beyond chance anywhere.
+
+```bash
+git pull && bash pace/v2_rhythm.sh
+```
+
+`outputs/rhythm/report.md` after `rpfinal`.
+
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 
 The grid is v2's bottleneck: the labeller's window onset F1 is 0.78-0.86 on the true grid and

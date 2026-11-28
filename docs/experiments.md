@@ -1695,6 +1695,18 @@ two 3/4) all came from the jump fix (`src/readable.py fix_jumps`): without it ev
 - Both off by default; `pace/v2_simplicity.sh` (pace/README.md, 4ac) measures them, and the jump
   fix, on whole pieces, with how often the reference scores themselves use a rare rhythm.
 
+### The rhythm prior pilot (2026-11-28)
+
+`pace/v2_rhythm.sh` (pace/README.md 4ag). The beat decoding takes one family of splits per beat but
+chooses each beat's on its own; with a rhythm prior it chooses them as a sequence (Viterbi), each
+beat's score per family plus `prior` x log P(family | the beat before), the prior counted on the
+training scores' labels. A lone triplet beat among straight ones then costs what the scores say;
+runs the labeller and the timing agree on survive. On Lemon (local, PM2S candidate, nl_gq, an
+illustrative hand-set prior, weight 4 timing): triplet notes 174 -> 148 -> 91 -> 30 at prior weight
+0 / 1 / 3 / 8, bars with a rare rhythm 62% -> 58% -> 54% -> 21% (seq2seq: 19%). How much the
+classical triplets cost is what the tuning (validation windows, ASAP and Gangqinpu) and the whole
+pieces decide.
+
 ### Rounds 11-14 and round 9's PM2S: results, and the fifteenth round's plan (2026-11-28)
 
 **Results** (MUSTER; the release `v2_nl_gq_meter_v4_gq_d95_tidy` 12.79 real / 15.01 clean / 4.13
