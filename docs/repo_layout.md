@@ -121,6 +121,7 @@ pace/v2_articulation.sh          articulation pilot: nl_gq's recipe 20k steps wi
 pace/v2_simplicity.sh            simpler rhythms: the complexity penalty, plain lengths, the jump fix, on whole pieces (4 jobs)
 pace/v2_round14.sh               fourteenth round: pretrained meters (full, ensembled), more pretraining data, beat errors, a pretrained labeller (19 jobs)
 pace/v2_round15.sh               fifteenth round: the release candidate on PM2S's beats, its meter pretrained, seq2seq with PM2S, v2 on seq2seq's grid (12 jobs)
+pace/v2_round15b.sh              round 15, part b: the team's Hugging Face release and the candidate with beat decoding on our test pieces (5 jobs)
 pace/v2_round13.sh               thirteenth round: the grid's worth (_og, _ogt, _s2g, _rf) and meter pretraining on Aria-MIDI
 pace/v2_round12.sh               twelfth round: round 11, the duration chooser and new defaults, seq2seq with Gangqinpu, round 9, one stage after another
 pace/v2_headroom.sh              headroom tests: the labeller's top-k oracle and the meter's alternatives oracle (4 jobs)

@@ -72,6 +72,54 @@ def test_report_runs_empty():
         assert "Round 15" in (tmp / "out" / "report.md").read_text()
 
 
+def test_round15b_names():
+    from scripts.round15_report import TEAM, cand_bd
+    from scripts.system_scores import system_name
+    old = {k: os.environ.pop(k, None) for k in ("PM2S_WEIGHTS", "PM2S_TAG")}
+    try:
+        assert system_name(None, "meter", "synth", "nl_gq_mc_hf+meter_v4_gq", delete_above=0.95, tidy=True,
+                           fix_jumps=True, beat_decode=True) == TEAM
+        os.environ.update(PM2S_WEIGHTS="w.pt", PM2S_TAG="hos")
+        assert system_name(None, "meter", "synth", "nl_gq+meter_v4_gq_pmhs", "pm2s", 0.95, True, "pm2s",
+                           fix_jumps=True, beat_decode=True) == cand_bd()
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_round15b_batch():
+    from tests.batch_env import batch_env
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        (tmp / "pace").mkdir()
+        shutil.copy(ROOT / "pace" / "v2_round15b.sh", tmp / "pace")
+        for f in ("outputs/runs/pm2s_hos/best.pt", "outputs/runs/meter_v4_gq_pmhs/eval_meter.json",
+                  "outputs/runs/meter_v4_gq/best.pt", "outputs/runs/nl_gq/best.pt", "outputs/runs/nl_gq/beat_decode.json",
+                  "outputs/runs/nl_gq_mc_hf/best.pt", "outputs/runs/nl_gq_mc_hf/beat_decode.json",
+                  "outputs/system_eval_gangqinpu/manifest.json", "outputs/system_eval/manifest.json", "bd/MIDI2ScoreTF.ckpt"):
+            (tmp / f).parent.mkdir(parents=True, exist_ok=True)
+            (tmp / f).write_text("x")
+        (tmp / "bin").mkdir()
+        (tmp / "bin" / "sbatch").write_text('#!/bin/bash\nn=$(( $(cat "$SUBMITS.n" 2>/dev/null || echo 100) + 1 ))\n'
+                                            'echo $n > "$SUBMITS.n"\nprintf "%s\\t%s\\n" "$n" "$*" >> "$SUBMITS"\necho $n\n')
+        (tmp / "bin" / "squeue").write_text('#!/bin/bash\ncase "$*" in *r5final*) echo 960 ;; esac\n')
+        for f in (tmp / "bin").iterdir():
+            f.chmod(0o755)
+        r = subprocess.run(["bash", "-c", 'export PATH="$PWD/bin:$PATH"; FETCHED=1 bash pace/v2_round15b.sh'], cwd=tmp,
+                           env=batch_env(SUBMITS=str(tmp / "jobs.txt"), USER="me", BD=str(tmp / "bd")),
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        by = {ln.split("\t")[1].split("-J ")[1].split()[0]: ln.split("\t") for ln in (tmp / "jobs.txt").read_text().splitlines()}
+        assert list(by) == ["x5tests", "t5asap", "t5gq", "b5asap", "x5final"]
+        assert "nl_gq_mc_hf+meter_v4_gq" in by["t5asap"][1] and "--beat-decode" in by["t5asap"][1]
+        assert "--clean-beats pm2s --real-beats pm2s" in by["b5asap"][1] and "PM2S_TAG=hos" in by["b5asap"][1]
+        assert "--conditions gangqinpu,gangqinpu_real" in by["t5gq"][1] and "meter_v4_gq_pmhs" in by["t5gq"][1]
+        ends = ":".join(by[k][0] for k in ("t5asap", "t5gq", "b5asap"))
+        assert f"afterany:{ends}:960" in by["x5final"][1] and "round15_report.py" in by["x5final"][1]
+
+
 def test_round15_batch():
     from tests.batch_env import batch_env
     with tempfile.TemporaryDirectory() as t:

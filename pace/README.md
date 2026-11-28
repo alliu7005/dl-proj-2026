@@ -1067,6 +1067,16 @@ git pull && bash pace/v2_round15.sh
 `outputs/round15/report.md` after `r5final`: each against the release and against seq2seq, and the
 best system per condition.
 
+**Part b** (`pace/v2_round15b.sh`, 5 jobs, after `v2_round15.sh`): the team's published release from
+Hugging Face (`nl_gq_mc + meter_v4_gq`, beat decoding and `_jf`) scored on our test pieces, and the
+candidate with `model`'s beat decoding (nl_gq's tuned `beat_decode.json` from the same release). Its
+files are fetched on the login node (`outputs/runs/nl_gq_mc_hf`); `x5final` scores everything again
+after `r5final` and adds both, and every system's share of rare rhythms, to the round 15 report.
+
+```bash
+bash pace/v2_round15b.sh
+```
+
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 
 The grid is v2's bottleneck: the labeller's window onset F1 is 0.78-0.86 on the true grid and

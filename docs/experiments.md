@@ -1726,6 +1726,10 @@ Gangqinpu real / 4.52 Gangqinpu; differences paired over pieces, bold beyond cha
 (`nl_gq + meter_v4_gq_pmhs`, tidy, d95, `_jf`; d80 for MIDI input), its meter from the Aria-MIDI
 pretraining (three seeds, ensembles, with and without `meter_v4_gq_pmhs`), seq2seq given PM2S's
 beats (`_spm`), and v2 on the new seq2seq's grid (`_s2g_sf_c128_gq30`), all against `sf_c128_gq30`.
+Part b (`pace/v2_round15b.sh`): the team's Hugging Face release on the same pieces, and the
+candidate with `model`'s beat decoding. On Lemon (local, 2026-11-28) the candidate's PM2S beats were
+one steady 74 BPM where Beat This! switched between 38 and 200 BPM; 95 bars of 4/4 (one 2/4) against the
+release's 69 with two 3/4; but more triplets (62% of bars with a rare rhythm), the labeller's.
 
 ### Thirteenth round: results, and the fourteenth round's plan (2026-11-27)
 
