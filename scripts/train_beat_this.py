@@ -78,6 +78,21 @@ def stage(data_dirs: list, run: Path, datasets: list | None, exclude: list) -> l
     return chosen
 
 
+def mixed(precision) -> bool:
+    """Lightning's mixed-precision settings ("16-mixed", "bf16-mixed", 16): autocast feeds the layers."""
+    return "mixed" in str(precision) or str(precision) in ("16", "bf16")
+
+
+def batch_to_float32(batch, dataloader_idx: int = 0):
+    """Beat This!'s spectrograms are stored as float16 (its .npz bundles). Under mixed precision on
+    the GPU autocast casts them; trained in float32 (the CPU), the layers need float32 input, else
+    conv2d refuses a HalfTensor. Set as the model's on_after_batch_transfer hook."""
+    import torch
+    if isinstance(batch, dict):
+        return {k: v.float() if torch.is_tensor(v) and v.dtype == torch.float16 else v for k, v in batch.items()}
+    return batch
+
+
 def save_weights(ckpt_path: Path, out: Path):
     """A Lightning checkpoint -> its weights and hyper-parameters only (beat_this.inference.load_model
     reads it; no optimiser state; the multi-task variant's time-signature head left out)."""
@@ -233,9 +248,12 @@ def main(argv=None):
     device = args.device
     if device == "auto":
         device = "gpu" if torch.cuda.is_available() else "cpu"
+    precision = args.precision if device == "gpu" else "32-true"
+    if not mixed(precision):   # the float16 spectrograms into float32 layers (the CPU: the tests)
+        model.on_after_batch_transfer = batch_to_float32
     ckpt = pl.callbacks.ModelCheckpoint(dirpath=str(run), save_top_k=0, save_last=True, every_n_epochs=1)
     trainer = pl.Trainer(max_epochs=epochs, accelerator=device, devices=1,
-                         precision=args.precision if device == "gpu" else "32-true",
+                         precision=precision,
                          accumulate_grad_batches=args.accumulate, check_val_every_n_epoch=args.val_every,
                          num_sanity_val_steps=0, callbacks=[ckpt],
                          logger=pl.loggers.CSVLogger(str(run), name="", version=""),

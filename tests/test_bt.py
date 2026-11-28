@@ -413,6 +413,21 @@ def test_train_beat_this():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_float32_batches():
+    """Trained in float32 (the CPU: these tests, btfetch's node), Beat This!'s float16 spectrograms are
+    cast for its layers (conv2d refuses a HalfTensor with float32 weights); mixed precision leaves them."""
+    import torch
+
+    from scripts.train_beat_this import batch_to_float32, mixed
+    assert mixed("16-mixed") and mixed("bf16-mixed") and mixed(16) and not mixed("32-true") and not mixed(32)
+    b = batch_to_float32({"spect": torch.zeros(2, 3).half(), "truth_beat": torch.ones(2, dtype=torch.bool),
+                          "start_frame": torch.tensor([4]), "dataset": ["x"]})
+    assert b["spect"].dtype == torch.float32 and b["truth_beat"].dtype == torch.bool
+    assert b["start_frame"].dtype == torch.int64 and b["dataset"] == ["x"]
+    conv = torch.nn.Conv2d(1, 1, 1)
+    conv(batch_to_float32({"spect": torch.zeros(1, 1, 2, 2).half()})["spect"])   # no HalfTensor error
+
+
 def test_mmnpz_numpy():
     """Beat This!'s memory-mapped .npz reader works on this numpy (2.5 lost the private header helpers
     it calls from numpy.lib.format: src/bt_compat.py puts them back)."""

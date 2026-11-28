@@ -70,15 +70,17 @@ def patch_dataset():
         _meter = True
 
         def _load_dataset_item(self, item_name):
+            dataset, stem = item_name.split("/", 1)
+            f = self.annotation_basepath / dataset / "annotations" / "meter" / f"{stem}.meter"
+            # refused before Beat This!'s own loading: with tempo augmentation it skips (returns None) an
+            # item whose tempo-stretched spectrograms are missing, and the refusal would never be reached
+            if f.exists() and "tempo" in self.augmentations:
+                raise ValueError("meter targets with tempo augmentation: the beats move, the targets would not "
+                                 "(fine-tune without it: --no-tempo / --finetune)")
             item = super()._load_dataset_item(item_name)
             if item is None:
                 return None
-            dataset, stem = item_name.split("/", 1)
-            f = self.annotation_basepath / dataset / "annotations" / "meter" / f"{stem}.meter"
             if f.exists():
-                if "tempo" in self.augmentations:
-                    raise ValueError("meter targets with tempo augmentation: the beats move, the targets would not "
-                                     "(fine-tune without it: --no-tempo / --finetune)")
                 item["meter"] = read_meter(f)
             return item
 
