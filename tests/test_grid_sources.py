@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+F = Fraction
 sys.path.insert(0, str(ROOT))
 
 
@@ -43,6 +44,25 @@ def test_spliced_logp_and_annotated_beats():
     assert np.isclose(tt, 1.0).any() and not np.isclose(tt, 1.03).any()   # replaced inside the span
     assert np.isclose(tt, 0.53).any() and np.isclose(tt, 12.03).any()     # kept outside
     assert dd[np.isclose(tt, 3.0)].all() and not dd[np.isclose(tt, 3.5)].any()
+
+
+def test_score_grid_many_notes():
+    """More notes than quarters (eighths in both hands): the map is evaluated at the grid's quarters
+    (an earlier version indexed the matches' positions with the grid's and went out of bounds)."""
+    from src.grid_sources import score_grid
+    toks, pitches, onsets = [], [], []
+    for b in range(4):
+        toks += ["bar"] + (["ts_4/4", "key_0"] if b == 0 else [])
+        for e in range(8):
+            q = F(e, 2)
+            toks += [f"pos_{q.numerator // q.denominator}"] + (["sub_1/2"] if q.denominator == 2 else [])
+            for p in (48 + e % 5, 72 + e % 7):
+                toks += [f"p_{p}", "d_1/2"]
+                pitches.append(p)
+                onsets.append(1.0 + 0.5 * (b * 4 + float(q)))
+    g = score_grid(toks, np.array(onsets), np.array(pitches))
+    assert g is not None and g["bars"] == ["4/4"] * 4 and len(g["q"]) == 17
+    assert np.allclose(np.interp(g["bar_q"], g["q"], g["t"]), 1.0 + 2.0 * np.arange(4), atol=0.02)
 
 
 def test_score_grid():

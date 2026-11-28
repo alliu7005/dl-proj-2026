@@ -90,7 +90,7 @@ def score_grid(tokens: list[str], onsets: np.ndarray, pitches: np.ndarray, min_p
     each quarter timed through the notes matched to the performance (fit_alignment's piecewise-
     linear map), or None when too few notes match. {"t", "q" (quarters from the first bar line, one
     per quarter), "bars", "bar_q", "bar_t", "matched"}."""
-    from .metrical import _map_through, fit_alignment
+    from .metrical import fit_alignment
     from .notelabels import bar_quarters, score_notes
     onsets, pitches = np.asarray(onsets, np.float64), np.asarray(pitches)
     _, win = score_notes(tokens)
@@ -106,7 +106,18 @@ def score_grid(tokens: list[str], onsets: np.ndarray, pitches: np.ndarray, min_p
     lens = np.array([float(bar_quarters(ts)) for ts in bars])
     bar_q = np.concatenate([[0.0], np.cumsum(lens)[:-1]])
     q = np.arange(0.0, float(lens.sum()) + 1e-9, 1.0)
-    t = _map_through(pairs, q, pt)
+    # the matched notes' (written quarter, performed time), one time per written position, non-decreasing,
+    # extended past both ends with the overall tempo (as metrical._map_through, evaluated at other q)
+    mq = np.array([sq[si] for si in pairs.values()], np.float64)
+    mt = np.array([pt[li] for li in pairs], np.float64)
+    uq, inv = np.unique(mq, return_inverse=True)
+    ut = np.maximum.accumulate(np.array([mt[inv == k].mean() for k in range(len(uq))]))
+    if len(uq) < 2:
+        return None
+    slope = max((ut[-1] - ut[0]) / (uq[-1] - uq[0]), 1e-3)
+    t = np.interp(q, uq, ut)
+    t = np.where(q < uq[0], ut[0] + slope * (q - uq[0]), t)
+    t = np.where(q > uq[-1], ut[-1] + slope * (q - uq[-1]), t)
     t = np.maximum.accumulate(t) + np.arange(len(t)) * 1e-6   # strictly increasing
     return {"t": t, "q": q, "bars": bars, "bar_q": bar_q, "bar_t": np.interp(bar_q, q, t),
             "matched": len(pairs)}
