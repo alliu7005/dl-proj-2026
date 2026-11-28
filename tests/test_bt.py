@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import json
 import pickle
 import shutil
@@ -153,6 +154,11 @@ def test_export():
         except ImportError:
             print("  (BeatDataModule check skipped: no pytorch-lightning)")
             return
+        if os.name == "nt":   # its dataset splits str(Path) on "/" (beat_this/dataset/dataset.py _get_spect)
+            print("  (BeatDataModule check skipped: Beat This!'s dataset reads Linux paths only)")
+            return
+        from src.bt_compat import patch_numpy_format
+        patch_numpy_format()
         dm = BeatDataModule(out, batch_size=2, num_workers=0, augmentations={}, fold=0)
         dm.setup("fit")
         listed = sum(len((out / "annotations" / ds / "8-folds.split").read_text().splitlines())
@@ -380,6 +386,9 @@ def test_train_beat_this():
         except ImportError:
             print("  (training skipped: no pytorch-lightning)")
             return
+        if os.name == "nt":   # Beat This!'s dataset splits str(Path) on "/" (beat_this/dataset/dataset.py _get_spect)
+            print("  (training skipped: Beat This!'s dataset reads Linux paths only)")
+            return
         data = build(tmp, small_release(tmp))
 
         def renderer(source, wav, key):
@@ -400,6 +409,27 @@ def test_train_beat_this():
         assert st["done"] and st["fold"] == 0 and (runs / "tiny" / "final.ckpt").exists()
         from beat_this.inference import load_model
         load_model(str(runs / "tiny" / "final.ckpt"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_mmnpz_numpy():
+    """Beat This!'s memory-mapped .npz reader works on this numpy (2.5 lost the private header helpers
+    it calls from numpy.lib.format: src/bt_compat.py puts them back)."""
+    from beat_this.dataset.mmnpz import MemmappedNpzFile
+
+    from src.bt_compat import patch_numpy_format
+    patch_numpy_format()
+    assert patch_numpy_format() == []   # once is enough
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        a = np.arange(12, dtype=np.float32).reshape(3, 4)
+        b = np.asfortranarray(np.arange(6, dtype=np.int16).reshape(2, 3))
+        np.savez(tmp / "x.npz", a=a, b=b)   # uncompressed, as Beat This!'s spectrogram bundles
+        f = MemmappedNpzFile(str(tmp / "x.npz"))
+        assert sorted(f.files) == ["a", "b"]
+        assert np.array_equal(f["a"], a) and np.array_equal(f["b"], b) and f["b"].dtype == np.int16
+        f.close()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -34,6 +34,7 @@ src/glissando.py                 glissandos: found in the notes (fast one-way ru
 src/synth.py                     MIDI -> audio (additive piano), so Beat This! can track a MIDI input
 src/tempo.py                     the score's tempo from the grid: tempo marks and rit. / accel. / a tempo printed, the score MIDI played at them
 src/render.py                    performances -> audio with a sampled piano (FluidSynth + SoundFonts), for the beat tracker
+src/bt_compat.py                 Beat This! 1.1.0 on numpy 2.5: the private .npy header helpers its spectrogram reader calls, put back
 src/bt_models.py                 our Beat This! model sets: folds by piece, the model that never heard a piece (cross-fitting)
 src/bt_multitask.py              the multi-task Beat This!: a time-signature head per frame (trained, then dropped), its targets and dataset
 src/release.py                   the released models (models/), their settings, where the demo and the CLI find them

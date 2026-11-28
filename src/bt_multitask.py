@@ -59,6 +59,8 @@ def frame_targets(t: np.ndarray, ts: np.ndarray, start_frame: int, n_frames: int
 def patch_dataset():
     """Beat This!'s BeatTrackingDataset (as its BeatDataModule builds it) loading the .meter files
     and giving every item per-frame "meter_ts". Returns the class it replaced."""
+    from .bt_compat import patch_numpy_format
+    patch_numpy_format()
     import beat_this.dataset.dataset as bd
     base = bd.BeatTrackingDataset
     if getattr(base, "_meter", False):

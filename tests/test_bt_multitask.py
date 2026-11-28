@@ -7,6 +7,7 @@ installed: PACE) its dataset.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -93,6 +94,9 @@ def test_dataset():
         import pytorch_lightning  # noqa: F401
     except ImportError:
         print("  (skipped: no pytorch-lightning)")
+        return
+    if os.name == "nt":   # Beat This!'s dataset splits str(Path) on "/" (beat_this/dataset/dataset.py _get_spect)
+        print("  (skipped: Beat This!'s dataset reads Linux paths only)")
         return
     import torch
 

@@ -165,6 +165,9 @@ def main(argv=None):
         raise SystemExit("--fold with --no-val would train on the held-out fold")
     import pytorch_lightning as pl
     import torch
+
+    from src.bt_compat import patch_numpy_format
+    patch_numpy_format()   # Beat This!'s spectrogram reader on numpy 2.5 (src/bt_compat.py)
     from beat_this.dataset.dataset import BeatDataModule
     from beat_this.inference import load_checkpoint
     from beat_this.model.pl_module import PLBeatThis
