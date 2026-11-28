@@ -264,24 +264,64 @@ def all_systems(out: Path) -> list[str]:
     return sorted(found, key=lambda s: s != "beyer_dai")
 
 
+PIECE_KEYS = ("system", "condition", "performance")
+
+
+def load_rated(path: Path) -> dict:
+    """{(system, condition, performance): rate() result (+ "pred_mtime")} of a results.json, {} without one."""
+    if not path.exists():
+        return {}
+    try:
+        pieces = json.loads(path.read_text()).get("pieces", [])
+    except ValueError:
+        return {}
+    return {tuple(e[k] for k in PIECE_KEYS): {k: v for k, v in e.items() if k not in PIECE_KEYS} for e in pieces}
+
+
 def score(args) -> None:
+    """Every system's predictions rated against the references, results.json and results.md written.
+    A prediction rated already (results.json holds it, the file unchanged since: its mtime) keeps its
+    rating unless --rescore, so a round's last job rates only what is new. The write merges with the
+    results.json on disk under a lock: two jobs scoring at once never drop each other's systems."""
+    import fcntl
+
     from joblib import Parallel, delayed
     entries = load_manifest(args.manifest, args.conditions)
     out = Path(args.out)
     names = all_systems(out) if args.systems == "all" else [s for s in args.systems.split(",") if s]
     systems = names + [REFERENCE]
+    res_f = out / "results.json"
+    prev = {} if args.rescore else load_rated(res_f)
     jobs = [(s, e) for s in systems for e in entries]
-    paths = [(args.repo, str(pred_path(out, s, e)) if pred_path(out, s, e).exists() else None, e["reference"])
-             for s, e in jobs]
-    res = Parallel(n_jobs=args.jobs, verbose=5)(delayed(rate)(j) for j in paths)
-    rated = {(s, e["condition"], e["performance"]): r for (s, e), r in zip(jobs, res)}
-    results = aggregate(rated, entries, systems)
-    per_piece = [{"system": s, "condition": c, "performance": p, **r} for (s, c, p), r in rated.items()]
-    (out / "results.json").write_text(json.dumps({"results": results, "pieces": per_piece}, indent=1))
-    text = table(results)
-    (out / "results.md").write_text(text + "\n", encoding="utf-8")
+    rated, todo = {}, []
+    for s, e in jobs:
+        pp = pred_path(out, s, e)
+        mtime = round(pp.stat().st_mtime, 3) if pp.exists() else None
+        key = (s, e["condition"], e["performance"])
+        old = prev.get(key)
+        if mtime is not None and old is not None and old.get("pred_mtime") == mtime and old.get("muster") is not None:
+            rated[key] = old
+        else:
+            todo.append((key, (args.repo, str(pp) if mtime is not None else None, e["reference"]), mtime))
+    print(f"{len(jobs)} predictions: {len(jobs) - len(todo)} rated already, {len(todo)} to rate", flush=True)
+    res = Parallel(n_jobs=args.jobs, verbose=5)(delayed(rate)(j) for _, j, _ in todo)
+    for (key, _, mtime), r in zip(todo, res):
+        rated[key] = {**r, "pred_mtime": mtime}
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / ".results.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        merged = load_rated(res_f)          # what other jobs wrote meanwhile
+        merged.update(rated)
+        everyone = sorted({k[0] for k in merged if k[0] != REFERENCE}, key=lambda s: (s != "beyer_dai", s)) + [REFERENCE]
+        results = aggregate(merged, entries, everyone)
+        per_piece = [{"system": s, "condition": c, "performance": p, **r} for (s, c, p), r in merged.items()]
+        tmp = res_f.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"results": results, "pieces": per_piece}, indent=1))
+        tmp.replace(res_f)
+        text = table(results)
+        (out / "results.md").write_text(text + "\n", encoding="utf-8")
     print(text)
-    print(f"wrote {out / 'results.md'} and {out / 'results.json'}")
+    print(f"wrote {out / 'results.md'} and {res_f}")
 
 
 def load_manifest(path: str, conditions: str) -> list[dict]:
@@ -303,6 +343,8 @@ def main(argv=None):
                                       help="comma-separated folders under --out (beyer_dai, <run>_<mode>, ...), "
                                            "or all: every folder with a summary.json")
     sub.choices["score"].add_argument("--jobs", type=int, default=8)
+    sub.choices["score"].add_argument("--rescore", action="store_true",
+                                      help="rate every prediction again, even those results.json holds unchanged")
     args = ap.parse_args(argv)
     {"predict": predict, "score": score, "selftest": selftest}[args.cmd](args)
 

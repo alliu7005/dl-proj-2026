@@ -53,7 +53,7 @@ mtrain=$ID
 submit m4ens "${G[@]}" -c 8 --mem=48G -t 6:00:00 "--dependency=afterok:$mtrain" --wrap="source pace/common.sh; $JOBS ensemble meter_v4_gq_ptr_ens3 none $SEEDS && $JOBS ensemble meter_v4_gq_ptr_ens3t tta $SEEDS"
 mens=$ID
 SPECS=""
-for m in $SEEDS meter_v4_gq_ptr_ens3 meter_v4_gq_ptr_ens3t meter_v4_gq_ens3t; do SPECS="$SPECS nl_gq+$m:tidy,d95,missing"; done
+for m in $SEEDS meter_v4_gq_ptr_ens3 meter_v4_gq_ptr_ens3t; do   # round 11's meter_v4_gq_ens3t: its own whole-piece jobs (e1asap, e1gq) SPECS="$SPECS nl_gq+$m:tidy,d95,missing"; done
 submit m4asap "${G[@]}" -c 8 --mem=48G -t 10:00:00 "--dependency=afterany:$mens" --wrap="source pace/common.sh; $JOBS systems $SPECS"
 ends="$ends:$ID"
 submit m4gq "${G[@]}" -c 8 --mem=48G -t 6:00:00 "--dependency=afterany:$mens" --wrap="source pace/common.sh; $GQSYS $JOBS systems $SPECS"

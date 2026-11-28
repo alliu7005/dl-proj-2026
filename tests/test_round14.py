@@ -137,6 +137,63 @@ def test_report_runs_empty():
         assert "Round 14" in (tmp / "out" / "report.md").read_text()
 
 
+def test_scoring_reuses_and_merges():
+    """beyer_dai.py score rates only predictions it has not rated (or that changed), and merges with a
+    results.json another job wrote meanwhile instead of dropping its systems."""
+    import argparse
+    import json
+    import os
+
+    import scripts.beyer_dai as B
+    calls = []
+
+    def fake_rate(job):
+        calls.append(job[1])
+        return {"muster": {"OnsetER": 1.0, "MeanER": 2.0} if job[1] else None, "sim": {"NoteDuration": 0.1} if job[1] else None,
+                "error": None if job[1] else "no prediction"}
+    real = B.rate
+    B.rate = fake_rate
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            tmp = Path(t)
+            out = tmp / "eval"
+            entries = []
+            for k in range(2):
+                ref = tmp / f"ref{k}.musicxml"
+                ref.write_text("x")
+                entries.append({"condition": "clean", "performance": f"p{k}", "slug": f"p{k}", "reference": str(ref)})
+            (tmp / "manifest.json").write_text(json.dumps(entries))
+            for sysname in ("sysA", "sysB"):
+                (out / sysname / "clean").mkdir(parents=True)
+                (out / sysname / "summary.json").write_text("{}")
+                for e in entries:
+                    (out / sysname / "clean" / f"{e['slug']}.musicxml").write_text("x")
+            args = argparse.Namespace(manifest=str(tmp / "manifest.json"), conditions="clean", out=str(out), systems="all",
+                                      repo="unused", jobs=1, rescore=False)
+            B.score(args)
+            assert len(calls) == 6                                           # 2 systems + the reference, 2 pieces
+            calls.clear()
+            B.score(args)
+            assert calls == []                                               # nothing new
+            f = out / "sysA" / "clean" / "p0.musicxml"
+            os.utime(f, (f.stat().st_atime, f.stat().st_mtime + 5))
+            B.score(args)
+            assert calls == [str(f)]                                         # only the changed one
+            # another job's system lands in results.json meanwhile: kept when this one writes
+            d = json.loads((out / "results.json").read_text())
+            d["pieces"].append({"system": "sysC", "condition": "clean", "performance": "p0", "muster": {"OnsetER": 1.0, "MeanER": 3.0},
+                                "sim": {"NoteDuration": 0.2}, "error": None, "pred_mtime": 1.0})
+            (out / "results.json").write_text(json.dumps(d))
+            calls.clear()
+            B.score(args)
+            res = json.loads((out / "results.json").read_text())
+            assert "sysC" in res["results"]["clean"] and {e["system"] for e in res["pieces"]} >= {"sysA", "sysB", "sysC"}
+            B.score(argparse.Namespace(**{**vars(args), "rescore": True}))
+            assert len(calls) == 6
+    finally:
+        B.rate = real
+
+
 def test_round14_batch():
     from tests.batch_env import batch_env
     with tempfile.TemporaryDirectory() as t:
@@ -167,7 +224,8 @@ def test_round14_batch():
         assert "afterany:950" in by["b4errors"][1] and "beat_errors.py" in by["b4errors"][1]
         assert "meters meter_v4_gq_ptr meter_v4_gq_ptr_s1 meter_v4_gq_ptr_s2" in by["m4train"][1]
         assert "ensemble meter_v4_gq_ptr_ens3t tta" in by["m4ens"][1]
-        assert "nl_gq+meter_v4_gq_ens3t:tidy,d95,missing" in by["m4gq"][1]
+        assert "nl_gq+meter_v4_gq_ptr_ens3t:tidy,d95,missing" in by["m4gq"][1]
+        assert "nl_gq+meter_v4_gq_ens3t:" not in by["m4gq"][1]               # round 11 runs that one
         shards = ":".join(by[f"d4prep{i}"][0] for i in range(4))
         assert f"afterok:{shards}" in by["d4train"][1] and "pretrain_dd3.pkl" in by["d4train"][1]
         assert "--shard 2/4" in by["d4prep2"][1] and "--subset deduped --max-files 150000" in by["d4fetch"][1]
