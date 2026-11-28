@@ -4,7 +4,10 @@
 # cross-fitted; then the meter model retrained on each one's beats (on the login node from the repo
 # root, after git pull, with the queue empty). Run AFTER pace/v2_data.sh's build stage (this exports
 # the v6 data, its downloaded recordings included); see pace/README.md, "Run order".
-#   bash pace/v2_btft.sh                    # stage 1, train: the data and the base model (4 jobs)
+#   STAGE=base bash pace/v2_btft.sh         # optional, any time (alongside pace/v2_data.sh's fetch and
+#                                           # build): the base model alone, which needs no v6 data (3 jobs)
+#   bash pace/v2_btft.sh                    # stage 1, train: the data and the base model (4 jobs; 1 if
+#                                           # STAGE=base ran: the base model finished or queued is kept)
 #   STAGE=finetune bash pace/v2_btft.sh     # stage 2, after stage 1: the 10 fine-tunes (8 jobs)
 #   STAGE=use bash pace/v2_btft.sh          # stage 3, after stage 2: beats, meter models, whole pieces (8 jobs)
 #
@@ -69,7 +72,7 @@ REL=${REL:-nl_gq_mc+meter_v4_gq}   # the release: the tracker-alone comparison
 SHARDS=${SHARDS:-3}
 WORKERS=${WORKERS:-20}
 BD=${BD:-$HOME/scratch/beyer_dai}
-case "$STAGE" in train|finetune|use) ;; *) echo "STAGE must be train, finetune or use, not $STAGE"; exit 1 ;; esac
+case "$STAGE" in base|train|finetune|use) ;; *) echo "STAGE must be base, train, finetune or use, not $STAGE"; exit 1 ;; esac
 case ",$EXCLUDE," in *,asap,*) ;; *) echo "EXCLUDE must keep asap out of the base model"; exit 1 ;; esac
 if [ -z "${SOUNDFONTS:-}" ]; then
   shopt -s nullglob
@@ -79,6 +82,8 @@ if [ -z "${SOUNDFONTS:-}" ]; then
   SOUNDFONTS=$(IFS=:; echo "${fonts[*]}")
 fi
 # the run order: the v6 data must be built (pace/v2_data.sh STAGE=build), or the export would take the old data
+# (the base model alone needs none of it: STAGE=base)
+if [ "$STAGE" != base ]; then
 [ -d data/processed_pre_v6 ] || { echo "the v6 data is not built yet: pace/v2_data.sh (STAGE=fetch, then STAGE=build) first"; exit 1; }
 [ -n "$(ls data/raw/pianocore/atepp_tk/rows-*.parquet 2>/dev/null)" ] || echo "note: no re-transcribed recordings (data/raw/pianocore/atepp_tk): the export has no downloaded classical recordings"
 for f in data/processed/meter/train.pkl data/processed/meter/train_gangqinpu.pkl data/processed/meter/train_periscope.pkl \
@@ -86,6 +91,7 @@ for f in data/processed/meter/train.pkl data/processed/meter/train_gangqinpu.pkl
          outputs/system_eval_gangqinpu/manifest.json; do
   [ -e "$f" ] || { echo "no $f: run the earlier rounds first"; exit 1; }
 done
+fi
 ENV="source pace/common.sh; export SOUNDFONTS=\"$SOUNDFONTS\""
 JOBS="bash pace/v2_jobs.sh"
 TRAIN="python scripts/train_beat_this.py"
@@ -101,19 +107,43 @@ submit() {
   n=$((n + 1))
 }
 
-if [ "$STAGE" = train ]; then
+queued() {  # the IDs of this user's queued / running jobs with these names, joined by ':' (empty: none)
+  local ids=""
+  for name in "$@"; do
+    for id in $(squeue -u "$USER" -h -n "$name" -o %i 2>/dev/null); do ids="${ids:+$ids:}$id"; done
+  done
+  echo "$ids"
+}
+submit_base() {  # the tests, Beat This!'s published data without $EXCLUDE, the base model (3 jobs)
   get="python scripts/fetch_beat_this_data.py --exclude $EXCLUDE"
   [ "${FETCHED:-0}" = 1 ] && get="ls data/beat_this_orig/audio/spectrograms/*.npz"
   submit btfetch -c 4 --mem=16G -t 8:00:00 --wrap="$ENV; python -c 'import pytorch_lightning' || { echo 'pip install pytorch-lightning'; exit 1; }; python -m tests.test_bt && python -m tests.test_bt_multitask && python -m tests.test_render && $get"
   fetch=$ID
   echo "the tests; Beat This!'s data without $EXCLUDE: job $fetch"
-  submit btexport -c $((WORKERS + 4)) --mem=64G -t 8:00:00 --wrap="$ENV; command -v fluidsynth >/dev/null || { echo 'no fluidsynth: conda install -c conda-forge fluidsynth'; exit 1; }; python scripts/export_beat_this.py --k $K --augment --workers $WORKERS"
-  echo "the v6 data in its format ($K folds; data/beat_this_ft/export_report.json: the mix): job $ID"
   submit btbase "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterok:$fetch" \
     --wrap="$ENV; $TRAIN --name $BASE --data data/beat_this_orig --exclude $EXCLUDE --no-val --num-workers 14 --max-hours 7.6"
   submit btbase2 "${G[@]}" -c 16 --mem=96G -t 8:00:00 "--dependency=afterany:$ID" \
     --wrap="$ENV; $TRAIN --name $BASE --data data/beat_this_orig --exclude $EXCLUDE --no-val --num-workers 14 --max-hours 7.6"
-  echo "Beat This! from scratch without $EXCLUDE ($BASE; resumed if needed): job $ID ($n jobs)"
+  echo "Beat This! from scratch without $EXCLUDE ($BASE; resumed if needed): job $ID"
+}
+
+if [ "$STAGE" = base ]; then
+  if [ -f "outputs/beat_this/$BASE/final.ckpt" ] || [ -n "$(queued btfetch btbase btbase2)" ]; then
+    echo "the base model ($BASE) is finished or queued already: nothing submitted"; exit 0
+  fi
+  submit_base
+  echo "($n jobs) after pace/v2_data.sh's build stage: bash pace/v2_btft.sh (the export; the base model is kept)"
+  exit 0
+fi
+
+if [ "$STAGE" = train ]; then
+  if [ -f "outputs/beat_this/$BASE/final.ckpt" ] || [ -n "$(queued btfetch btbase btbase2)" ]; then
+    echo "the base model ($BASE): finished or queued already (STAGE=base), kept"
+  else
+    submit_base
+  fi
+  submit btexport -c $((WORKERS + 4)) --mem=64G -t 8:00:00 --wrap="$ENV; command -v fluidsynth >/dev/null || { echo 'no fluidsynth: conda install -c conda-forge fluidsynth'; exit 1; }; python scripts/export_beat_this.py --k $K --augment --workers $WORKERS"
+  echo "the v6 data in its format ($K folds; data/beat_this_ft/export_report.json: the mix): job $ID ($n jobs)"
   echo "when outputs/beat_this/$BASE/final.ckpt and data/beat_this_ft/pieces.json exist: STAGE=finetune bash pace/v2_btft.sh"
   exit 0
 fi

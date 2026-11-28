@@ -12,8 +12,10 @@ ssh <gtid>@login-ice.pace.gatech.edu        # on the GT VPN
 cd ~/scratch/dl-proj-2026
 ```
 
-**Between steps:** `squeue -u $USER` must be empty (every job of the step finished), then run that
-step's "done when" check. A job's log is `slurm-<job name>-<job id>.out` in the repo folder.
+**Between steps:** the jobs of the steps a step needs must have finished (gone from `squeue -u $USER`),
+then run their "done when" checks. Some run side by side (PACE allows 50 queued jobs): the base Beat
+This! with step 1, 3a with 3b, step 4 while 3a still trains. One after another the steps take 7-8
+days; side by side about 5. A job's log is `slurm-<job name>-<job id>.out` in the repo folder.
 
 ---
 
@@ -53,11 +55,15 @@ plus the old `data/processed` kept as `data/processed_pre_v6`.
 
 ---
 
-## Step 1: fetch the new data (7 jobs, about a day: the YouTube downloads are slow on purpose)
+## Step 1: fetch the new data (7 jobs, about a day: the YouTube downloads are slow on purpose), and the base Beat This! (3 jobs)
 
 ```bash
 bash pace/v2_data.sh
+STAGE=base bash pace/v2_btft.sh            # Beat This! from scratch without ASAP: needs no v6 data
 ```
+
+The base model's fetch can fail on a compute node without internet (see step 3b): then fetch on the
+login node and submit `FETCHED=1 STAGE=base bash pace/v2_btft.sh`.
 
 **If YouTube asks to confirm you are not a bot** (`grep -l "not a bot" slurm-dyt*.out` finds it), export
 a `cookies.txt` from a browser logged in to YouTube (a "cookies.txt" browser extension), copy it to
@@ -121,11 +127,14 @@ again resumes it (finished runs are skipped).
 
 ---
 
-## Step 3b: our Beat This!, the base model (4 jobs, ~1 day; after 3a's jobs: together they are over the job limit)
+## Step 3b: our Beat This!, its data (1 job, a few hours; with 3a, right after it)
 
 ```bash
-bash pace/v2_btft.sh                       # FETCHED=1 bash pace/v2_btft.sh if you fetched by hand (below)
+bash pace/v2_btft.sh                       # the export; the base model from step 1 is kept (finished or queued)
 ```
+
+If step 1 did not start the base model, this submits it too (4 jobs, ~1 day; `FETCHED=1 bash
+pace/v2_btft.sh` if you fetched by hand, below).
 
 If compute nodes cannot reach Zenodo (`slurm-btfetch-*.out` shows connection errors), fetch on the
 login node in `tmux`, then submit with `FETCHED=1`:
@@ -147,7 +156,7 @@ resume it: `sbatch --gres=gpu:1 --constraint=cuda13 -c 16 --mem=96G -t 8:00:00 -
 
 ---
 
-## Step 4: the ten fine-tunes (8 jobs, ~1 day)
+## Step 4: the ten fine-tunes (8 jobs, ~1 day; as soon as 3b and the base model are done, 3a may still run)
 
 ```bash
 STAGE=finetune bash pace/v2_btft.sh
@@ -163,7 +172,7 @@ Fewer than 10: `STAGE=finetune bash pace/v2_btft.sh` again (finished ones are sk
 
 ---
 
-## Step 5: beats, meter models, whole pieces (8 jobs, ~2 days)
+## Step 5: beats, meter models, whole pieces (8 jobs, ~2 days; after step 4 and 3a's `nl_v6`)
 
 ```bash
 STAGE=use bash pace/v2_btft.sh

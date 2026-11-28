@@ -7,7 +7,8 @@ publish hook in pace/v2_jobs.sh).
 The Hub is a stand-in (a folder as the repo, with commits and tags), so nothing leaves the machine.
 Covers: the first run into an empty repo becomes the default; a worse run is archived only; the
 same run again changes nothing; a better one replaces the default (its history kept); --force; a
-meter model trained for PM2S, an unevaluated run, no login refused; the demo's update downloads only
+meter model trained for PM2S or for another tracker than the released Beat This! (our fine-tuned
+one), an unevaluated run, no login refused; the demo's update downloads only
 when the repo's default changed (and never the archive), survives being offline, and swaps the new
 models in; the batch jobs publish what they finish, PUBLISH=0 nothing.
 """
@@ -147,6 +148,13 @@ def test_publish():
         # refused: trained for PM2S, not tuned, not evaluated, not logged in
         pm = meter_run(runs, "meter_pm", {"clean": 0.9, "real": 0.9}, args={"tracked": "pm2s"})
         assert P.main(["--run", str(pm)] + repo, hub=hub) == 1
+        # refused: trained on our fine-tuned Beat This!'s beats (the demo tracks with the released one)
+        ft = meter_run(runs, "meter_ft", {"clean": 0.9, "real": 0.9}, args={"tracked": "beat_this_ft,beat_this_render_ft"})
+        assert P.main(["--run", str(ft)] + repo, hub=hub) == 1
+        assert "another tracker" in P.incompatible(ft, "meter")
+        # the released Beat This! on recordings and renders: the demo's own tracker, accepted
+        rb = meter_run(runs, "meter_rb", {"clean": 0.1, "real": 0.1}, args={"tracked": "beat_this,beat_this_render"})
+        assert P.incompatible(rb, "meter") is None
         nd = meter_run(runs, "meter_nd", {"clean": 0.9, "real": 0.9})
         (nd / "decode.json").unlink()
         assert P.main(["--run", str(nd)] + repo, hub=hub) == 1

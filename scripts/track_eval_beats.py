@@ -53,8 +53,9 @@ def main(argv=None, track=None):
             raise SystemExit(f"{what}: its piece {piece} was in the fine-tuning (fold {ms.pieces[piece]}): a leak")
         return str(ms.full)
     report = {}
-    audio = audio_files(Path(args.asap), Path(args.maestro))
-    for split in [s for s in args.splits.split(",") if s]:
+    splits = [s for s in args.splits.split(",") if s]
+    audio = audio_files(Path(args.asap), Path(args.maestro)) if splits else {}   # ASAP's recordings: only for its splits
+    for split in splits:
         d = Path(args.data) / split
         rep = d / "report.json"
         if not rep.exists():

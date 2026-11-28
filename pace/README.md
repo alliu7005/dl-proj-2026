@@ -903,21 +903,23 @@ cd ~/scratch/dl-proj-2026 && tar czf v2_compound.tgz configs/beat_noise_levels.j
 **Step by step, with the exact commands and a "done when" check for each: [V6_RUNBOOK.md](V6_RUNBOOK.md).**
 
 The last rounds build on each other: the models must not train on data or beats from a stage that
-has not run yet (e.g. a meter model on the released Beat This!'s beats when ours is meant). One
-stage at a time, each after the one before has finished (`squeue -u $USER` empty, its outputs there):
+has not run yet (e.g. a meter model on the released Beat This!'s beats when ours is meant). Each
+step after the ones in its "needs" have finished (their jobs gone from `squeue -u $USER`, their
+outputs there); steps that need different things run side by side (PACE allows 50 queued jobs):
 
 | step | command | makes | needs |
 |---|---|---|---|
 | 0 | once on the login node: `pip install yt-dlp pytorch-lightning`, `conda install -c conda-forge fluidsynth`, SoundFonts into `data/raw/soundfonts/` | the tools | - |
-| 1 | `bash pace/v2_data.sh` (4y, stage fetch) | PianoCoRe rows (more PERiScoPe, ATEPP / GiantMIDI-Piano, Aria-MIDI's new works); their YouTube recordings; every Gangqinpu recording | - |
+| 1 | `bash pace/v2_data.sh` (4y, stage fetch); and `STAGE=base bash pace/v2_btft.sh` (the base Beat This!, `bt_noasap`: needs no v6 data) | PianoCoRe rows (more PERiScoPe, ATEPP / GiantMIDI-Piano, Aria-MIDI's new works); their YouTube recordings; every Gangqinpu recording; Beat This!'s data without ASAP and `bt_noasap` | - |
 | 2 | `STAGE=build bash pace/v2_data.sh` | the recordings re-transcribed with Transkun; the **v6 data** (`data/processed`, the old kept as `data/processed_pre_v6`); the released Beat This! on every Gangqinpu recording | step 1 |
 | 3a | `STAGE=train bash pace/v2_data.sh` | the v6 labeller `nl_v6` (+ `_large`, `_noaria`) and meter models (`meter_v6*`, on the released Beat This!'s beats: the baseline) | step 2 |
-| 3b | `bash pace/v2_btft.sh` (4z, stage train) | Beat This!'s data without ASAP; the v6 data in its format (`data/beat_this_ft`); Beat This! from scratch without ASAP (`bt_noasap`) | step 2 (it refuses before) |
-| 4 | `STAGE=finetune bash pace/v2_btft.sh` | the plain and multi-task fine-tunes, each on every fold and with each fold left out (10 models) | step 3b |
+| 3b | `bash pace/v2_btft.sh` (4z, stage train), with 3a | the v6 data in its format (`data/beat_this_ft`); the base model too if step 1 did not start it (finished or queued, it is kept) | step 2 (it refuses before) |
+| 4 | `STAGE=finetune bash pace/v2_btft.sh` | the plain and multi-task fine-tunes, each on every fold and with each fold left out (10 models) | step 3b, `bt_noasap` (not 3a) |
 | 5 | `STAGE=use bash pace/v2_btft.sh` | both trackers' beats of every training performance (cross-fitted) and of the test recordings; `meter_v6_ft`, `meter_v6_ftm` trained on them; whole pieces | step 4; step 3a's `nl_v6` for its whole-piece scores |
 
-- 3a and 3b both need only step 2, but together they are 12 jobs, over PACE's limit: submit 3b once
-  3a's jobs have finished (or 3a once 3b's have).
+- The order with the most side by side: step 1 with the base model; step 2; 3a with 3b; step 4 as soon
+  as 3b and the base model are done (3a may still be training); step 5 once step 4 and 3a's `nl_v6` are.
+  One after another the steps take 7-8 days; this way about 5.
 - The labeller is trained once (3a): it never reads tracked beats (it trains on score grids with simulated
   tracker timing), so `nl_v6` serves all three trackers; the meter model is retrained for each.
 - 4x (`pace/v2_render.sh`, the released Beat This! on renders) is a separate experiment, not a step of this order.

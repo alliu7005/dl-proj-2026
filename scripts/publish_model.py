@@ -53,6 +53,9 @@ COND = {"meter": ("clean", "real", "periscope", "gangqinpu", "gangqinpu_real"),
 EVAL_FILES = {"meter": ("eval_meter.json", "decode.json"), "labeller": ("eval_pieces_best.json",),
               "seq2seq": ("eval_pieces_best.json",)}
 MIN_SHARED = 2
+# the trackers whose beats the demo gives the meter model: the released Beat This! (on a recording,
+# or on a render of a MIDI file); a meter trained on another tracker's beats reads them wrong
+DEMO_TRACKERS = {"beat_this", "beat_this_render"}
 
 
 def kind_of(run: Path) -> str:
@@ -67,8 +70,12 @@ def incompatible(run: Path, kind: str) -> str | None:
         return f"{run / 'best.pt'} not found"
     if kind == "meter":
         a = json.loads((run / "config.json").read_text()).get("args", {}) if (run / "config.json").exists() else {}
-        if a.get("tracked") == "pm2s" or a.get("aux", "none") not in (None, "none"):
+        tracked = {t for t in str(a.get("tracked") or "").split(",") if t and t != "none"}
+        if "pm2s" in tracked or a.get("aux", "none") not in (None, "none"):
             return "trained for PM2S's beats (the demo tracks with Beat This!)"
+        if tracked - DEMO_TRACKERS:   # e.g. our fine-tuned Beat This! (beat_this_ft): not the demo's tracker
+            return (f"trained for another tracker's beats ({', '.join(sorted(tracked - DEMO_TRACKERS))}; "
+                    "the demo tracks with the released Beat This!)")
         if not (run / "decode.json").exists():
             return "its decoder is not tuned yet (no decode.json: eval_meter.py --tune)"
     missing = [f for f in EVAL_FILES[kind][:1] if not (run / f).exists()]
