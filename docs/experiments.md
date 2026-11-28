@@ -1695,6 +1695,33 @@ two 3/4) all came from the jump fix (`src/readable.py fix_jumps`): without it ev
 - Both off by default; `pace/v2_simplicity.sh` (pace/README.md, 4ac) measures them, and the jump
   fix, on whole pieces, with how often the reference scores themselves use a rare rhythm.
 
+### Thirteenth round: results, and the fourteenth round's plan (2026-11-27)
+
+**Results** (`outputs/round13/report.md`; MUSTER, release 12.79 real / 15.01 clean / 4.13 Gangqinpu
+real / 4.52 Gangqinpu):
+- **A perfect meter model on the tracked beats** (`_og`): 11.41 / **14.04** / 4.00 / 3.90 (-1.4, -1.0
+  beyond chance, about 0 on Gangqinpu).
+- **The annotated beats and a perfect meter model** (`_ogt`): **8.98 / 8.97** / 3.76 / **3.29**: with
+  good beats v2 would be below seq2seq on ASAP (10.71 / 11.74) and far below it on pop. Most of what
+  v2 loses on ASAP is in the beats: ~2.4 of real's 3.8, ~5 of clean's 6 (clean: Beat This! on the
+  MIDI rendered to audio).
+- **The refinement loop** (`_rf`): -0.07 clean, nothing else. Dropped.
+- **The seq2seq system's grid** (`_s2g`): failed (an indexing bug in `score_grid`, fixed); rerun.
+- **Meter pretraining on Aria-MIDI (32k files, 30k steps):** the 12k pilot from it against from
+  scratch, (downbeat F + ts) / 2: real +0.041, PERiScoPe +0.033, Gangqinpu +0.009 / +0.008: **go**.
+  At 12k steps it matches or beats the 60k-step release on real ASAP (0.662 / 0.429 against 0.648 / 0.384).
+- **Round 11, meter scores:** every ensemble above the release on four of five test sets (real
+  ASAP: `ens3t` 0.660 / 0.412, `ens4` 0.655 / 0.427 against 0.648 / 0.384; clean ts 0.472 -> 0.553
+  with four models); PERiScoPe level. The release's seed is an average one.
+- **The duration chooser (round 12):** no gain (duration accuracy 0.866 -> 0.866 clean, 0.862 ->
+  0.860 real, 0.890 -> 0.882 PERiScoPe; on its selection set 0.877 against the labeller's 0.871).
+  The labeller already uses what its features measure. Shelved.
+
+**Fourteenth round** (`pace/v2_round14.sh`, pace/README.md 4ae), while the beat tracker is
+retrained on `model` (4z there): the pretrained meter's full recipe in three seeds and their
+ensemble; whether more pretraining data helps (~150k files); which beat errors cost the most (for
+both teams); the same pretraining for the labeller.
+
 ### Thirteenth round: plan (2026-11-27)
 
 `pace/v2_round13.sh` (pace/README.md, 4ab). Round 12's changes are each worth tenths of a MUSTER

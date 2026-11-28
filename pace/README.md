@@ -1028,6 +1028,26 @@ git pull && bash pace/v2_articulation.sh
 `outputs/articulation/report.md`: duration accuracy on the windows, rare rhythms against the
 reference scores, MUSTER paired, and a go / no go for `nl_gq`'s full recipe with it.
 
+## 4ae. Fourteenth round: pretrained meters, more pretraining data, beat errors, a pretrained labeller
+
+Round 13: a perfect meter model would gain ~1 MUSTER on ASAP, perfect beats as well ~4 (real) and 6
+(clean); the meter's Aria-MIDI pretraining lifted its 12k pilot on every real test set. Four
+experiments side by side (`pace/v2_round14.sh`, 19 jobs), none waiting for another:
+- **A:** `meter_v4_gq`'s full recipe from the pretraining, three seeds (`meter_v4_gq_ptr*`), their
+  ensembles (`_ens3`, `_ens3t`), whole pieces against the release and round 11's ensemble.
+- **B:** Aria-MIDI's deduped subset (~150k files), the pretraining on them (`meter_pt150`), the
+  12k pilot from it (`meter_v4_gq_pt150_p12k`) against round 13's from 32k files.
+- **C:** which beat-tracking errors cost the most (`scripts/beat_errors.py`, CPU):
+  `outputs/beat_errors/report.md`.
+- **D:** the labeller's masked-note pretraining (`scripts/pretrain_labeller.py`), `nl_gq`'s recipe for
+  20k steps from it (`nl_gq_ptl_p20k`) against the same from scratch (`nl_gq_p20k`, 4ad's).
+
+```bash
+git pull && bash pace/v2_round14.sh
+```
+
+`outputs/round14/report.md` (A, B, D) after `r4final`.
+
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 
 The grid is v2's bottleneck: the labeller's window onset F1 is 0.78-0.86 on the true grid and

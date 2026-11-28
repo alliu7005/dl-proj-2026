@@ -161,6 +161,9 @@ def main(argv=None):
     ap.add_argument("--eval-loss-windows", type=int, default=400)
     ap.add_argument("--eval-decode-windows", type=int, default=200)
     ap.add_argument("--max-steps", type=int, default=0)
+    ap.add_argument("--init", default=None,
+                    help="start from this checkpoint's encoder (scripts/pretrain_labeller.py; its config must match "
+                         "the one this run builds); the heads the checkpoint lacks start fresh")
     ap.add_argument("--articulation", type=float, default=0.0,
                     help="share of training windows played with another articulation (src/dataset.py articulate: "
                          "detached, legato, held, stretch by stretch): written lengths do not follow played ones")
@@ -256,6 +259,17 @@ def main(argv=None):
     elif (run / "last.pt").exists():
         raise SystemExit(f"{run} already has a checkpoint: use --resume, or a different --name")
     model = build_labeller(cfg).to(device)
+    if args.init and ck is None:   # a pretrained encoder (masked-note pretraining)
+        init = torch.load(args.init, map_location=device, weights_only=False)
+        keys = ("n_features", "d_model", "n_heads", "enc_layers", "ff", "max_notes", "context_before", "context_after")
+        diff = {k: (init["config"].get(k), cfg.get(k)) for k in keys if init["config"].get(k) != cfg.get(k)}
+        if diff:
+            raise SystemExit(f"--init {args.init}: its config differs from this run's: {diff}")
+        enc = {k: v for k, v in init["model"].items() if not k.startswith("head.")}
+        missing, unexpected = model.load_state_dict(enc, strict=False)
+        if unexpected or any(not k.startswith("head.") for k in missing):
+            raise SystemExit(f"--init {args.init}: does not fit (missing {missing}, unexpected {unexpected})")
+        print(f"started from {args.init}'s encoder (the heads start fresh)", flush=True)
     n_params = sum(p.numel() for p in model.parameters())
     decay = [p for p in model.parameters() if p.dim() >= 2]
     no_decay = [p for p in model.parameters() if p.dim() < 2]

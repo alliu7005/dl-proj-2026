@@ -53,6 +53,9 @@ def prep(args) -> int:
     files = sorted(Path(args.midi).glob("*.mid")) + sorted(Path(args.midi).glob("*.midi"))
     if args.max_files:
         files = files[: args.max_files]
+    if args.shard:   # "i/n": every n-th file from the i-th, for jobs side by side
+        i, n = (int(x) for x in args.shard.split("/"))
+        files = files[i::n]
     if not files:
         raise SystemExit(f"no MIDI files in {args.midi} (scripts/fetch_aria_midi.py)")
     import torch
@@ -144,8 +147,10 @@ def train(args) -> int:
     device = pick_device(args.device)
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
-    with open(args.data, "rb") as fh:
-        perfs = pickle.load(fh)
+    perfs = []
+    for part in args.data.split(","):   # shards of prep, joined
+        with open(part, "rb") as fh:
+            perfs += pickle.load(fh)
     if len(perfs) < 20:
         raise SystemExit(f"{args.data}: {len(perfs)} performances (prep first)")
     order = rng.permutation(len(perfs))
@@ -216,9 +221,10 @@ def main(argv=None):
     p.add_argument("--out", default="data/processed/meter/pretrain.pkl")
     p.add_argument("--max-files", type=int, default=0)
     p.add_argument("--min-beats", type=int, default=32)
+    p.add_argument("--shard", default="", help="i/n: this job's share of the files (every n-th from the i-th)")
     t = sub.add_parser("train")
     t.add_argument("--name", default="meter_pt")
-    t.add_argument("--data", default="data/processed/meter/pretrain.pkl")
+    t.add_argument("--data", default="data/processed/meter/pretrain.pkl", help="one store, or several joined by commas")
     t.add_argument("--runs-dir", default="outputs/runs")
     t.add_argument("--steps", type=int, default=30000)
     t.add_argument("--batch", type=int, default=32)

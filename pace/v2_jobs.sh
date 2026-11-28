@@ -130,6 +130,12 @@ meter_flags() {
     meter_v4_gq_rep_p12k) echo "--gangqinpu --gangqinpu-share 0.5 --rep-features --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     meter_v4_gq_tol_p12k) echo "--gangqinpu --gangqinpu-share 0.5 --tolerant --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     # meter_v4_gq_p12k's recipe from the masked-beat pretraining on Aria-MIDI (scripts/pretrain_meter.py)
+    # round 14: meter_v4_gq's full recipe from the Aria-MIDI pretraining, three seeds (an ensemble of them),
+    # and the pilot's 12k recipe from a pretraining on ~150k files (Aria-MIDI deduped) instead of 32k
+    meter_v4_gq_ptr) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
+    meter_v4_gq_ptr_s1) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --seed 1" ;;
+    meter_v4_gq_ptr_s2) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --seed 2" ;;
+    meter_v4_gq_pt150_p12k) echo "--init outputs/runs/meter_pt150/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     meter_v4_gq_pt_p12k) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     meter_v4_gq_syn_p12k) echo "--gangqinpu --gangqinpu-share 0.5 --synthetic --synthetic-share 0.25 --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     # meter_v4_gq's recipe with other seeds (pace/v2_ensemble.sh: the seed spread, and members of an ensemble)
@@ -169,6 +175,8 @@ nl_flags() {
     # articulation pilot (pace/v2_articulation.sh): nl_gq's recipe for 20k steps, without and with half the
     # training windows played with another articulation (src/dataset.py articulate)
     nl_gq_p20k) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5 --max-steps 20000" ;;
+    # round 14: nl_gq_p20k's recipe from the masked-note pretraining on Aria-MIDI (scripts/pretrain_labeller.py)
+    nl_gq_ptl_p20k) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5 --max-steps 20000 --init outputs/runs/nl_pt/best.pt" ;;
     nl_gq_art_p20k) echo "--size base --grid-noise 0.8 --gangqinpu-share 0.5 --max-steps 20000 --articulation 0.5" ;;
     # nl_gq's recipe, the training notes whose written split the performance contradicts left out of
     # the loss (src/notelabels.py contradicted; scripts/audit_labels.py)
