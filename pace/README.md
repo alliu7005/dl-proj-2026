@@ -1048,6 +1048,25 @@ git pull && bash pace/v2_round14.sh
 
 `outputs/round14/report.md` (A, B, D) after `r4final`.
 
+## 4af. Fifteenth round: the release candidate on PM2S's beats
+
+Round 9's stably retrained PM2S (`pm2s_hos`) with its meter model (`meter_v4_gq_pmhs`) beat the
+release by 2.3 MUSTER on real ASAP and 4.3 on clean MIDI; round 12's seq2seq with Gangqinpu
+(`sf_c128_gq30`) beat it everywhere. Four experiments side by side (`pace/v2_round15.sh`, 12 jobs;
+every PM2S job gets `PM2S_WEIGHTS` / `PM2S_TAG=hos`):
+- **A:** the candidate, no training: `nl_gq+meter_v4_gq_pmhs:tidy,d95,jf,pm,rpm` (and d80 on clean).
+- **B:** its meter from the Aria-MIDI pretraining, three seeds (`meter_v4_gq_pmhs_ptr*`), their
+  ensemble (`_ptr_ens3`) and the four with `meter_v4_gq_pmhs` (`meter_v4_gq_pmhs_ens4`), each in A.
+- **C:** seq2seq given PM2S's beats of the notes (`sf_c128_gq30:meter:spm`; system `_spm_hos`).
+- **D:** v2 on the new seq2seq's grid (`s2gq`: `--grid seq2seq --grid-run sf_c128_gq30`).
+
+```bash
+git pull && bash pace/v2_round15.sh
+```
+
+`outputs/round15/report.md` after `r5final`: each against the release and against seq2seq, and the
+best system per condition.
+
 ## 4v. Eleventh round: meter ensembles (any time after 4q)
 
 The grid is v2's bottleneck: the labeller's window onset F1 is 0.78-0.86 on the true grid and

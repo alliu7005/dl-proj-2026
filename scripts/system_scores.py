@@ -65,6 +65,7 @@ BEAT_SUFFIX = {"synth": "", "audio": "_ab", "pm2s": "_pm"}       # v2 on clean M
 # v2's grid (src/grid_sources.py): the meter model's; a perfect meter model on the tracked beats where the
 # ground truth reaches; the annotated beats with it; the seq2seq system's score aligned to the performance
 GRID_SUFFIX = {"meter": "", "oracle": "_og", "oracle_beats": "_ogt", "seq2seq": "_s2g"}
+GRID_RUN = "sf_base_reg_cab_c128"   # --grid seq2seq's run by default; another one is named after _s2g
 GT_SPLITS = ("test", "test_transcribed", "test_gangqinpu")       # data/processed/meter/<split>.pkl
 GANGQINPU = ("gangqinpu", "gangqinpu_real")   # scripts/gangqinpu_inputs.py: the recording's beats, as real
 REAL_SUFFIX = {"audio": "", "pm2s": "_rpm", "synth": "_rsb"}     # v2 on the real transcriptions (and Gangqinpu's)
@@ -76,7 +77,7 @@ def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, cle
                 fix_jumps: bool = False, timing_beats: bool = False, beat_decode: bool = False,
                 pkspell: bool = False, engraving: bool = False, swing: bool = False,
                 dur_chooser: bool = False, grid: str = "meter", refine: float = 0.0, simplicity: float = 0.0,
-                simplify: bool = False) -> str:
+                simplify: bool = False, grid_run: str = "sf_base_reg_cab_c128", seq_beats: str = "default") -> str:
     """The folder (and table row) of a system under outputs/system_eval (v2 with another deletion
     threshold: _d<percent>, _keepall for none; with tidied written lengths: _tidy; glissandos written
     as glissandos: _gl; triplets the timing contradicts made straight: _tc; beats the timing says are straight: _tb;
@@ -91,7 +92,8 @@ def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, cle
                 + ("_tc" if timing_check else "") + ("_tb" if timing_beats else "") + ("_rd" if readable else "") + ("_jf" if fix_jumps else "")
                 + ("_bd" if beat_decode else "")
                 + ("_ps" if pkspell else "") + ("_eg" if engraving else "") + ("_sw" if swing else "")
-                + ("_dc" if dur_chooser else "") + GRID_SUFFIX[grid] + ("_rf" if refine else "")
+                + ("_dc" if dur_chooser else "") + GRID_SUFFIX[grid]
+                + (f"_{grid_run}" if grid == "seq2seq" and grid_run != GRID_RUN else "") + ("_rf" if refine else "")
                 + (f"_sp{round(simplicity * 10)}" if simplicity else "") + ("_sl" if simplify else "")
                 + BEAT_SUFFIX[clean_beats]
                 + REAL_SUFFIX[real_beats])
@@ -99,7 +101,11 @@ def system_name(run: str | None, mode: str, midi_beats: str, v2: str | None, cle
             from src.pm2s_beats import tagged
             name = tagged(name)
         return name
-    return f"{run}_{mode}" + ("_sb" if midi_beats == "synth" else "")
+    name = f"{run}_{mode}" + ("_sb" if midi_beats == "synth" else "")
+    if seq_beats == "pm2s":   # seq2seq given PM2S's beats of the notes on every input (_spm, the weights' tag)
+        from src.pm2s_beats import tagged
+        name = tagged(name + "_spm")
+    return name
 
 
 def main(argv=None):
@@ -112,6 +118,9 @@ def main(argv=None):
     ap.add_argument("--midi-beats", default="none", choices=["none", "synth"],
                     help="seq2seq beat models on clean MIDI: no beats (as the demo's MIDI input), or Beat This! "
                          "on the MIDI rendered to audio (v2 always gets those)")
+    ap.add_argument("--seq-beats", default="default", choices=["default", "pm2s"],
+                    help="seq2seq beat models: the default beats (Beat This! on the recording, on clean MIDI as "
+                         "--midi-beats says), or PM2S on the input's notes everywhere (system _spm)")
     ap.add_argument("--clean-beats", default="synth", choices=list(BEAT_SUFFIX),
                     help="v2 on clean MIDI: Beat This! on the MIDI rendered to audio, on the performance's real "
                          "recording (only the performances that have one), or PM2S on the MIDI's notes")
@@ -159,7 +168,7 @@ def main(argv=None):
                          "labeller's choice (src/labeller.py rhythm_complexity); its own system (_sp<10x>)")
     ap.add_argument("--simplify-lengths", action="store_true",
                     help="v2: rare written lengths made plain (src/readable.py simplify_lengths); its own system (_sl)")
-    ap.add_argument("--grid-run", default="sf_base_reg_cab_c128", help="--grid seq2seq: the seq2seq run (meter mode)")
+    ap.add_argument("--grid-run", default=GRID_RUN, help="--grid seq2seq: the seq2seq run (meter mode)")
     ap.add_argument("--meter-data", default="data/processed/meter", help="--grid oracle*: the ground truth")
     ap.add_argument("--fix-jumps", action="store_true",
                     help="v2: a bar the meter decoder stretched with a jump shortened instead (src/readable.py, the "
@@ -180,6 +189,8 @@ def main(argv=None):
     ap.add_argument("--only-missing", action="store_true",
                     help="only the inputs this system has no score for yet (e.g. after an export fix)")
     args = ap.parse_args(argv)
+    if args.seq_beats != "default" and args.v2:
+        raise SystemExit("--seq-beats is for seq2seq (--run); v2 takes --clean-beats / --real-beats")
     if (args.clean_beats != "synth" or args.real_beats != "audio") and not args.v2:
         raise SystemExit(f"--clean-beats {args.clean_beats} / --real-beats {args.real_beats} are for v2 (--v2)")
     entries = [e for e in json.loads(Path(args.manifest).read_text()) if e["condition"] in args.conditions.split(",")]
@@ -223,7 +234,8 @@ def main(argv=None):
     system = system_name(args.run, args.mode, args.midi_beats, args.v2, args.clean_beats, args.delete_above,
                          args.tidy, args.real_beats, args.glissando, args.timing_check, args.readable, args.fix_jumps,
                          args.timing_beats, args.beat_decode, args.pkspell, args.engraving, args.swing,
-                         args.dur_chooser, args.grid, args.refine, args.simplicity, args.simplify_lengths)
+                         args.dur_chooser, args.grid, args.refine, args.simplicity, args.simplify_lengths,
+                         args.grid_run, args.seq_beats)
     out = Path(args.out) / system
     # the summary covers every piece in the folder: pieces not run now (another --conditions, or
     # --only-missing) keep their entries from before
@@ -275,7 +287,11 @@ def main(argv=None):
         beats, kw = None, {}
         real_like = e["condition"] == "real" or e["condition"] in GANGQINPU
         pm2s = (args.real_beats if real_like else args.clean_beats) == "pm2s"
-        if pm2s:  # tracked from the notes by the pipeline
+        if not args.v2 and args.seq_beats == "pm2s":   # PM2S on the notes, given to the seq2seq model
+            if wants_beats:
+                from src.preprocessing.performance import load_performance
+                beats = pipe.pm2s_beats(load_performance(e["midi"])[0])
+        elif pm2s:  # tracked from the notes by the pipeline
             kw = {"beat_source": "pm2s"}
         elif real_like and args.real_beats == "synth":   # the MIDI rendered and tracked by the pipeline itself
             kw = {"beat_checkpoint": "final0"}

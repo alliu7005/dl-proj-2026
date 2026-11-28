@@ -80,6 +80,7 @@ scripts/train_dur_chooser.py     the duration chooser for a labeller: trained on
 scripts/articulation_report.py   the articulation pilot: window duration accuracy, rare rhythms, MUSTER -> outputs/articulation
 scripts/simplicity_report.py     simpler rhythms: rare rhythms against the reference scores, MUSTER, duration error -> outputs/simplicity
 scripts/round14_report.py        the fourteenth round's report: pretrained meters and ensembles, more pretraining data, a pretrained labeller -> outputs/round14
+scripts/round15_report.py        the fifteenth round's report: the candidate on PM2S's beats, its pretrained meters, seq2seq with PM2S, v2 on seq2seq's grid -> outputs/round15
 scripts/pretrain_labeller.py     masked-note pretraining of the labeller's encoder on unlabelled MIDI -> outputs/runs/nl_pt (train_labeller.py --init)
 scripts/beat_errors.py           which beat-tracking errors cost v2 the most (missed, extra, off-beat, level) -> outputs/beat_errors
 scripts/round13_report.py        the thirteenth round's report: the grid's worth, meter pretraining -> outputs/round13
@@ -119,6 +120,7 @@ pace/v2_pilot.sh                 v2 pilot: ensembles of trained models, syntheti
 pace/v2_articulation.sh          articulation pilot: nl_gq's recipe 20k steps without / with the articulation augmentation (5 jobs)
 pace/v2_simplicity.sh            simpler rhythms: the complexity penalty, plain lengths, the jump fix, on whole pieces (4 jobs)
 pace/v2_round14.sh               fourteenth round: pretrained meters (full, ensembled), more pretraining data, beat errors, a pretrained labeller (19 jobs)
+pace/v2_round15.sh               fifteenth round: the release candidate on PM2S's beats, its meter pretrained, seq2seq with PM2S, v2 on seq2seq's grid (12 jobs)
 pace/v2_round13.sh               thirteenth round: the grid's worth (_og, _ogt, _s2g, _rf) and meter pretraining on Aria-MIDI
 pace/v2_round12.sh               twelfth round: round 11, the duration chooser and new defaults, seq2seq with Gangqinpu, round 9, one stage after another
 pace/v2_headroom.sh              headroom tests: the labeller's top-k oracle and the meter's alternatives oracle (4 jobs)
@@ -150,6 +152,7 @@ tests/test_synthetic.py          synthetic performances: rendering a written sco
 tests/test_articulation.py       the articulation augmentation, its flag and recipes, pace/v2_articulation.sh
 tests/test_simplicity.py         rhythm complexity, the penalty, plain lengths, the report's counts, pace/v2_simplicity.sh
 tests/test_round14.py            the labeller's pretraining and --init, joined meter stores, beat errors, the recipes, the report, pace/v2_round14.sh
+tests/test_round15.py            the PM2S meters' recipes, the systems' names (_spm, _s2g_<run>), the report, pace/v2_round15.sh
 tests/test_grid_sources.py       grid sources, the refinement loop, their systems, meter pretraining, pace/v2_round13.sh
 tests/test_dur_chooser.py        the duration chooser's features, training, use in placed_notes and V2Pipeline, the _dc system, the new defaults, pace/v2_round12.sh
 tests/test_headroom.py           headroom tests: the top-k oracle, the alternative grids and their per-stretch scores, pace/v2_headroom.sh

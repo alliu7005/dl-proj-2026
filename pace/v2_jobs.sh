@@ -84,7 +84,7 @@ NEW_NLS=${NEW_NLS-"nl_base_gn nl_base_gn_s1"}
 GRIDS_OLD=${GRIDS_OLD-"meter_v2_nonote"}
 GRIDS_REEVAL=${GRIDS_REEVAL-"meter_v2_nonote meter_v2 meter_v2_s1 meter_v2_asap meter_base"}
 MAX_HOURS=${MAX_HOURS:-7.5}
-PM2S_RUNS=${PM2S_RUNS-"meter_v4_gq_pm meter_v4_gq_pmho meter_v4_gq_pmhs"}   # meter runs trained for PM2S's beats (the trackers task tests them with PM2S)
+PM2S_RUNS=${PM2S_RUNS-"meter_v4_gq_pm meter_v4_gq_pmho meter_v4_gq_pmhs meter_v4_gq_pmhs_ptr meter_v4_gq_pmhs_ptr_s1 meter_v4_gq_pmhs_ptr_s2 meter_v4_gq_pmhs_ptr_ens3 meter_v4_gq_pmhs_ens4"}   # meter runs trained for PM2S's beats (the trackers task tests them with PM2S)
 SEQ_MODES=${SEQ_MODES:-"oracle,none,guarded,meter"}
 SEQ_CONDITIONS=${SEQ_CONDITIONS:-"clean,synthetic,real,periscope"}
 EVAL_CONDITIONS=${EVAL_CONDITIONS:-"clean,synthetic,real,periscope,gangqinpu,gangqinpu_real"}   # labellers on meter grids
@@ -135,6 +135,11 @@ meter_flags() {
     meter_v4_gq_ptr) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     meter_v4_gq_ptr_s1) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --seed 1" ;;
     meter_v4_gq_ptr_s2) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json --seed 2" ;;
+    # round 15: meter_v4_gq_pmhs (for the stably retrained PM2S's beats, pace/v2_pm2s2.sh) from the
+    # Aria-MIDI pretraining, three seeds (an ensemble of them); run with PM2S_WEIGHTS / PM2S_TAG=hos
+    meter_v4_gq_pmhs_ptr) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_hos.json --real-beats simulated --tracked pm2s --tracked-share 0.5" ;;
+    meter_v4_gq_pmhs_ptr_s1) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_hos.json --real-beats simulated --tracked pm2s --tracked-share 0.5 --seed 1" ;;
+    meter_v4_gq_pmhs_ptr_s2) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 60000 --patience 8 --beat-noise configs/beat_noise_pm2s_hos.json --real-beats simulated --tracked pm2s --tracked-share 0.5 --seed 2" ;;
     meter_v4_gq_pt150_p12k) echo "--init outputs/runs/meter_pt150/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     meter_v4_gq_pt_p12k) echo "--init outputs/runs/meter_pt/best.pt --gangqinpu --gangqinpu-share 0.5 --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
     meter_v4_gq_syn_p12k) echo "--gangqinpu --gangqinpu-share 0.5 --synthetic --synthetic-share 0.25 --steps 12000 --eval-every 2000 --patience 0 --tracked beat_this --tracked-share 0.5 --beat-noise-gangqinpu configs/beat_noise_bt_gangqinpu.json" ;;
@@ -157,7 +162,7 @@ meter_eval_flags() {  # how a finished meter run is tuned before its evaluation
     # its decoder tuned for the tracker it was trained for (tested with it by the trackers task)
     meter_v4_gq_pm|meter_v4_gq_pm_s1|meter_v4_gq_pm_g30) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s.json" ;;
     meter_v4_gq_pmho) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_ho.json" ;;
-    meter_v4_gq_pmhs) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_hos.json" ;;
+    meter_v4_gq_pmhs|meter_v4_gq_pmhs_ptr|meter_v4_gq_pmhs_ptr_s1|meter_v4_gq_pmhs_ptr_s2) echo "--tune --tempo-prior --tune-noise configs/beat_noise_pm2s_hos.json" ;;
     *) echo "--tune" ;;
   esac
 }
@@ -226,6 +231,7 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
       og) out="$out --grid oracle" ;;
       ogt) out="$out --grid oracle_beats" ;;
       s2g) out="$out --grid seq2seq" ;;
+      s2gq) out="$out --grid seq2seq --grid-run sf_c128_gq30" ;;   # round 12's seq2seq with Gangqinpu
       rf) out="$out --refine 1" ;;
       sl) out="$out --simplify-lengths" ;;
       sp[0-9]*) out="$out --simplicity $(awk "BEGIN{print ${o#sp} / 10}")" ;;
@@ -235,7 +241,7 @@ v2_flags() {  # the options after a v2 spec's colon -> system_scores.py flags
       rpm) out="$out --real-beats pm2s" ;;
       rsb) out="$out --real-beats synth" ;;
       d[0-9]*) out="$out --delete-above 0.${o#d}" ;;
-      *) echo "unknown v2 option $o (tidy, gl, tc, tb, bd, rd, jf, ps, eg, sw, dc, og, ogt, s2g, rf, sl, sp<10x>, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
+      *) echo "unknown v2 option $o (tidy, gl, tc, tb, bd, rd, jf, ps, eg, sw, dc, og, ogt, s2g, s2gq, rf, sl, sp<10x>, d<percent>, keepall, missing, pm, rpm, rsb)" >&2; return 1 ;;
     esac
   done
   echo "$out"
@@ -321,8 +327,9 @@ case "$task" in
     done
     python scripts/make_ensemble.py --name "$e" --views "$v" --members "$@" || exit 1
     # ENS_KIND=pm2s: members trained for the released PM2S's beats (meter_v4_gq_pm...): tuned with its
-    # errors and tested with its beats, as meter_eval_flags / the trackers task do for them
-    tune="--tune --tempo-prior"; [ "${ENS_KIND:-bt}" = pm2s ] && tune="$tune --tune-noise configs/beat_noise_pm2s.json"
+    # errors and tested with its beats, as meter_eval_flags / the trackers task do for them (ENS_NOISE:
+    # another PM2S's fitted errors, configs/beat_noise_pm2s_hos.json for the stably retrained one)
+    tune="--tune --tempo-prior"; [ "${ENS_KIND:-bt}" = pm2s ] && tune="$tune --tune-noise ${ENS_NOISE:-configs/beat_noise_pm2s.json}"
     if [ ! -f "outputs/runs/$e/eval_meter.json" ] || [ ! -f "outputs/runs/$e/decode.json" ]; then
       # shellcheck disable=SC2086
       python scripts/eval_meter.py --run "$e" $tune || exit 1   # as its members (meter_eval_flags)
@@ -377,6 +384,9 @@ case "$task" in
         *:*:sb) r=${spec%%:*}; rest=${spec#*:}
                 seq_ready "$r" || { ok=1; continue; }
                 python scripts/system_scores.py --run "$r" --mode "${rest%%:*}" --midi-beats synth $SYS_ARGS || ok=1 ;;
+        *:*:spm) r=${spec%%:*}; rest=${spec#*:}   # PM2S's beats of the notes on every input (PM2S_WEIGHTS / PM2S_TAG)
+                 seq_ready "$r" || { ok=1; continue; }
+                 python scripts/system_scores.py --run "$r" --mode "${rest%%:*}" --seq-beats pm2s $SYS_ARGS || ok=1 ;;
         *:*) seq_ready "${spec%%:*}" || { ok=1; continue; }
              python scripts/system_scores.py --run "${spec%%:*}" --mode "${spec##*:}" $SYS_ARGS || ok=1 ;;
         *) echo "unknown system $spec"; ok=1 ;;

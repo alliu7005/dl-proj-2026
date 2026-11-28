@@ -1695,6 +1695,38 @@ two 3/4) all came from the jump fix (`src/readable.py fix_jumps`): without it ev
 - Both off by default; `pace/v2_simplicity.sh` (pace/README.md, 4ac) measures them, and the jump
   fix, on whole pieces, with how often the reference scores themselves use a rare rhythm.
 
+### Rounds 11-14 and round 9's PM2S: results, and the fifteenth round's plan (2026-11-28)
+
+**Results** (MUSTER; the release `v2_nl_gq_meter_v4_gq_d95_tidy` 12.79 real / 15.01 clean / 4.13
+Gangqinpu real / 4.52 Gangqinpu; differences paired over pieces, bold beyond chance):
+- **seq2seq with Gangqinpu** (`sf_c128_gq30`, round 12): 10.18 / 11.45 / 3.87 / 3.98: -3.8 / -3.7 on
+  Gangqinpu against the seq2seq before it, and below the release on every condition (**-2.61**,
+  **-3.56**, -0.26, **-0.53**). The system to beat.
+- **PM2S retrained stably + its meter model** (`meter_v4_gq_pmhs`, round 9, `_pm_rpm_hos`): **-2.33**
+  real, **-4.29** clean, **-0.33** / **-0.81** Gangqinpu: the largest v2 gain measured. Its beats on
+  the ASAP test inputs: beat F 0.77 against Beat This!'s 0.71 (real) and 0.58 (clean, rendered),
+  tempo-octave errors 0.12 against 0.33.
+- **Which beat errors cost** (`outputs/beat_errors/report.md`): the beats cost the release +2.4 on real
+  and +5.1 on clean given a perfect meter model; on real, the 6 of 24 performances Beat This! tracked
+  at double tempo cost 4.1 each (42% of the total) against 1.6 at the right level; on clean even
+  right-level tracking of the rendered MIDI misses ~40% of the beats. PM2S answers both.
+- **Meter ensembles** (round 11): `ens3t` **-0.90** real, level elsewhere. **Pretrained meters**
+  (round 14): `meter_v4_gq_ptr` **-0.96** real; the pretrained ensemble `ptr_ens3` -0.93 real, **-0.18**
+  / **-0.32** Gangqinpu; level with round 11's ensemble.
+- **Stretched bars shortened** (`_jf`): **-0.13** / **-0.05** / **-0.02** / **-0.03**: better everywhere.
+- **No gain:** the duration chooser (mixed), one meter + swing (level; kept as defaults for
+  readability), the refinement loop (-0.07 clean only), the timing check (`_tc`, **+0.45** real),
+  more pretraining data (150k files: no go), the labeller's pretraining (**+0.13** Gangqinpu),
+  articulation augmentation (no go).
+- **Simpler rhythms** (`_sp10`, `_sp20`, `_sl`): worse beyond chance almost everywhere (+0.3 to +1.2).
+  On ASAP v2 already writes fewer rare rhythms than the reference scores (16% of onsets against 20%
+  real): Lemon's are not typical. Kept as an option, off by default.
+
+**Fifteenth round** (`pace/v2_round15.sh`, pace/README.md 4af): the release candidate on PM2S's beats
+(`nl_gq + meter_v4_gq_pmhs`, tidy, d95, `_jf`; d80 for MIDI input), its meter from the Aria-MIDI
+pretraining (three seeds, ensembles, with and without `meter_v4_gq_pmhs`), seq2seq given PM2S's
+beats (`_spm`), and v2 on the new seq2seq's grid (`_s2g_sf_c128_gq30`), all against `sf_c128_gq30`.
+
 ### Thirteenth round: results, and the fourteenth round's plan (2026-11-27)
 
 **Results** (`outputs/round13/report.md`; MUSTER, release 12.79 real / 15.01 clean / 4.13 Gangqinpu
